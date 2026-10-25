@@ -1,0 +1,98 @@
+{
+  "de_mirage": {
+    "name": "de_mirage",
+    "displayName": "Mirage",
+    "radar": "/maps/de_mirage.png",
+    "posX": -3230.0,
+    "posY": 1713.0,
+    "scale": 5.0,
+    "radarSize": 1024,
+    "sourceVersion": "2000935"
+  },
+  "de_inferno": {
+    "name": "de_inferno",
+    "displayName": "Inferno",
+    "radar": "/maps/de_inferno.png",
+    "posX": -2087.0,
+    "posY": 3870.0,
+    "scale": 4.9,
+    "radarSize": 1024,
+    "sourceVersion": "2000935"
+  },
+  "de_dust2": {
+    "name": "de_dust2",
+    "displayName": "Dust II",
+    "radar": "/maps/de_dust2.png",
+    "posX": -2476.0,
+    "posY": 3239.0,
+    "scale": 4.4,
+    "radarSize": 1024,
+    "sourceVersion": "2000935"
+  },
+  "de_nuke": {
+    "name": "de_nuke",
+    "displayName": "Nuke",
+    "radar": "/maps/de_nuke.png",
+    "posX": -3453.0,
+    "posY": 2887.0,
+    "scale": 7.0,
+    "radarSize": 1024,
+    "sourceVersion": "2000935",
+    "lowerRadar": "/maps/de_nuke_lower.png",
+    "lowerMaxZ": -495.0
+  },
+  "de_ancient": {
+    "name": "de_ancient",
+    "displayName": "Ancient",
+    "radar": "/maps/de_ancient.png",
+    "posX": -2953.0,
+    "posY": 2164.0,
+    "scale": 5.0,
+    "radarSize": 1024,
+    "sourceVersion": "2000935"
+  },
+  "de_anubis": {
+    "name": "de_anubis",
+    "displayName": "Anubis",
+    "radar": "/maps/de_anubis.png",
+    "posX": -2796.0,
+    "posY": 3328.0,
+    "scale": 5.22,
+    "radarSize": 1024,
+    "sourceVersion": "2000935"
+  },
+  "de_vertigo": {
+    "name": "de_vertigo",
+    "displayName": "Vertigo",
+    "radar": "/maps/de_vertigo.png",
+    "posX": -3168.0,
+    "posY": 1762.0,
+    "scale": 4.0,
+    "radarSize": 1024,
+    "sourceVersion": "2000935",
+    "lowerRadar": "/maps/de_vertigo_lower.png",
+    "lowerMaxZ": 11700.0
+  },
+  "de_overpass": {
+    "name": "de_overpass",
+    "displayName": "Overpass",
+    "radar": "/maps/de_overpass.png",
+    "posX": -4831.0,
+    "posY": 1781.0,
+    "scale": 5.2,
+    "radarSize": 1024,
+    "sourceVersion": "2000935"
+  },
+  "de_train": {
+    "name": "de_train",
+    "displayName": "Train",
+    "radar": "/maps/de_train.png",
+    "posX": -2308.0,
+    "posY": 2078.0,
+    "scale": 4.082077,
+    "radarSize": 1024,
+    "sourceVersion": "2000935",
+    "lowerRadar": "/maps/de_train_lower.png",
+    "lowerMaxZ": -50.0
+  }
+}

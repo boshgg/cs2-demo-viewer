@@ -1,0 +1,267 @@
+[
+  {
+    "name": "ak47",
+    "source": "cs2/panorama/images/icons/equipment/ak47.svg",
+    "sha256": "2812bb5b66130ff364933dcb6f45e0226b674d790986eb9b445eac846e8d2187"
+  },
+  {
+    "name": "armor_helmet",
+    "source": "cs2/panorama/images/icons/equipment/armor_helmet.svg",
+    "sha256": "4cdb75826f491bffb97bd9c7ac77ebecb90754a188384d37434b00a89b43f025"
+  },
+  {
+    "name": "aug",
+    "source": "cs2/panorama/images/icons/equipment/aug.svg",
+    "sha256": "332c4b02223fb8fda4c6f7652535357f92fb9f0750286f563ef6c48ff48e2588"
+  },
+  {
+    "name": "awp",
+    "source": "cs2/panorama/images/icons/equipment/awp.svg",
+    "sha256": "212405757534e84eeff25f2dd8bc0cd2df6e97ad58a08b01e9c602014bf4a536"
+  },
+  {
+    "name": "bizon",
+    "source": "cs2/panorama/images/icons/equipment/bizon.svg",
+    "sha256": "7787b16d8d9620525f6f616e1b0d002f7a4eb18ea9e6ef1218e4fd6398d3a11f"
+  },
+  {
+    "name": "blind_kill",
+    "source": "cs2/panorama/images/hud/deathnotice/blind_kill.svg",
+    "sha256": "7ba97856159fbafb031c6868722bd7d0b1927a69a1f073986d88472130a5f651"
+  },
+  {
+    "name": "c4",
+    "source": "cs2/panorama/images/icons/equipment/c4.svg",
+    "sha256": "d5d6ee8b101e92e49f3d46ec027b2d61a2c0a49145d5eb2db57aa7ea560fc755"
+  },
+  {
+    "name": "cz75a",
+    "source": "cs2/panorama/images/icons/equipment/cz75a.svg",
+    "sha256": "1d384942ee798a901e7d813b54eefa2eb87cf7f0e7768810bbf73c85ea983b0c"
+  },
+  {
+    "name": "deagle",
+    "source": "cs2/panorama/images/icons/equipment/deagle.svg",
+    "sha256": "6a8893ec370ad1bdf242d72011b69cd3f301ce26020b7057838a66157ad36ff5"
+  },
+  {
+    "name": "decoy",
+    "source": "cs2/panorama/images/icons/equipment/decoy.svg",
+    "sha256": "57aa96423dd5155a22608e99423082df557984974f66e19c4a04e5ab9af69e8b"
+  },
+  {
+    "name": "defuser",
+    "source": "cs2/panorama/images/icons/equipment/defuser.svg",
+    "sha256": "41f348ca1dfb03e09118ed1e9e27c4b8d4c3b779da81dd1079d228df40c1b408"
+  },
+  {
+    "name": "elite",
+    "source": "cs2/panorama/images/icons/equipment/elite.svg",
+    "sha256": "4e9cba2252d3f43e5b83356a516b992d3f95e3d8650b55564c4d365d171dc6b3"
+  },
+  {
+    "name": "famas",
+    "source": "cs2/panorama/images/icons/equipment/famas.svg",
+    "sha256": "43c668a4d37f2d88888674282c95bda024a3b85214be4c1b8fa97b51557551e2"
+  },
+  {
+    "name": "fiveseven",
+    "source": "cs2/panorama/images/icons/equipment/fiveseven.svg",
+    "sha256": "a72d5f3d6f2effd9dbb54f01635e05924c5c6dfdf8bf65cd4ae671d7aa4c41d4"
+  },
+  {
+    "name": "flashbang",
+    "source": "cs2/panorama/images/icons/equipment/flashbang.svg",
+    "sha256": "a2b6d5bc726b4af9eb2f64dc2b484e14b752a25dd5cbb93e3385e8189d50e267"
+  },
+  {
+    "name": "g3sg1",
+    "source": "cs2/panorama/images/icons/equipment/g3sg1.svg",
+    "sha256": "4c76bea474cf9fb89708c5322a7fbac81e7e5f6e140a1cfa81594bb61695b6e2"
+  },
+  {
+    "name": "galilar",
+    "source": "cs2/panorama/images/icons/equipment/galilar.svg",
+    "sha256": "5bddaffe527fb3c1017fb897c725b09cd3dc78357de201ee303e1765b05ebb77"
+  },
+  {
+    "name": "glock",
+    "source": "cs2/panorama/images/icons/equipment/glock.svg",
+    "sha256": "db94db30062ee03fb20b33dcc82cc9b7c66af1ff1918276769ebe6abc818d86a"
+  },
+  {
+    "name": "headshot",
+    "source": "cs2/panorama/images/hud/deathnotice/icon_headshot.svg",
+    "sha256": "1f21a22505be34f863a779dc7845de3981fb6a5f1613b9c4b2a2ad6943c3bf0a"
+  },
+  {
+    "name": "hegrenade",
+    "source": "cs2/panorama/images/icons/equipment/hegrenade.svg",
+    "sha256": "d75af11ab6909e84005a61d5a93d02ef33c3999cde17b8bf8de8a1fff0e0b694"
+  },
+  {
+    "name": "helmet",
+    "source": "cs2/panorama/images/icons/equipment/helmet.svg",
+    "sha256": "49898038c3599a80641894e7a9bd8d0c67b4217e5da1898d4f1931fac5b1ac21"
+  },
+  {
+    "name": "hkp2000",
+    "source": "cs2/panorama/images/icons/equipment/hkp2000.svg",
+    "sha256": "defd5f95682412e1ff3610f9869aceb6aeb66017fb233c4b61edd660eadb2384"
+  },
+  {
+    "name": "incgrenade",
+    "source": "cs2/panorama/images/icons/equipment/incgrenade.svg",
+    "sha256": "81b74b9af559ca2cc0e1b936ace1307fb152be0366467393da3c18baa937075d"
+  },
+  {
+    "name": "kevlar",
+    "source": "cs2/panorama/images/icons/equipment/kevlar.svg",
+    "sha256": "f93599d2e0ee9793d6dd5cfcf14309000555bf66002cbb43f471207e1317a034"
+  },
+  {
+    "name": "knife",
+    "source": "cs2/panorama/images/icons/equipment/knife.svg",
+    "sha256": "9291f2b25597079f224d57116088f25acdbaed887db0cd5d228dd1942aaaefab"
+  },
+  {
+    "name": "m249",
+    "source": "cs2/panorama/images/icons/equipment/m249.svg",
+    "sha256": "cae0cc11060db208fa22d8b8d1a2ad149ea03d44f70da0c489e1584715f6aa86"
+  },
+  {
+    "name": "m4a1",
+    "source": "cs2/panorama/images/icons/equipment/m4a1.svg",
+    "sha256": "099436690c2623657764f253707e52d6a6c6022b2bf50cddb63be21f2a1b6fa6"
+  },
+  {
+    "name": "m4a1_silencer",
+    "source": "cs2/panorama/images/icons/equipment/m4a1_silencer.svg",
+    "sha256": "51d47fdd530c3c4793b913a0225b6c8ee5f6cec132aa45e167eeb768e1e328cd"
+  },
+  {
+    "name": "mac10",
+    "source": "cs2/panorama/images/icons/equipment/mac10.svg",
+    "sha256": "fd03fd2ea87de5f69b84a99273969c89ede9493196679e82d470a6c7a3a99a4e"
+  },
+  {
+    "name": "mag7",
+    "source": "cs2/panorama/images/icons/equipment/mag7.svg",
+    "sha256": "e8e4cb3e4429c62bce981dd340c502252830bfd1e9a6a5da3d88220746a32cf1"
+  },
+  {
+    "name": "molotov",
+    "source": "cs2/panorama/images/icons/equipment/molotov.svg",
+    "sha256": "141797d4f65368ff48f971f52859ddf905946dbefb8f413109def54c8467d6da"
+  },
+  {
+    "name": "mp5sd",
+    "source": "cs2/panorama/images/icons/equipment/mp5sd.svg",
+    "sha256": "a3e173845523eb4e0d96ec563e8a9beef0fb41e06e2a2482f5dc02fc12769836"
+  },
+  {
+    "name": "mp7",
+    "source": "cs2/panorama/images/icons/equipment/mp7.svg",
+    "sha256": "1b85420f27083ba7d92b660b58b7f0c344ffd31004f125c93e6c2eed1f08830b"
+  },
+  {
+    "name": "mp9",
+    "source": "cs2/panorama/images/icons/equipment/mp9.svg",
+    "sha256": "9494a9ed37e40a533488a5f7256d15d6055f981f7439061be74b38ed849be979"
+  },
+  {
+    "name": "negev",
+    "source": "cs2/panorama/images/icons/equipment/negev.svg",
+    "sha256": "8f0291e086d77a645ab6f9ab009d45750a2810523e92882d2ce5041652c29211"
+  },
+  {
+    "name": "noscope",
+    "source": "cs2/panorama/images/hud/deathnotice/noscope.svg",
+    "sha256": "b349cdcd3ae6f41ea1c3c274830761c4d08d9e7720f17c921526d4dcc99115d7"
+  },
+  {
+    "name": "nova",
+    "source": "cs2/panorama/images/icons/equipment/nova.svg",
+    "sha256": "c82d2995e0e877afe44afae973a57f4d4dda0df80ab7e2b3aeff9516999ca13f"
+  },
+  {
+    "name": "p250",
+    "source": "cs2/panorama/images/icons/equipment/p250.svg",
+    "sha256": "d7fcfabe12bcc5b03eb698075cffb17bdf11f6a3158cf02e56375a34ea214eb9"
+  },
+  {
+    "name": "p90",
+    "source": "cs2/panorama/images/icons/equipment/p90.svg",
+    "sha256": "30991ea73bdd7c1610834f759ffa58519d072b3e574d7e1d109f632b676a4d29"
+  },
+  {
+    "name": "penetrate",
+    "source": "cs2/panorama/images/hud/deathnotice/penetrate.svg",
+    "sha256": "5f17d01c08eb8db45e10d1b445a7ee81282f01add4ca6c6150eb8424aa62234b"
+  },
+  {
+    "name": "revolver",
+    "source": "cs2/panorama/images/icons/equipment/revolver.svg",
+    "sha256": "3b270a7b2a13eb4461999d0b678f94cf3e233951491916d27a7225b611466d07"
+  },
+  {
+    "name": "sawedoff",
+    "source": "cs2/panorama/images/icons/equipment/sawedoff.svg",
+    "sha256": "90b661737d6d83f2ea2155d2e7b9ea841202cd6aac1e91c8587fbfadd813bb3d"
+  },
+  {
+    "name": "scar20",
+    "source": "cs2/panorama/images/icons/equipment/scar20.svg",
+    "sha256": "34c24553864879a5876b7e64cc6f0f1178347e481ee17a02f372a6a9b2d81837"
+  },
+  {
+    "name": "sg556",
+    "source": "cs2/panorama/images/icons/equipment/sg556.svg",
+    "sha256": "4adf3a57f21ffbb609768945028bc0cf24cb5609d4f9f5e0a0810353c66189a1"
+  },
+  {
+    "name": "smoke_kill",
+    "source": "cs2/panorama/images/hud/deathnotice/smoke_kill.svg",
+    "sha256": "ef2d8ab77f66f52088cc8c82e6352a655f1fdc5611c83079e25691f0dc57f87d"
+  },
+  {
+    "name": "smokegrenade",
+    "source": "cs2/panorama/images/icons/equipment/smokegrenade.svg",
+    "sha256": "bbc98540535d84891b07a7074ff306c21f632cb73950451b9d9b945e8fc3b6d4"
+  },
+  {
+    "name": "ssg08",
+    "source": "cs2/panorama/images/icons/equipment/ssg08.svg",
+    "sha256": "6e13de7d21639470910ec499d4e6fa9c119e7684c2016f7a8ddf0c58f32adba2"
+  },
+  {
+    "name": "taser",
+    "source": "cs2/panorama/images/icons/equipment/taser.svg",
+    "sha256": "b2edc1dcbe407664207d5a136b9ab8ea11d9c1cd0a91143552cb3ade2b8f42e7"
+  },
+  {
+    "name": "tec9",
+    "source": "cs2/panorama/images/icons/equipment/tec9.svg",
+    "sha256": "1180bd0992aaa6b7471e3d78e23832bc49bb2187d62bf3e1864531c1715c447d"
+  },
+  {
+    "name": "ump45",
+    "source": "cs2/panorama/images/icons/equipment/ump45.svg",
+    "sha256": "ca3921c910e0b889c159f562d80793967f308f3179dd42b0b715b8e6b154b956"
+  },
+  {
+    "name": "usp_silencer",
+    "source": "cs2/panorama/images/icons/equipment/usp_silencer.svg",
+    "sha256": "324c5e789a962cb9a43ba78e82b36debd7a2d3ae725534c353fcbdc6560c05c9"
+  },
+  {
+    "name": "world",
+    "source": "cs2/panorama/images/icons/equipment/world.svg",
+    "sha256": "923a45c8731e91230dfcd59d2da214e7d55e24994541106d4bad3d6181be9e1e"
+  },
+  {
+    "name": "xm1014",
+    "source": "cs2/panorama/images/icons/equipment/xm1014.svg",
+    "sha256": "0044ba772ddf57cd107031f5465c67ff9bf1522c80c9242c814d44927074d668"
+  }
+]
