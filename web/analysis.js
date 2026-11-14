@@ -1,9 +1,10 @@
 (() => {
   'use strict';
-  const $ = id => document.getElementById(id), core = window.ReplayAnalysis;
+  const $ = id => document.getElementById(id), core = window.ReplayAnalysis, heat = window.ReplayHeatmap;
   const state = { jobs: new Map(), demos: new Map(), selectedDemos: null, selectedTeams: null, selectedPlayers: null, aliases: {}, map: '', mapInfo: null, image: null, result: null, worker: null, request: 0, mapRequest: 0, uploading: false, cancelled: false, controller: null, currentJob: null, queued: [], pendingCount: 0, selectedGroup: null, selectedThrow: null, zoom: 1, panX: 0, panY: 0, layers: new Map(), fallbackBounds: { minX: -3000, maxX: 3000, minY: -3000, maxY: 3000 } };
   const storageKey = 'cs2-analysis-v4';
-  const palette = { movement: [94, 217, 209], engagements: [245, 180, 91], deaths: [248, 120, 152], shots: [180, 150, 248] };
+  const metricNames = { movement: '移动', engagements: '交火', deaths: '死亡', shots: '开火' };
+  const heatResolution = 384;
   const metrics = ['movement', 'engagements', 'deaths', 'shots'];
   const utilityNames = { smoke: '烟雾弹', flash: '闪光弹', he: '高爆手雷', molotov: '燃烧瓶', incendiary: '燃烧弹', decoy: '诱饵弹', unknown: '未知道具' };
   const utilityIcons = { smoke: 'smokegrenade', flash: 'flashbang', he: 'hegrenade', molotov: 'molotov', incendiary: 'incgrenade', decoy: 'decoy' };
@@ -21,7 +22,7 @@
   function updateWorkerData() { state.worker?.postMessage({ type: 'datasets', datasets: [...state.demos.values()] }); }
   function requestAnalysis() {
     if (!state.map) {
-      ++state.request; state.result = null; state.selectedGroup = state.selectedThrow = null; state.layers.clear();
+      ++state.request; state.result = null; state.selectedGroup = state.selectedThrow = null; clearHeat(); renderLegend();
       $('computing').hidden = true; $('analysis-empty').hidden = false; $('selection-empty').hidden = true;
       $('selection-summary').textContent = '选择比赛、队伍或玩家，开始分析。';
       for (const id of ['metric-movement', 'metric-engagements', 'metric-deaths', 'metric-utilities']) $(id).textContent = '—';
@@ -147,7 +148,7 @@
   async function loadMap(name) {
     const request = ++state.mapRequest;
     ++state.request; state.result = null; state.selectedGroup = state.selectedThrow = null;
-    state.map = name; state.mapInfo = null; state.image = null; state.zoom = 1; state.panX = 0; state.panY = 0; state.layers.clear();
+    state.map = name; state.mapInfo = null; state.image = null; state.zoom = 1; state.panX = 0; state.panY = 0; clearHeat();
     const sameMap = [...state.demos.values()].filter(d => d.map === name);
     const bounds = sameMap.map(d => d.bounds).filter(b => b && [b.minX, b.maxX, b.minY, b.maxY].every(Number.isFinite));
     if (bounds.length) state.fallbackBounds = { minX: Math.min(...bounds.map(b => b.minX)) - 256, maxX: Math.max(...bounds.map(b => b.maxX)) + 256, minY: Math.min(...bounds.map(b => b.minY)) - 256, maxY: Math.max(...bounds.map(b => b.maxY)) + 256 };
@@ -242,39 +243,47 @@
     return { x: (p.x - (b.minX + b.maxX - size) / 2) / size, y: ((b.minY + b.maxY + size) / 2 - p.y) / size };
   }
   function worldSize() { return state.mapInfo ? state.mapInfo.scale * (state.mapInfo.radarSize || 1024) : Math.max(1, state.fallbackBounds.maxX - state.fallbackBounds.minX, state.fallbackBounds.maxY - state.fallbackBounds.minY); }
+  function clearHeat() {
+    state.layers.clear(); state.heatValues = null; state.heatCanvas = null; $('heat-tooltip').hidden = true;
+  }
   function rebuildHeat() {
-    state.layers.clear();
-    const rows = state.result?.cells || [], resolution = 384;
-    const radius = Math.max(2, Math.min(70, Number($('heat-radius').value) / worldSize() * resolution)), r = Math.ceil(radius), sigma = radius / 2.5;
-    const kernel = [];
-    for (let y = -r; y <= r; y++) for (let x = -r; x <= r; x++) if (x * x + y * y <= radius * radius) kernel.push([x, y, Math.exp(-(x * x + y * y) / (2 * sigma * sigma))]);
+    clearHeat();
+    const rows = state.result?.cells || [], resolution = heatResolution;
+    const radius = Math.max(2, Math.min(70, Number($('heat-radius').value) / worldSize() * resolution));
     for (let metric = 0; metric < metrics.length; metric++) {
       if (!$(`layer-${metrics[metric]}`).checked) continue;
-      const density = new Float64Array(resolution * resolution);
-      for (const row of rows) {
-        const weight = row[metric + 3]; if (!(weight > 0)) continue;
-        const point = projection({ x: row[0], y: row[1] }), px = Math.round(point.x * resolution), py = Math.round(point.y * resolution);
-        if (px < -r || py < -r || px > resolution + r || py > resolution + r) continue;
-        for (const [dx, dy, k] of kernel) { const x = px + dx, y = py + dy; if (x >= 0 && x < resolution && y >= 0 && y < resolution) density[y * resolution + x] += k * weight; }
-      }
-      let max = 0; for (const value of density) if (value > max) max = value;
-      if (!max) continue;
-      const layer = document.createElement('canvas'); layer.width = layer.height = resolution;
-      const lctx = layer.getContext('2d'), data = lctx.createImageData(resolution, resolution), color = palette[metrics[metric]];
-      for (let i = 0; i < density.length; i++) {
-        const level = density[i] / max; if (level <= .0001) continue;
-        const alpha = Math.pow(level, .55), bright = Math.max(0, (level - .65) / .35) * .7;
-        data.data[i * 4] = color[0] + (255 - color[0]) * bright; data.data[i * 4 + 1] = color[1] + (255 - color[1]) * bright; data.data[i * 4 + 2] = color[2] + (255 - color[2]) * bright; data.data[i * 4 + 3] = alpha * 255;
-      }
-      lctx.putImageData(data, 0, 0); state.layers.set(metrics[metric], layer);
+      const points = rows.filter(row => row[metric + 3] > 0).map(row => ({ ...projection({ x: row[0], y: row[1] }), weight: row[metric + 3] }));
+      state.layers.set(metrics[metric], heat.normalize(heat.density(points, resolution, radius)).values);
     }
-    draw();
+    state.heatValues = heat.combine([...state.layers.values()]);
+    colorHeat();
+  }
+  function heatMode() { return $('heat-scale').value; }
+  function legendTicks() { return heatMode() === 'linear' ? [0, .2, .4, .6, .8, 1] : [0, .01, .05, .2, .5, 1]; }
+  function selectedLayers() { return metrics.filter(name => $(`layer-${name}`).checked).map(name => metricNames[name]).join(' + ') || '未选择图层'; }
+  function renderLegend() {
+    $('heat-gradient').style.background = `linear-gradient(to right, ${heat.stops.map(([at, rgb]) => `rgb(${rgb.join(',')}) ${at * 100}%`).join(',')})`;
+    const ticks = $('heat-ticks'); ticks.replaceChildren();
+    for (const value of legendTicks()) {
+      const tick = node('span', `${Math.round(value * 100)}%`); tick.style.left = `${heat.scaleValue(value, heatMode()) * 100}%`; ticks.append(tick);
+    }
+    $('heat-legend-note').textContent = `${selectedLayers()} · 相对当前筛选峰值${state.layers.size > 1 ? ' · 各层独立归一化，重叠处取最高密度' : ''}`;
+  }
+  function colorHeat() {
+    state.heatCanvas = null; $('heat-tooltip').hidden = true;
+    if (state.heatValues?.length) {
+      const layer = document.createElement('canvas'); layer.width = layer.height = heatResolution;
+      layer.getContext('2d').putImageData(new ImageData(heat.colorize(state.heatValues, heatMode()), heatResolution, heatResolution), 0, 0);
+      state.heatCanvas = layer;
+    }
+    renderLegend(); draw();
   }
   function dimensions() {
     const rect = canvas.getBoundingClientRect(), width = rect.width, height = rect.height, size = Math.min(width - 22, height - 22) * state.zoom;
     return { width, height, size, x: (width - size) / 2 + state.panX, y: (height - size) / 2 + state.panY };
   }
   function draw() {
+    $('heat-tooltip').hidden = true;
     const d = dimensions(), scale = Math.min(2, devicePixelRatio || 1);
     if (canvas.width !== Math.round(d.width * scale) || canvas.height !== Math.round(d.height * scale)) { canvas.width = Math.round(d.width * scale); canvas.height = Math.round(d.height * scale); }
     ctx.setTransform(scale, 0, 0, scale, 0, 0); ctx.clearRect(0, 0, d.width, d.height); ctx.fillStyle = '#13181e'; ctx.fillRect(0, 0, d.width, d.height);
@@ -283,8 +292,8 @@
       ctx.strokeStyle = '#26343e'; ctx.lineWidth = .5;
       for (let i = 0; i <= 16; i++) { ctx.beginPath(); ctx.moveTo(d.x + d.size * i / 16, d.y); ctx.lineTo(d.x + d.size * i / 16, d.y + d.size); ctx.moveTo(d.x, d.y + d.size * i / 16); ctx.lineTo(d.x + d.size, d.y + d.size * i / 16); ctx.stroke(); }
     }
-    ctx.globalCompositeOperation = 'screen'; ctx.globalAlpha = Number($('heat-opacity').value) / 100;
-    for (const layer of state.layers.values()) ctx.drawImage(layer, d.x, d.y, d.size, d.size);
+    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = Number($('heat-opacity').value) / 100;
+    if (state.heatCanvas) ctx.drawImage(state.heatCanvas, d.x, d.y, d.size, d.size);
     ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
     if (state.selectedGroup) drawUtility(d);
     $('zoom-value').textContent = `${Math.round(state.zoom * 100)}%`;
@@ -358,17 +367,50 @@
   let radiusTimer;
   $('heat-radius').addEventListener('input', () => { $('radius-value').textContent = `${$('heat-radius').value} 单位`; clearTimeout(radiusTimer); radiusTimer = setTimeout(rebuildHeat, 75); });
   $('heat-opacity').addEventListener('input', () => { $('opacity-value').textContent = `${$('heat-opacity').value}%`; draw(); });
+  $('heat-scale').addEventListener('change', colorHeat);
   function fit() { state.zoom = 1; state.panX = state.panY = 0; draw(); }
   $('fit-map').addEventListener('click', fit);
   canvas.addEventListener('wheel', event => { event.preventDefault(); const before = dimensions(), rect = canvas.getBoundingClientRect(), px = event.clientX - rect.left, py = event.clientY - rect.top, old = state.zoom; state.zoom = Math.max(1, Math.min(5, state.zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12))); const ratio = state.zoom / old; state.panX = (state.panX + before.width / 2 - px) * ratio - before.width / 2 + px; state.panY = (state.panY + before.height / 2 - py) * ratio - before.height / 2 + py; draw(); }, { passive: false });
   let dragging;
-  canvas.addEventListener('pointerdown', event => { dragging = { id: event.pointerId, x: event.clientX, y: event.clientY }; canvas.setPointerCapture(event.pointerId); });
-  canvas.addEventListener('pointermove', event => { if (!dragging || dragging.id !== event.pointerId) return; state.panX += event.clientX - dragging.x; state.panY += event.clientY - dragging.y; dragging.x = event.clientX; dragging.y = event.clientY; draw(); });
+  canvas.addEventListener('pointerdown', event => { $('heat-tooltip').hidden = true; dragging = { id: event.pointerId, x: event.clientX, y: event.clientY }; canvas.setPointerCapture(event.pointerId); });
+  canvas.addEventListener('pointermove', event => {
+    if (!dragging) { showHeatValue(event); return; }
+    if (dragging.id !== event.pointerId) return;
+    state.panX += event.clientX - dragging.x; state.panY += event.clientY - dragging.y; dragging.x = event.clientX; dragging.y = event.clientY; draw();
+  });
+  canvas.addEventListener('pointerleave', () => { $('heat-tooltip').hidden = true; });
+  function showHeatValue(event) {
+    const tip = $('heat-tooltip'), rect = canvas.getBoundingClientRect(), d = dimensions(), mx = event.clientX - rect.left, my = event.clientY - rect.top;
+    const u = (mx - d.x) / d.size, v = (my - d.y) / d.size;
+    tip.hidden = true;
+    if (!state.heatCanvas || u < 0 || u > 1 || v < 0 || v > 1) return;
+    const index = Math.round(v * (heatResolution - 1)) * heatResolution + Math.round(u * (heatResolution - 1));
+    const values = [...state.layers].filter(([, layer]) => layer[index] > 0);
+    if (!values.length) return;
+    tip.replaceChildren(node('strong', '相对本层峰值'));
+    for (const [name, layer] of values) tip.append(node('span', `${metricNames[name]} ${layer[index] < .001 ? '< 0.1' : (layer[index] * 100).toFixed(1)}%`));
+    tip.append(node('small', '扩散后密度 · 非事件占比')); tip.hidden = false;
+    tip.style.left = `${Math.max(8, Math.min(mx + 16, d.width - tip.offsetWidth - 8))}px`;
+    tip.style.top = `${Math.max(8, Math.min(my + 16, d.height - tip.offsetHeight - 8))}px`;
+  }
   for (const event of ['pointerup', 'pointercancel', 'lostpointercapture']) canvas.addEventListener(event, () => { dragging = null; });
   canvas.addEventListener('keydown', event => { if (['+', '=', '-', '0'].includes(event.key)) { event.preventDefault(); if (event.key === '0') fit(); else { state.zoom = Math.max(1, Math.min(5, state.zoom * (event.key === '-' ? 1 / 1.2 : 1.2))); draw(); } } });
   new ResizeObserver(draw).observe($('heatmap-stage'));
   $('export-image').addEventListener('click', () => {
-    const output = document.createElement('canvas'); output.width = canvas.width; output.height = canvas.height + 100; const c = output.getContext('2d'); c.fillStyle = '#141b23'; c.fillRect(0, 0, output.width, output.height); c.drawImage(canvas, 0, 80); c.fillStyle = '#e5eef4'; c.font = '18px sans-serif'; c.fillText(`CS2 Replay · ${state.map} · ${$('analysis-side').selectedOptions[0].textContent}`, 18, 28); c.fillStyle = '#91a9b8'; c.font = '12px sans-serif'; c.fillText($('selection-summary').textContent, 18, 49); c.fillText(`移动 ${$('metric-movement').textContent} / 交火 ${$('metric-engagements').textContent} / 死亡 ${$('metric-deaths').textContent} · 各图层独立归一化`, 18, 68); output.toBlob(blob => { if (blob) download(blob, `${state.map}-analysis.png`); });
+    const output = document.createElement('canvas'), ratio = canvas.width / canvas.getBoundingClientRect().width, width = canvas.width / ratio, height = canvas.height / ratio;
+    output.width = canvas.width; output.height = Math.round((height + 202) * ratio);
+    const c = output.getContext('2d'); c.scale(ratio, ratio); c.fillStyle = '#141b23'; c.fillRect(0, 0, width, height + 202); c.drawImage(canvas, 0, 80, width, height);
+    c.fillStyle = '#e5eef4'; c.font = '18px sans-serif'; c.fillText(`CS2 Replay · ${state.map} · ${$('analysis-side').selectedOptions[0].textContent}`, 18, 28, width - 36);
+    c.fillStyle = '#91a9b8'; c.font = '12px sans-serif'; c.fillText($('selection-summary').textContent, 18, 49, width - 36);
+    c.fillText(`移动 ${$('metric-movement').textContent} / 交火 ${$('metric-engagements').textContent} / 死亡 ${$('metric-deaths').textContent}`, 18, 68, width - 36);
+    const y = height + 105, barWidth = Math.min(500, width - 64), gradient = c.createLinearGradient(32, 0, 32 + barWidth, 0);
+    for (const [at, rgb] of heat.stops) gradient.addColorStop(at, `rgb(${rgb.join(',')})`);
+    c.fillStyle = '#d8e5ed'; c.fillText(`${selectedLayers()} · ${$('heat-scale').selectedOptions[0].textContent} · 相对当前筛选峰值`, 18, y, width - 36);
+    c.fillStyle = gradient; c.fillRect(32, y + 12, barWidth, 12); c.fillStyle = '#d8e5ed'; c.textAlign = 'center';
+    for (const value of legendTicks()) c.fillText(`${Math.round(value * 100)}%`, 32 + heat.scaleValue(value, heatMode()) * barWidth, y + 42);
+    c.textAlign = 'left'; c.fillStyle = '#91a9b8'; c.fillText('蓝 → 青 → 绿 → 黄 → 红：密度从低到高；零记录透明。', 18, y + 65, width - 36);
+    c.fillText('各图层独立归一化，重叠处取最高密度；百分比为相对密度，非事件占比。', 18, y + 83, width - 36);
+    output.toBlob(blob => { if (blob) download(blob, `${state.map}-analysis.png`); });
   });
   $('export-csv').addEventListener('click', () => {
     const rows = [['地图', '落点分类', '投法分类', '道具', '落点次数', '占当前道具百分比', '比赛', '玩家', '玩家ID', '队伍分组', '阵营', '回合', '秒', '出手X', '出手Y', '出手Z', '落点X', '落点Y', '落点Z']];

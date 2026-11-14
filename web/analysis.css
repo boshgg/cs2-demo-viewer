@@ -4,3 +4,20 @@
 @media(max-width:700px){.topbar{height:auto;min-height:65px;flex-wrap:wrap;padding:12px;gap:9px}.brand>span{font-size:15px}.topbar nav{margin-left:auto}.topbar nav a{font-size:10px;padding:8px}.topbar>.button{margin-left:0}.workspace{display:flex;flex-direction:column}.filter-pane{border-right:0;padding:15px;display:grid;grid-template-columns:1fr 1fr;gap:0 14px}.pane-title{grid-column:1/-1}.filter-pane .filter-section:nth-of-type(1){grid-column:1/-1}.filter-pane .filter-section:nth-of-type(4){grid-column:1/-1}.check-list{max-height:150px}.filter-section{padding:13px 0}.analysis-center{padding:18px 12px}.analysis-heading h2{font-size:21px}.stat-grid{gap:6px}.stat-grid strong{font-size:18px}.stat-grid article>span{font-size:9px}.stat-grid small{font-size:7px;white-space:normal;line-height:1.5}.heatmap-stage{height:450px;min-height:350px}.layer-bar{gap:11px;font-size:10px}.heat-controls{gap:10px}.utility-pane{display:block;padding:18px}.utility-groups{max-height:420px}.utility-pane .pane-title{padding:0}.utility-count{margin:20px 0 10px}.empty-state h3{font-size:17px}.empty-state p{font-size:10px}.topbar .local{display:none}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
 .utility-groups{min-width:0;overflow-x:hidden}.utility-card{min-width:0;max-width:100%;flex-shrink:0}.utility-card img{flex:0 0 21px}.utility-card strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.utility-card small{overflow-wrap:anywhere}.utility-card>.utility-card-count{flex:0 0 auto;min-width:34px;max-width:64px;text-align:right}.utility-card-count b{font-size:18px;overflow-wrap:anywhere}.utility-detail,.throw-group{min-width:0;overflow-wrap:anywhere}
+
+/* Frequency colors are shared by every metric; event types remain text labels. */
+.layer-bar .layer i{display:none}
+.heat-controls{flex-wrap:wrap;gap:14px 24px}
+.heat-controls label{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.heat-controls select{width:112px;padding:6px 8px}
+.heat-legend{padding:14px 18px 12px;margin:0 0 14px;border:1px solid #303d49;border-radius:6px;background:#19212a}
+.heat-legend-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;font-size:11px;color:#acbdcb}
+.heat-legend-heading strong{color:#e1ebf2;font-weight:500}.heat-legend-heading strong span{margin:0 10px;color:#92a4b7}
+.heat-gradient{height:12px;border-radius:3px}
+.heat-ticks{position:relative;height:25px;margin:3px 0 0;font:10px 'Consolas',monospace;color:#d3e2ee}
+.heat-ticks span{position:absolute;transform:translateX(-50%);padding-top:5px}.heat-ticks span:before{content:'';position:absolute;left:50%;top:0;height:4px;border-left:1px solid #94a4b2}
+.heat-legend p{margin:0;font-size:10px;color:#9eb1c2;line-height:1.7}
+.heat-tooltip{position:absolute;z-index:5;pointer-events:none;display:grid;gap:5px;padding:10px 12px;border:1px solid #536777;border-radius:5px;background:rgba(12,19,27,.96);color:#dfeaf4;font-size:11px;box-shadow:0 4px 18px #0006}
+.heat-tooltip strong{font-size:10px;color:#a8bfd0;font-weight:500}.heat-tooltip small{font-size:9px;color:#8b9fae}
+.heat-tooltip[hidden]{display:none}
+@media(max-width:600px){.heat-legend-heading{font-size:10px}.heat-controls{gap:12px}.heat-controls input[type=range]{width:90px}}
