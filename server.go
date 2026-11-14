@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"log"
@@ -89,7 +90,7 @@ func apiError(w http.ResponseWriter, status int, message string) {
 func (a *app) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
-		jsonResponse(w, 200, map[string]any{"app": "cs2-local-viewer", "version": "4.0.0", "parser": "demoinfocs-golang v5.2.0"})
+		jsonResponse(w, 200, map[string]any{"app": "cs2-local-viewer", "version": appVersion, "parser": parserVersion})
 	})
 	mux.HandleFunc("POST /api/demos", a.upload)
 	mux.HandleFunc("GET /api/demos/{id}/status", a.status)
@@ -488,7 +489,12 @@ func (a *app) process(j *job) {
 		j.Message = "解析未完成"
 		_ = os.Remove(j.result)
 		_ = os.Remove(j.analysisResult)
-		log.Printf("parse %s: %v", j.name, err)
+		diagnostic := err
+		var parseError *demoReadError
+		if errors.As(err, &parseError) {
+			diagnostic = parseError.Unwrap()
+		}
+		log.Printf("parse %s: %v", j.name, diagnostic)
 		return
 	}
 	j.Status = "ready"

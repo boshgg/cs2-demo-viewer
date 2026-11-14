@@ -80,7 +80,7 @@ func parseDemo(ctx context.Context, path, id, name string, progress func(float64
 	defer func() {
 		if v := recover(); v != nil {
 			result = nil
-			err = fmt.Errorf("Demo 解析失败，文件可能损坏或游戏版本暂不兼容：%v", v)
+			err = demoParseError(fmt.Errorf("%v", v))
 		}
 	}()
 	f, err := os.Open(path)
@@ -349,7 +349,7 @@ func parseDemo(ctx context.Context, path, id, name string, progress func(float64
 		if len(d.Frames) > 1 && (errors.Is(err, demo.ErrUnexpectedEndOfDemo) || errors.Is(err, io.ErrUnexpectedEOF)) {
 			warn("Demo 文件不完整：仅显示成功解析的部分，最后一回合可能缺失。")
 		} else {
-			return nil, fmt.Errorf("无法解析此 Demo（可能损坏或版本不兼容）：%w", err)
+			return nil, demoParseError(err)
 		}
 	}
 	if len(d.Frames) < 2 {

@@ -21,6 +21,26 @@ import (
 //go:embed web
 var webFiles embed.FS
 
+type viewerHealth struct {
+	App     string `json:"app"`
+	Version string `json:"version"`
+}
+
+// Reusing a different binary would silently open an older viewer after an upgrade.
+func canReuseViewer(health viewerHealth) (bool, error) {
+	if health.App != "cs2-local-viewer" {
+		return false, nil
+	}
+	if health.Version == appVersion {
+		return true, nil
+	}
+	runningVersion := health.Version
+	if runningVersion == "" {
+		runningVersion = "未知（未报告版本号）"
+	}
+	return false, fmt.Errorf("端口已被另一版本的 CS2 Replay 占用：运行版本 %s，当前程序版本 %s。请关闭旧程序后重新启动，或使用 -port 指定其他端口（例如 -port 8766）", runningVersion, appVersion)
+}
+
 func main() {
 	port := flag.Int("port", 8765, "Local HTTP port")
 	open := flag.Bool("open", false, "Open the viewer in the default browser")
@@ -35,16 +55,19 @@ func main() {
 		client := http.Client{Timeout: time.Second}
 		if res, e := client.Get(url + "/api/health"); e == nil {
 			defer res.Body.Close()
-			var health struct {
-				App string `json:"app"`
-			}
-			_ = json.NewDecoder(res.Body).Decode(&health)
-			if health.App == "cs2-local-viewer" {
-				fmt.Println("Viewer already running:", url)
-				if *open {
-					openBrowser(url)
+			var health viewerHealth
+			if res.StatusCode == http.StatusOK && json.NewDecoder(res.Body).Decode(&health) == nil {
+				reuse, versionErr := canReuseViewer(health)
+				if versionErr != nil {
+					log.Fatal(versionErr)
 				}
-				return
+				if reuse {
+					fmt.Printf("CS2 Replay v%s already running: %s\n", appVersion, url)
+					if *open {
+						openBrowser(url)
+					}
+					return
+				}
 			}
 		}
 		log.Fatalf("Cannot listen on %s: %v. Try -port 8766", addr, err)
@@ -74,7 +97,7 @@ func main() {
 		}
 		close(shutdownDone)
 	}()
-	fmt.Printf("\nCS2 2D Demo Viewer\n%s\n\nImport a .dem file in your browser. Files stay on this computer.\nPress Ctrl+C to stop.\nCache: %s\n\n", url, root)
+	fmt.Printf("\nCS2 2D Demo Viewer v%s\n%s\n\nImport a .dem file in your browser. Files stay on this computer.\nPress Ctrl+C to stop.\nCache: %s\n\n", appVersion, url, root)
 	if *open {
 		openBrowser(url)
 	}

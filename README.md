@@ -1,6 +1,6 @@
 # CS2 Replay — 本地 2D Demo 查看器
 
-将 CS2 `.dem` 比赛录像导入浏览器，回放玩家站位、道具与交锋，或用 **多 Demo 分析工作台** 汇总最多 10 场的移动、交火、死亡热力图与道具投法。基于 [demoinfocs-golang v5.2.0](https://github.com/markus-wa/demoinfocs-golang/releases/tag/v5.2.0)，网页、地图和解析器均在本机运行，不需要账号、CS2 客户端、REA 或云端服务。
+将 CS2 `.dem` 比赛录像导入浏览器，回放玩家站位、道具与交锋，或用 **多 Demo 分析工作台** 汇总最多 10 场的移动、交火、死亡热力图与道具投法。基于 [demoinfocs-golang v5.3.0](https://github.com/markus-wa/demoinfocs-golang/releases/tag/v5.3.0)，网页、地图和解析器均在本机运行，不需要账号、CS2 客户端、REA 或云端服务。
 
 ![密集站位与装备标签预览](docs/viewer-v3.1-preview.jpg)
 
@@ -10,7 +10,7 @@
 
 **从源码构建：** 安装 [Go 1.24 或更高版本](https://go.dev/dl/)，下载或克隆源码后双击 **`Start Viewer.cmd`**。首次启动会编译本地程序，然后打开默认浏览器。也可以先运行 `build.ps1` 编译。
 
-默认地址：<http://127.0.0.1:8765>。保持终端窗口开启；使用 **Ctrl+C** 停止服务。再次启动会复用同端口已经运行的查看器。
+默认地址：<http://127.0.0.1:8765>。保持终端窗口开启；使用 **Ctrl+C** 停止服务。再次启动仅复用同版本查看器；如果旧版占用端口，会提示先关闭旧版，或用 -port 指定其他端口。
 
 源码仓库不包含 `bin/` 中的生成文件。编译一次后，日常播放不需要 Go 或 Node.js，可直接运行：
 
