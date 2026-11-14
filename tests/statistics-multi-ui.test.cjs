@@ -271,3 +271,55 @@ test('busy folder buttons are disabled and guarded against dispatched events unt
   ui.setScanning(true); await ui.click('multi-refresh-library'); const button = folderAction(ui, key, 'none'); assert.equal(button.disabled, true); await button.dispatch('click'); assert.deepEqual(ui.saved().demoIds, before);
   ui.setScanning(false); await ui.poll(); assert.equal(folderAction(ui, key, 'none').disabled, false); await useFolderAction(ui, key, 'none'); assert.deepEqual(ui.saved().demoIds, []);
 });
+
+function multiFolder(ui, key) {
+  const list = ui.get('multi-demo-list'), button = list.querySelectorAll('button').find(el => el.dataset.folderToggle === key), body = list.querySelectorAll('div').find(el => el.dataset.folderBody === key);
+  assert.ok(button && body, `Missing folder ${key}`); return { button, body };
+}
+
+test('multi folder folding changes no loaded scope, metrics, selections or result nodes and survives search, refresh and mode changes', async () => {
+  const catalog = multiFolderCatalog(), ui = await page({ catalog }); await ui.click('multi-demos-all'); await ui.click('multi-analyze'); await ui.click('multi-players-none'); await ui.checkPlayer(p1); await ui.change('multi-map', 'de_anubis'); await ui.change('multi-side', '3'); await ui.change('multi-library-view', 'folders');
+  const before = ui.saved(), row = ui.get('multi-kill-rows').children[0], requests = ui.requests.length, key = 'path:赛事/决赛', group = multiFolder(ui, key);
+  assert.equal(group.button.type, 'button'); assert.equal(group.button['aria-controls'], group.body.id); assert.equal(group.button['aria-expanded'], 'true');
+  await group.button.click(); assert.equal(group.body.hidden, true); assert.equal(group.button['aria-expanded'], 'false'); assert.equal(multiFolder(ui, 'path:备份').body.hidden, false);
+  await ui.click('multi-library-collapse-all'); assert.equal(ui.get('multi-kill-rows').children[0], row, 'folding never re-aggregates or redraws result rows');
+  assert.equal(ui.get('multi-total-score').textContent, '+48'); assert.equal(ui.get('multi-side').value, '3'); assert.equal(ui.get('multi-map').value, 'de_anubis');
+  for (const field of ['demoIds', 'playerIds', 'analyzedIds']) assert.deepEqual(ui.saved()[field], before[field]); assert.equal(ui.requests.length, requests);
+  await ui.search('multi-library-search', 'a.dem'); assert.equal(multiFolder(ui, key).body.hidden, true); await ui.search('multi-library-search', '');
+  await ui.click('multi-refresh-library'); assert.equal(multiFolder(ui, key).body.hidden, true); assert.equal(reportRequests(ui).length, 4);
+  await ui.change('multi-library-view', 'all'); assert.equal(ui.get('multi-library-fold-controls').hidden, true); await ui.change('multi-library-view', 'folders');
+  await ui.click('stats-mode-single'); await ui.click('stats-mode-multi'); assert.equal(multiFolder(ui, key).body.hidden, true); assert.equal(ui.get('multi-library-fold-controls').hidden, false);
+  const restored = await page({ catalog, saved: ui.saved() }); assert.equal(multiFolder(restored, key).body.hidden, true); assert.deepEqual(checkedPlayers(restored), [p1]); assert.equal(restored.get('multi-total-score').textContent, '+48'); assert.equal(restored.parsed.length, 0);
+});
+
+test('collapsed multi groups retain accessible bulk buttons, include hidden children and shared IDs only once without parsing', async () => {
+  const options = folderBulkFixtures(), ui = await page({ ...options, saved: { demoIds: ['d'], libraryView: 'folders', libraryQuery: 'a.dem', map: 'de_anubis', playerIds: [p1] } }), key = 'path:赛事/决赛';
+  const requests = ui.requests.length; await ui.click('multi-library-collapse-all');
+  assert.equal(multiFolder(ui, key).body.hidden, true); assert.equal(multiFolder(ui, key).body.querySelectorAll('button').some(button => button.dataset.folderAction), false, 'bulk actions remain outside collapsed children');
+  assert.match(content(ui.get('multi-demo-list')), /赛事\/决赛 · 3 场/);
+  await useFolderAction(ui, key, 'all'); assert.deepEqual(ui.saved().demoIds.slice().sort(), ['a', 'b', 'c', 'd']); assert.equal(multiFolder(ui, key).body.hidden, true);
+  await useFolderAction(ui, key, 'invert'); assert.deepEqual(ui.saved().demoIds, ['d']);
+  await ui.click('multi-demos-all'); assert.deepEqual(ui.saved().demoIds.slice().sort(), ['a', 'd'], 'global action uses list filters, not expanded DOM rows');
+  await useFolderAction(ui, key, 'none'); assert.deepEqual(ui.saved().demoIds, ['d']);
+  assert.deepEqual(ui.saved().playerIds, [p1]); assert.equal(ui.requests.length, requests); assert.equal(reportRequests(ui).length, 0); assert.equal(ui.parsed.length, 0);
+  const restored = await page({ ...options, saved: ui.saved() }); assert.equal(multiFolder(restored, key).body.hidden, true); assert.deepEqual(restored.saved().demoIds, ['d']); assert.equal(reportRequests(restored).length, 0);
+});
+
+test('multi collapse defaults include new folders and unavailable groups while explicit overrides restore and expand-all resets them', async () => {
+  const catalog = multiFolderCatalog(), ui = await page({ catalog, saved: { libraryView: 'folders', demoIds: ['a'], playerIds: [p1] } });
+  await ui.search('multi-library-search', 'a.dem'); await ui.click('multi-library-collapse-all'); await multiFolder(ui, 'path:备份').button.click();
+  assert.deepEqual(ui.saved().folderExpansion, { defaultExpanded: false, overrides: { 'path:备份': true } });
+  await ui.search('multi-library-search', ''); assert.equal(multiFolder(ui, 'root').body.hidden, true); assert.equal(multiFolder(ui, 'unavailable').body.hidden, true);
+  ui.patch('c', { sources: [{ path: '新录像/c.zip', member: '内部/c.dem', available: true }] }); await ui.click('multi-refresh-library'); assert.equal(multiFolder(ui, 'path:新录像').body.hidden, true); assert.equal(multiFolder(ui, 'path:备份').body.hidden, false);
+  const restored = await page({ catalog, saved: ui.saved() }); assert.equal(multiFolder(restored, 'path:备份').body.hidden, false); assert.equal(multiFolder(restored, 'root').body.hidden, true);
+  await restored.click('multi-library-expand-all'); assert.deepEqual(restored.saved().folderExpansion, { defaultExpanded: true, overrides: {} }); assert.deepEqual(restored.saved().demoIds, ['a']); assert.deepEqual(restored.saved().playerIds, [p1]);
+  assert.ok(restored.get('multi-demo-list').querySelectorAll('div').filter(el => el.dataset.folderBody).every(el => !el.hidden)); assert.equal(reportRequests(restored).length, 0); assert.equal(restored.parsed.length, 0);
+});
+
+test('multi malformed expansion preferences remain usable without changing saved selections or parsing', async () => {
+  for (const folderExpansion of [null, [], 'invalid', { defaultExpanded: 'false', overrides: { root: 'false' } }]) {
+    const ui = await page({ catalog: multiFolderCatalog(), saved: { libraryView: 'folders', demoIds: ['a'], folderExpansion } });
+    assert.equal(multiFolder(ui, 'root').body.hidden, false); await multiFolder(ui, 'root').button.click(); assert.deepEqual(ui.saved().folderExpansion, { defaultExpanded: true, overrides: { root: false } });
+    assert.deepEqual(ui.saved().demoIds, ['a']); assert.equal(reportRequests(ui).length, 0); assert.equal(ui.parsed.length, 0);
+  }
+});

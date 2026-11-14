@@ -61,6 +61,8 @@ function page(initial = [], options = {}) {
   return { api, get, requests, selected, timers, document, location, stored,
     rows: () => descend(get('replay-library-list')).filter(child => child.dataset.demoId),
     groups: () => get('replay-library-list').children.filter(child => child.dataset.folder),
+    toggle: key => descend(get('replay-library-list')).find(child => child.dataset.folderToggle === key),
+    body: key => descend(get('replay-library-list')).find(child => child.dataset.folderBody === key),
     change: (id, value) => { get(id).value = value; get(id).dispatch('change'); },
     text: () => text(get('replay-library-list')),
     search: query => { get('replay-library-search').value = query; get('replay-library-search').dispatch('input'); },
@@ -121,6 +123,122 @@ test('folder options and grouping count each ID once per physical folder and sup
   assert.deepEqual(library.groupByFolder(input, 'all', 'path:练习').map(group => [group.key, group.label, group.demos.length]), [['all', '', 3]], 'flat view ignores the hidden folder preference');
   assert.equal(JSON.stringify(input), before);
   assert.deepEqual(library.folderOptions(null), []); assert.deepEqual(library.groupByFolder([], 'all'), [{ key: 'all', label: '', demos: [] }]);
+});
+
+test('folder expansion defaults, individual exceptions and global defaults apply to future folders', () => {
+  const state = library.createFolderExpansion();
+  assert.equal(state.isExpanded('root'), true);
+  state.setExpanded('path:A', false);
+  assert.equal(state.isExpanded('path:A'), false); assert.equal(state.isExpanded('path:B'), true);
+  assert.deepEqual(state.snapshot(), { defaultExpanded: true, overrides: { 'path:A': false } });
+  state.setExpanded('path:A', true); assert.deepEqual(state.snapshot().overrides, {});
+  state.setAll(false);
+  assert.equal(state.isExpanded('path:added-later'), false);
+  state.setExpanded('path:B', true);
+  assert.deepEqual(state.snapshot(), { defaultExpanded: false, overrides: { 'path:B': true } });
+  state.setAll(false); assert.deepEqual(state.snapshot(), { defaultExpanded: false, overrides: {} });
+  state.setAll(true); assert.equal(state.isExpanded('unavailable'), true);
+  assert.equal(state.isExpanded('path:another-new-folder'), true);
+});
+
+test('folder expansion restores strict boolean own values and rejects malformed saved state', () => {
+  for (const invalid of [null, undefined, false, 'false', [], { defaultExpanded: 'false', overrides: [] }, { defaultExpanded: 0, overrides: 'root' }]) {
+    assert.deepEqual(library.createFolderExpansion(invalid).snapshot(), { defaultExpanded: true, overrides: {} });
+  }
+  const inherited = Object.create({ defaultExpanded: false, overrides: { root: false } });
+  assert.deepEqual(library.createFolderExpansion(inherited).snapshot(), { defaultExpanded: true, overrides: {} });
+  const state = library.createFolderExpansion({ defaultExpanded: false, overrides: { root: true, 'path:A': false, 'path:B': 1, unavailable: 'true', '': true } });
+  assert.deepEqual(state.snapshot(), { defaultExpanded: false, overrides: { root: true } });
+  state.setAll('true'); state.setExpanded(null, true); state.setExpanded('path:B', 'true');
+  assert.deepEqual(state.snapshot(), { defaultExpanded: false, overrides: { root: true } });
+  const restored = library.createFolderExpansion(JSON.parse(JSON.stringify(state.snapshot())));
+  assert.equal(restored.isExpanded('root'), true); assert.equal(restored.isExpanded('path:new'), false);
+});
+
+test('folder expansion is safe for prototype-like keys and snapshots cannot mutate another module', () => {
+  const saved = JSON.parse('{"defaultExpanded":true,"overrides":{"__proto__":false,"constructor":false,"path:__proto__":false}}');
+  const first = library.createFolderExpansion(saved), second = library.createFolderExpansion(saved);
+  assert.equal(first.isExpanded('__proto__'), false); assert.equal(first.isExpanded('constructor'), false);
+  const snapshot = first.snapshot();
+  assert.equal(Object.getPrototypeOf(snapshot.overrides), Object.prototype);
+  assert.equal(Object.prototype.hasOwnProperty.call(snapshot.overrides, '__proto__'), true);
+  snapshot.overrides.__proto__ = true; snapshot.overrides['path:__proto__'] = true; snapshot.defaultExpanded = false;
+  assert.equal(first.isExpanded('__proto__'), false); assert.equal(first.isExpanded('path:new'), true);
+  first.setAll(false); second.setExpanded('path:__proto__', true);
+  assert.equal(second.isExpanded('path:new'), true); assert.equal(first.isExpanded('path:__proto__'), false);
+  assert.equal({}.polluted, undefined);
+});
+
+test('playback group toggles retain native button focus and never select or parse a recording', async () => {
+  const p = page([demo('one'), demo('two', 'ready', { sources: [{ path: 'other/two.dem' }] })]);
+  p.api.show(); await settle();
+  assert.equal(p.get('replay-library-expansion-controls').hidden, true);
+  p.change('replay-library-mode', 'folders'); assert.equal(p.get('replay-library-expansion-controls').hidden, false);
+  const toggle = p.toggle('path:season'), body = p.body('path:season'), requests = p.requests.length;
+  assert.equal(toggle.tagName, 'button'); assert.equal(toggle.type, 'button');
+  assert.equal(toggle['aria-controls'], body.id); assert.equal(toggle['aria-expanded'], 'true'); assert.equal(body.hidden, false);
+  toggle.focus(); toggle.click();
+  assert.equal(p.document.activeElement, toggle, 'keyboard focus stays on the same mounted toggle');
+  assert.equal(toggle['aria-expanded'], 'false'); assert.equal(body.hidden, true); assert.match(toggle['aria-label'], /展开/);
+  assert.equal(p.body('path:other').hidden, false); assert.equal(p.get('replay-library-count').textContent, '2 / 2 场');
+  assert.equal(p.rows().length, 2, 'folded content remains in the catalog');
+  assert.deepEqual(p.selected, []); assert.equal(p.requests.length, requests);
+  p.groups().find(group => group.dataset.folder === 'path:season').click();
+  assert.equal(body.hidden, true, 'section clicks do not accidentally toggle or play');
+  toggle.click(); assert.equal(body.hidden, false); assert.match(toggle['aria-label'], /折叠/);
+  p.rows().find(row => row.dataset.demoId === 'one').children[1].click();
+  assert.equal(p.selected[0].id, 'one', 'explicit replay button still selects the original ID');
+});
+
+test('playback collapse survives search, mode changes, reopen and browser preference restoration', async () => {
+  const stored = new Map([['cs2-analysis-v4', '{"selectedDemos":["kept"]}'], ['cs2-statistics-multi-v1', '{"folderExpansion":{"defaultExpanded":false,"overrides":{}}}']]);
+  const demos = [demo('one'), demo('two', 'ready', { sources: [{ path: 'other/two.dem' }] })];
+  const p = page(demos, { stored }); p.api.show(); await settle(); p.change('replay-library-mode', 'folders'); p.toggle('path:season').click();
+  p.search('two'); assert.equal(p.toggle('path:season'), undefined);
+  p.search(''); assert.equal(p.body('path:season').hidden, true);
+  p.change('replay-library-mode', 'all'); assert.equal(p.get('replay-library-expansion-controls').hidden, true); assert.equal(p.rows().length, 2);
+  p.change('replay-library-mode', 'folders'); assert.equal(p.body('path:season').hidden, true);
+  p.api.close(); p.api.show(); await settle(); assert.equal(p.body('path:season').hidden, true);
+  const restored = page(demos, { stored }); restored.api.show(); await settle();
+  assert.equal(restored.body('path:season').hidden, true); assert.equal(restored.body('path:other').hidden, false);
+  assert.deepEqual(JSON.parse(stored.get(library.viewStorageKey)).folderExpansion, { defaultExpanded: true, overrides: { 'path:season': false } });
+  assert.equal(stored.get('cs2-analysis-v4'), '{"selectedDemos":["kept"]}');
+  assert.equal(stored.get('cs2-statistics-multi-v1'), '{"folderExpansion":{"defaultExpanded":false,"overrides":{}}}');
+  assert.ok([...p.requests, ...restored.requests].every(([, method]) => method === 'GET'));
+});
+
+test('playback all-folder controls cover hidden groups, clear exceptions and govern refreshed new folders', async () => {
+  const original = [demo('one'), demo('two', 'ready', { sources: [{ path: 'other/two.dem' }] })];
+  const p = page(original); p.api.show(); await settle(); p.change('replay-library-mode', 'folders'); p.search('one');
+  p.get('replay-library-collapse-all').focus(); p.get('replay-library-collapse-all').click();
+  assert.equal(p.document.activeElement, p.get('replay-library-collapse-all'));
+  p.search(''); assert.ok(p.groups().every(group => p.body(group.dataset.folder).hidden));
+  p.toggle('path:season').click(); assert.equal(p.body('path:season').hidden, false);
+  await p.api.refresh(); p.setDemos([...original, demo('new', 'ready', { sources: [{ path: 'new/fresh.zip', member: 'inside/new.dem', kind: 'zip' }] })]);
+  p.setScanning(false); await p.tick();
+  assert.equal(p.body('path:new').hidden, true, 'new folders obey the global collapsed default');
+  assert.equal(p.body('path:season').hidden, false, 'an explicit exception survives refresh');
+  p.get('replay-library-collapse-all').click(); assert.equal(p.body('path:season').hidden, true);
+  assert.deepEqual(JSON.parse(p.stored.get(library.viewStorageKey)).folderExpansion, { defaultExpanded: false, overrides: {} });
+  p.get('replay-library-expand-all').click(); assert.ok(p.groups().every(group => !p.body(group.dataset.folder).hidden));
+  p.setDemos([...original, demo('later', 'ready', { sources: [{ path: 'later/final.dem' }] })]); await p.api.reload();
+  assert.equal(p.body('path:later').hidden, false); assert.deepEqual(p.selected, []);
+  assert.deepEqual(p.requests.filter(([, method]) => method !== 'GET'), [['/api/library/refresh', 'POST']]);
+});
+
+test('playback folding remains usable with malformed JSON and blocked local storage', async () => {
+  for (const options of [
+    { stored: new Map([[library.viewStorageKey, '{bad']]) },
+    { stored: new Map([[library.viewStorageKey, JSON.stringify({ mode: 'folders', folderExpansion: { defaultExpanded: 'false', overrides: { 'path:season': 'false' } } })]]) },
+    { storage: { getItem() { throw new Error('disabled'); }, setItem() { throw new Error('quota'); } } },
+  ]) {
+    const p = page([demo('one')], options); p.api.show(); await settle(); p.change('replay-library-mode', 'folders');
+    assert.equal(p.body('path:season').hidden, false);
+    p.toggle('path:season').click(); assert.equal(p.body('path:season').hidden, true);
+    p.get('replay-library-expand-all').click(); assert.equal(p.body('path:season').hidden, false);
+    p.get('replay-library-collapse-all').click(); assert.equal(p.body('path:season').hidden, true);
+    assert.ok(p.requests.every(([, method]) => method === 'GET')); assert.deepEqual(p.selected, []);
+  }
 });
 
 test('playback folder controls filter and group the same catalog without parsing or changing the selected recording identity', async () => {

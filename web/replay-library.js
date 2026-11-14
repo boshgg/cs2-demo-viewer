@@ -104,6 +104,27 @@
     if (mode !== 'folders') return [{ key: 'all', label: '', demos: uniqueDemos(demos) }];
     return folderGroups(demos).filter(group => folder === 'all' || group.key === folder);
   }
+  function createFolderExpansion(saved) {
+    const record = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
+    const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+    let defaultExpanded = own(record, 'defaultExpanded') && typeof record.defaultExpanded === 'boolean' ? record.defaultExpanded : true;
+    const overrides = new Map();
+    const validKey = key => typeof key === 'string' && key.length > 0;
+    if (own(record, 'overrides') && record.overrides && typeof record.overrides === 'object' && !Array.isArray(record.overrides)) {
+      for (const [key, value] of Object.entries(record.overrides)) if (validKey(key) && typeof value === 'boolean' && value !== defaultExpanded) overrides.set(key, value);
+    }
+    return {
+      isExpanded: key => overrides.has(key) ? overrides.get(key) : defaultExpanded,
+      setExpanded(key, value) {
+        if (!validKey(key) || typeof value !== 'boolean') return;
+        if (value === defaultExpanded) overrides.delete(key); else overrides.set(key, value);
+      },
+      setAll(value) { if (typeof value === 'boolean') { defaultExpanded = value; overrides.clear(); } },
+      // Object.fromEntries creates own data properties even for "__proto__".
+      // Returning a new record also prevents callers from mutating this state.
+      snapshot: () => ({ defaultExpanded, overrides: Object.fromEntries(overrides) }),
+    };
+  }
   const viewStorageKey = 'cs2-replay-library-view-v1';
   const statusLabels = { discovered: '未解析', queued: '等待解析', parsing: '正在解析', ready: '已有缓存', error: '解析失败' };
   function create({ document: doc = document, fetch: fetcher = fetch, storage, onSelect, onOpen, setTimeout: schedule = setTimeout, clearTimeout: unschedule = clearTimeout } = {}) {
@@ -111,12 +132,14 @@
     let demos = [], scanning = false, open = false, loading = false, refreshing = false, timer = null, request = 0, previousFocus = null;
     let preferences = {}; try { storage ??= globalThis.localStorage; preferences = JSON.parse(storage?.getItem(viewStorageKey) || '{}') || {}; } catch { /* Private/disabled storage does not prevent local playback. */ }
     let mode = preferences.mode === 'folders' ? 'folders' : 'all', folder = typeof preferences.folder === 'string' && /^(root|unavailable|path:.+)$/.test(preferences.folder) ? preferences.folder : 'all';
-    const saveView = () => { try { storage?.setItem(viewStorageKey, JSON.stringify({ mode, folder })); } catch { /* Optional view preference. */ } };
+    const expansion = createFolderExpansion(preferences.folderExpansion), renderedGroups = new Map();
+    const saveView = () => { try { storage?.setItem(viewStorageKey, JSON.stringify({ mode, folder, folderExpansion: expansion.snapshot() })); } catch { /* Optional view preference. */ } };
     const make = (tag, text, className) => { const el = doc.createElement(tag); if (text != null) el.textContent = text; if (className) el.className = className; return el; };
     function render() {
       $('replay-library-mode').value = mode;
       $('replay-library-folder-field').hidden = mode !== 'folders';
       $('replay-library-folder-note').hidden = mode !== 'folders';
+      $('replay-library-expansion-controls').hidden = mode !== 'folders';
       const folders = $('replay-library-folder'), options = folderOptions(demos); folders.replaceChildren();
       const addOption = (value, label) => { const option = make('option', label); option.value = value; folders.append(option); };
       addOption('all', '全部文件夹'); for (const option of options) addOption(option.key, `${option.label} · ${option.count} 场`);
@@ -126,9 +149,27 @@
       $('replay-library-count').textContent = `${uniqueDemos(shown).length} / ${uniqueDemos(demos).length} 场`;
       $('replay-library-refresh').disabled = loading || refreshing || scanning;
       list.replaceChildren();
+      renderedGroups.clear();
       for (const group of groupByFolder(shown, mode, folder)) {
         let container = list;
-        if (mode === 'folders') { container = make('section', null, 'replay-library-folder-group'); container.dataset.folder = group.key; container.append(make('h3', `${group.label} · ${group.demos.length} 场`, 'replay-library-folder-heading')); list.append(container); }
+        if (mode === 'folders') {
+          const section = make('section', null, 'replay-library-folder-group'), heading = make('h3', null, 'replay-library-folder-heading');
+          section.dataset.folder = group.key;
+          const toggle = make('button', null, 'replay-library-folder-toggle'), caret = make('span', null, 'replay-library-folder-caret');
+          toggle.type = 'button'; toggle.dataset.folderToggle = group.key; caret.setAttribute('aria-hidden', 'true');
+          toggle.append(caret, make('span', `${group.label} · ${group.demos.length} 场`));
+          container = make('div', null, 'replay-library-folder-body'); container.dataset.folderBody = group.key;
+          container.id = `replay-library-folder-body-${renderedGroups.size}`; toggle.setAttribute('aria-controls', container.id);
+          const update = () => {
+            const expanded = expansion.isExpanded(group.key);
+            container.hidden = !expanded; toggle.setAttribute('aria-expanded', String(expanded));
+            toggle.setAttribute('aria-label', `${expanded ? '折叠' : '展开'} ${group.label}，${group.demos.length} 场录像`);
+            caret.textContent = expanded ? '▾' : '▸';
+          };
+          toggle.addEventListener('click', () => { expansion.setExpanded(group.key, !expansion.isExpanded(group.key)); saveView(); update(); });
+          renderedGroups.set(group.key, update); update();
+          heading.append(toggle); section.append(heading, container); list.append(section);
+        }
         for (const demo of group.demos) {
         const row = make('article', null, 'replay-library-row'), details = make('div', null, 'replay-library-details');
         row.dataset.demoId = demo.id;
@@ -197,10 +238,13 @@
     $('replay-library-search').addEventListener('input', render);
     $('replay-library-mode').addEventListener('change', () => { mode = $('replay-library-mode').value === 'folders' ? 'folders' : 'all'; saveView(); render(); });
     $('replay-library-folder').addEventListener('change', () => { folder = $('replay-library-folder').value || 'all'; saveView(); render(); });
+    const setAllExpanded = value => { expansion.setAll(value); saveView(); for (const update of renderedGroups.values()) update(); };
+    $('replay-library-collapse-all').addEventListener('click', () => setAllExpanded(false));
+    $('replay-library-expand-all').addEventListener('click', () => setAllExpanded(true));
     $('replay-library-refresh').addEventListener('click', () => { void refresh(); });
     dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
     dialog.addEventListener('click', event => { if (event.target === dialog) close(); });
     return { show, close, refresh, reload, isOpen: () => open };
   }
-  return { create, loadReplay, matches, sourcePaths, folderKeys, folderLabel, folderOptions, inFolder, groupByFolder, viewStorageKey };
+  return { create, loadReplay, matches, sourcePaths, folderKeys, folderLabel, folderOptions, inFolder, groupByFolder, createFolderExpansion, viewStorageKey };
 });

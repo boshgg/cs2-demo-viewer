@@ -7,6 +7,7 @@
   const loadingJobs = new Map();
   const catalog = new Map(), catalogSelection = new Set();
   const sourceView = { mode: 'all', folder: 'all', query: '' }, libraryView = { mode: 'all', folder: 'all', query: '', map: 'all' };
+  let sourceExpansion = library.createFolderExpansion(), libraryExpansion = library.createFolderExpansion();
   let catalogAdding = false, catalogLoading = false, catalogOpener = null;
   let reparseSubmitting = false, reparseRequestError = '';
   const reparseSkipped = new Map();
@@ -25,7 +26,7 @@
   function save() {
     if (initializing) return;
     const settings = { ids: [...state.jobs.keys()], selectedDemos: state.selectedDemos && [...state.selectedDemos], selectedTeams: state.selectedTeams && [...state.selectedTeams], selectedPlayers: state.selectedPlayers && [...state.selectedPlayers], map: state.map, aliases: state.aliases, side: $('analysis-side').value, floor: $('analysis-floor').value, utilityType: $('analysis-utility-type').value, utilityTime: $('analysis-utility-time').value, utilitySort: $('utility-sort').value, query: $('player-search').value, layers: metrics.filter(name => $(`layer-${name}`).checked), radius: Number($('heat-radius').value), opacity: Number($('heat-opacity').value), scale: heatMode(), landingDistance: Number($('landing-distance').value), throwDistance: Number($('throw-distance').value), migratedSessionId };
-    settings.sourceView = { ...sourceView }; settings.libraryView = { ...libraryView };
+    settings.sourceView = { ...sourceView, folderExpansion: sourceExpansion.snapshot() }; settings.libraryView = { ...libraryView, folderExpansion: libraryExpansion.snapshot() };
     if (restoredView) { settings.map = restoredView.map; settings.floor = restoredView.floor; }
     try { localStorage.setItem(storageKey, JSON.stringify(settings)); } catch { /* Private browsing may not offer localStorage. */ }
   }
@@ -40,6 +41,8 @@
         for (const field of ['folder', 'query']) if (typeof stored[field] === 'string') view[field] = stored[field];
         if (key === 'libraryView' && typeof stored.map === 'string') view.map = stored.map;
       }
+      if (key === 'sourceView') sourceExpansion = library.createFolderExpansion(stored?.folderExpansion);
+      else libraryExpansion = library.createFolderExpansion(stored?.folderExpansion);
       $(`${prefix}-view-mode`).value = view.mode; $(`${prefix}-search`).value = view.query;
     }
     for (const key of ['selectedDemos', 'selectedTeams', 'selectedPlayers']) state[key] = Array.isArray(saved[key]) ? new Set(saved[key].filter(id => typeof id === 'string')) : null;
@@ -108,6 +111,7 @@
     for (const option of options) select.append(new Option(`${option.label} · ${number(option.count)} 场`, option.key));
     if (view.folder !== 'all' && !options.some(option => option.key === view.folder)) select.append(new Option(`${library.folderLabel(view.folder)} · 当前范围暂无录像`, view.folder));
     select.value = view.folder; $(`${prefix}-folder-field`).hidden = view.mode !== 'folders'; $(`${prefix}-view-mode`).value = view.mode;
+    $(`${prefix}-folder-expansion-actions`).hidden = view.mode !== 'folders';
   }
   function folderMembers(scope, key) {
     const demos = scope === 'catalog' ? [...catalog.values()] : [...state.jobs.values()].map(sourceDemo);
@@ -128,13 +132,29 @@
     if (scope === 'catalog') renderCatalog();
     else { renderJobs(); renderFilters(); requestAnalysis(); }
   }
+  function folderExpansion(scope) { return scope === 'catalog' ? libraryExpansion : sourceExpansion; }
+  function changeFolderExpansion(scope, key, expanded) {
+    const expansion = folderExpansion(scope);
+    if (key == null) expansion.setAll(expanded); else expansion.setExpanded(key, expanded);
+    if (scope === 'catalog') renderCatalog(); else renderJobs();
+    save();
+  }
   function appendFolderGroups(list, demos, view, appendRow, scope) {
     for (const group of library.groupByFolder(demos, view.mode, view.folder)) {
       let target = list;
       if (view.mode === 'folders') {
         target = node('section', null, 'analysis-folder-group'); target.dataset.folderKey = group.key;
         const members = folderMembers(scope, group.key), count = members.length, shown = new Set(group.demos.map(demo => demo.id)).size;
-        const header = node('header', null, 'analysis-folder-header'), heading = node('h3', group.label, 'analysis-folder-heading'); heading.title = group.label;
+        const expanded = folderExpansion(scope).isExpanded(group.key), body = node('div', null, 'analysis-folder-body');
+        body.id = `${list.id}-folder-${encodeURIComponent(group.key)}`; body.dataset.folderBody = group.key; body.hidden = !expanded;
+        const header = node('header', null, 'analysis-folder-header'), heading = node('h3', null, 'analysis-folder-heading'); heading.title = group.label;
+        const toggle = node('button', `${expanded ? '▾' : '▸'} ${group.label}`, 'analysis-folder-toggle'); toggle.type = 'button'; toggle.dataset.folderToggle = group.key;
+        toggle.setAttribute('aria-expanded', String(expanded)); toggle.setAttribute('aria-controls', body.id); toggle.setAttribute('aria-label', `${expanded ? '折叠' : '展开'}文件夹 ${group.label}`);
+        toggle.addEventListener('click', () => {
+          changeFolderExpansion(scope, group.key, !folderExpansion(scope).isExpanded(group.key));
+          [...list.querySelectorAll('button')].find(button => button.dataset.folderToggle === group.key)?.focus?.();
+        });
+        heading.append(toggle);
         const explanation = `本文件夹共 ${number(count)} 场 · 当前显示 ${number(shown)} 场；操作包含地图或搜索隐藏项，只添加可选录像。`;
         const note = node('p', explanation, 'analysis-folder-scope');
         const actions = node('div', null, 'analysis-folder-actions');
@@ -145,7 +165,7 @@
           button.disabled = folderSelectionBusy(scope) || !members.some(demo => action === 'none' ? folderSelected(scope, demo.id) : folderSelectable(scope, demo) || action === 'invert' && folderSelected(scope, demo.id));
           button.addEventListener('click', () => changeFolderSelection(scope, group.key, action)); actions.append(button);
         }
-        header.append(heading, note, actions); target.append(header); list.append(target);
+        header.append(heading, note, actions); target.append(header, body); list.append(target); target = body;
       }
       for (const demo of group.demos) appendRow(demo, target, group.key);
     }
@@ -795,6 +815,9 @@
     $(`${prefix}-search`).addEventListener('input', () => { view.query = $(`${prefix}-search`).value; render(); save(); });
     $(`${prefix}-view-mode`).addEventListener('change', () => { view.mode = $(`${prefix}-view-mode`).value === 'folders' ? 'folders' : 'all'; render(); save(); });
     $(`${prefix}-folder`).addEventListener('change', () => { view.folder = $(`${prefix}-folder`).value; render(); save(); });
+    const scope = prefix === 'demo' ? 'source' : 'catalog';
+    $(`${prefix}-collapse-all`).addEventListener('click', () => changeFolderExpansion(scope, null, false));
+    $(`${prefix}-expand-all`).addEventListener('click', () => changeFolderExpansion(scope, null, true));
   }
   $('analysis-library-map').addEventListener('change', () => { libraryView.map = $('analysis-library-map').value; renderCatalog(); save(); });
   for (const action of ['all', 'none', 'invert']) $(`demos-${action}`).addEventListener('click', () => changeSourceSelection(action));

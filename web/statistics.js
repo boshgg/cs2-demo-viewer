@@ -93,8 +93,13 @@
     const schedule = options.setTimeout || setTimeout, unschedule = options.clearTimeout || clearTimeout;
     const folderStorage = options.storage || win.localStorage, folderStorageKey = 'cs2-statistics-library-view-v1';
     let folderPrefs = {}; try { folderPrefs = JSON.parse(folderStorage?.getItem(folderStorageKey) || '{}') || {}; } catch { /* Ignore invalid local view preferences. */ }
+    const folderExpansion = win.ReplayLibrary.createFolderExpansion(folderPrefs.folderExpansion), folderBodies = new Map();
     const state = { catalog: [], data: null, selected: '', loading: '', request: 0, controller: null, scanning: false, refreshing: false, catalogRequest: 0, catalogTimer: null, page: 0, detailRound: '', loadedRevision: '', failedRevision: '', reparseSubmitting: false, reparseAttempted: false, reparseTracked: new Map(), reparseSkipped: [], reparseError: '' };
     state.libraryView = folderPrefs.libraryView === 'folders' ? 'folders' : 'all'; state.libraryFolder = typeof folderPrefs.libraryFolder === 'string' ? folderPrefs.libraryFolder : 'all';
+    function saveLibraryView() { try { folderStorage?.setItem(folderStorageKey, JSON.stringify({ libraryView: state.libraryView, libraryFolder: state.libraryFolder, folderExpansion: folderExpansion.snapshot() })); } catch { /* Storage can be disabled. */ } }
+    function updateFolderExpansion() {
+      for (const [key, { button, body, arrow }] of folderBodies) { const expanded = folderExpansion.isExpanded(key); body.hidden = !expanded; button.setAttribute('aria-expanded', String(expanded)); arrow.textContent = expanded ? '▾' : '▸'; }
+    }
     const money = value => isNumber(value) ? `$${value.toLocaleString('en-US')}` : '未知';
     const format = value => isNumber(value) ? value.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) : '—';
     const signed = value => isNumber(value) ? `${value > 0 ? '+' : ''}${format(value)}` : '—';
@@ -142,13 +147,21 @@
       for (const item of folders) option(folder, item.key, `${item.label} · ${item.count} 场`);
       if (state.libraryFolder !== 'all' && !folders.some(item => item.key === state.libraryFolder)) option(folder, state.libraryFolder, `${win.ReplayLibrary.folderLabel(state.libraryFolder)} · 当前无录像`);
       folder.value = state.libraryFolder; $('stats-library-view').value = state.libraryView; $('stats-library-folder-field').hidden = state.libraryView !== 'folders'; $('stats-library-folder-note').hidden = state.libraryView !== 'folders';
+      $('stats-library-fold-controls').hidden = state.libraryView !== 'folders';
       const shown = state.catalog.filter(demo => win.ReplayLibrary.matches(demo, query) && (state.libraryView !== 'folders' || win.ReplayLibrary.inFolder(demo, state.libraryFolder)));
       $('stats-library-count').textContent = `${shown.length} / ${state.catalog.length} 场`;
       $('stats-refresh-library').disabled = state.refreshing || state.scanning;
-      const list = $('stats-library-list'); list.replaceChildren();
+      const list = $('stats-library-list'); list.replaceChildren(); folderBodies.clear();
       for (const group of win.ReplayLibrary.groupByFolder(shown, state.libraryView, state.libraryView === 'folders' ? state.libraryFolder : 'all')) {
         let target = list;
-        if (state.libraryView === 'folders') { target = make('section', null, 'statistics-folder-group'); target.dataset.folderKey = group.key; target.append(make('h3', `${group.label} · ${group.demos.length} 场`)); list.append(target); }
+        if (state.libraryView === 'folders') {
+          const section = make('section', null, 'statistics-folder-group'); section.dataset.folderKey = group.key;
+          const heading = make('h3'), button = make('button', null, 'statistics-folder-toggle'), arrow = make('span', null, 'statistics-folder-arrow'); arrow.setAttribute('aria-hidden', 'true');
+          button.type = 'button'; button.dataset.folderToggle = group.key; button.append(arrow, make('span', `${group.label} · ${group.demos.length} 场`));
+          target = make('div', null, 'statistics-folder-body'); target.dataset.folderBody = group.key; target.id = `stats-library-folder-body-${encodeURIComponent(group.key)}`; button.setAttribute('aria-controls', target.id);
+          button.addEventListener('click', () => { folderExpansion.setExpanded(group.key, !folderExpansion.isExpanded(group.key)); saveLibraryView(); updateFolderExpansion(); });
+          folderBodies.set(group.key, { button, body: target, arrow }); heading.append(button); section.append(heading, target); list.append(section);
+        }
         for (const demo of group.demos) {
           const row = make('article', null, `library-item${state.selected === demo.id || state.loading === demo.id ? ' is-selected' : ''}`); row.dataset.demoId = demo.id;
           row.append(make('strong', demo.name || demo.id));
@@ -165,6 +178,7 @@
         }
       }
       if (!shown.length) list.append(make('p', state.catalog.length ? '没有匹配的录像。' : '将 .dem 或 .zip 放入 demo 文件夹或其子文件夹，再点击刷新。', 'micro'));
+      updateFolderExpansion();
       renderReparse();
     }
     function pollCatalog() {
@@ -360,7 +374,8 @@
       if (!kills.length) emptyRow(body, 7);
     }
     $('stats-library-search').addEventListener('input', renderLibrary);
-    for (const [id, key] of [['stats-library-view', 'libraryView'], ['stats-library-folder', 'libraryFolder']]) $(id).addEventListener('change', () => { state[key] = $(id).value; try { folderStorage?.setItem(folderStorageKey, JSON.stringify({ libraryView: state.libraryView, libraryFolder: state.libraryFolder })); } catch { /* Storage can be disabled. */ } renderLibrary(); });
+    for (const [id, key] of [['stats-library-view', 'libraryView'], ['stats-library-folder', 'libraryFolder']]) $(id).addEventListener('change', () => { state[key] = $(id).value; saveLibraryView(); renderLibrary(); });
+    for (const [id, expanded] of [['stats-library-collapse-all', false], ['stats-library-expand-all', true]]) $(id).addEventListener('click', () => { folderExpansion.setAll(expanded); saveLibraryView(); updateFolderExpansion(); });
     $('stats-refresh-library').addEventListener('click', refreshLibrary);
     $('stats-reparse-current').addEventListener('click', () => requestReparse([state.selected]));
     $('stats-reparse-all').addEventListener('click', () => requestReparse(state.catalog.filter(demo => demo.status === 'ready').map(demo => demo.id)));

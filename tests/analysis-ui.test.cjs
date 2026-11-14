@@ -425,6 +425,15 @@ function folderButton(ui, list, key, action) {
   assert.ok(button, `Missing ${list} folder ${key} ${action} action`); return button;
 }
 async function selectFolder(ui, list, key, action) { await folderButton(ui, list, key, action).click(); await settle(); }
+function folderBody(ui, list, key) {
+  const body = ui.get(list).querySelectorAll('div').find(item => item.dataset.folderBody === key);
+  assert.ok(body, `Missing ${list} folder body ${key}`); return body;
+}
+function folderToggle(ui, list, key) {
+  const toggle = ui.get(list).querySelectorAll('button').find(item => item.dataset.folderToggle === key);
+  assert.ok(toggle, `Missing ${list} folder toggle ${key}`); return toggle;
+}
+async function toggleFolder(ui, list, key) { await folderToggle(ui, list, key).click(); await settle(); }
 function savedDemoChecked(ui, id) { const selected = ui.saved().selectedDemos; return selected === null || selected.includes(id); }
 function catalogCheckbox(ui, id) {
   const input = ui.get('analysis-library-list').querySelectorAll('input').find(input => input.dataset.demoId === id);
@@ -903,8 +912,8 @@ test('folder view preferences restore independently without changing existing an
   ui.get('demo-search').value = 'first'; await ui.get('demo-search').dispatch('input'); await settle();
   await ui.change('analysis-library-view-mode', 'folders'); await ui.change('analysis-library-folder', 'path:训练'); await ui.change('analysis-library-map', 'de_nuke'); await searchLibrary(ui, 'second');
   const saved = ui.saved(), restored = await page([first, second], { saved });
-  assert.deepEqual(restored.saved().sourceView, { mode: 'folders', folder: 'path:中文/比赛', query: 'first' });
-  assert.deepEqual(restored.saved().libraryView, { mode: 'folders', folder: 'path:训练', query: 'second', map: 'de_nuke' });
+  assert.deepEqual(restored.saved().sourceView, { mode: 'folders', folder: 'path:中文/比赛', query: 'first', folderExpansion: { defaultExpanded: true, overrides: {} } });
+  assert.deepEqual(restored.saved().libraryView, { mode: 'folders', folder: 'path:训练', query: 'second', map: 'de_nuke', folderExpansion: { defaultExpanded: true, overrides: {} } });
   assert.deepEqual(viewIndependentSettings(restored.saved()), initial);
   assert.deepEqual(visibleDemoNames(restored), ['first.dem']);
   assert.deepEqual(restored.get('analysis-library-list').querySelectorAll('input').map(input => input.dataset.demoId), ['second']);
@@ -927,6 +936,101 @@ test('refresh updates folder metadata for cached IDs without reparsing or losing
   await ui.change('demo-folder', 'path:new/中文'); await ui.change('analysis-library-folder', 'path:new/中文');
   assert.equal(demoCheckbox(ui, original.name).checked, true); assert.equal(catalogCheckbox(ui, original.id).checked, true);
   assert.equal(ui.requests.filter(([url]) => url === '/api/demos/same-id/analysis').length, summaryReads); assert.equal(ui.parseBodies.length, 0);
+});
+
+test('individual folder disclosure has independent source/library state and never changes selection or recomputes the heatmap', async () => {
+  const ui = await page([folderDemo('one', ['A/one.dem']), folderDemo('two', ['B/two.dem'])], { saved: { selectedDemos: ['one'], selectedTeams: ['team-a'], selectedPlayers: ['76561198000000001'], aliases: { kept: 'My team' } } });
+  assert.equal(ui.get('demo-folder-expansion-actions').hidden, true); assert.equal(ui.get('analysis-library-folder-expansion-actions').hidden, true);
+  await ui.change('demo-view-mode', 'folders'); await ui.change('analysis-library-view-mode', 'folders');
+  const before = viewIndependentSettings(ui.saved()), calls = ui.analysisCalls(), requestCount = ui.requests.length, total = deaths(ui);
+  const toggle = folderToggle(ui, 'demo-list', 'path:A'), body = folderBody(ui, 'demo-list', 'path:A');
+  assert.equal(toggle.type, 'button'); assert.equal(toggle['aria-expanded'], 'true'); assert.equal(toggle['aria-controls'], body.id);
+  await toggleFolder(ui, 'demo-list', 'path:A');
+  assert.equal(folderBody(ui, 'demo-list', 'path:A').hidden, true); assert.equal(folderToggle(ui, 'demo-list', 'path:A')['aria-expanded'], 'false');
+  assert.equal(folderBody(ui, 'demo-list', 'path:B').hidden, false); assert.equal(folderBody(ui, 'analysis-library-list', 'path:A').hidden, false);
+  await toggleFolder(ui, 'analysis-library-list', 'path:B');
+  assert.equal(folderBody(ui, 'analysis-library-list', 'path:B').hidden, true); assert.equal(folderBody(ui, 'demo-list', 'path:B').hidden, false);
+  ui.get('demo-search').value = 'two'; await ui.get('demo-search').dispatch('input'); await settle();
+  assert.equal(ui.get('demo-list').querySelectorAll('button').some(button => button.dataset.folderToggle === 'path:A'), false);
+  ui.get('demo-search').value = ''; await ui.get('demo-search').dispatch('input'); await settle();
+  assert.equal(folderBody(ui, 'demo-list', 'path:A').hidden, true, 'search-hidden group remembers its state');
+  await ui.change('demo-view-mode', 'all'); assert.equal(ui.get('demo-folder-expansion-actions').hidden, true);
+  await ui.change('demo-view-mode', 'folders'); assert.equal(folderBody(ui, 'demo-list', 'path:A').hidden, true);
+  assert.deepEqual(viewIndependentSettings(ui.saved()), before); assert.equal(ui.analysisCalls(), calls); assert.equal(ui.requests.length, requestCount); assert.equal(deaths(ui), total);
+  await toggleFolder(ui, 'demo-list', 'path:A'); assert.equal(folderBody(ui, 'demo-list', 'path:A').hidden, false);
+});
+
+test('collapsed folder rows retain full-folder and global filtered selection behavior without expanding or parsing', async () => {
+  const shared = folderDemo('shared', ['A/shared.dem', 'B/shared.dem']), other = folderDemo('other-map', ['A/other.dem'], 'de_nuke'), outside = folderDemo('outside', ['B/outside.dem']);
+  const ui = await page([shared, other, outside], { saved: { map: 'de_mirage', selectedDemos: [] } });
+  await ui.change('demo-view-mode', 'folders'); await clickAndSettle(ui, 'demo-collapse-all');
+  assert.equal(folderBody(ui, 'demo-list', 'path:A').hidden, true); assert.equal(folderBody(ui, 'demo-list', 'path:B').hidden, true);
+  await selectFolder(ui, 'demo-list', 'path:A', 'all');
+  assert.deepEqual(ui.saved().selectedDemos.sort(), ['other-map', 'shared']); assert.equal(folderBody(ui, 'demo-list', 'path:A').hidden, true);
+  await selectFolder(ui, 'demo-list', 'path:A', 'none'); assert.deepEqual(ui.saved().selectedDemos, []);
+  await clickAndSettle(ui, 'demos-all'); assert.deepEqual(ui.saved().selectedDemos.sort(), ['outside', 'shared'], 'global visible action still means map/search/folder scope, not disclosure visibility');
+  assert.equal(folderBody(ui, 'demo-list', 'path:B').hidden, true);
+  await ui.change('analysis-library-view-mode', 'folders'); await clickAndSettle(ui, 'analysis-library-collapse-all');
+  await selectFolder(ui, 'analysis-library-list', 'path:A', 'all'); assert.match(ui.get('analysis-library-count').textContent, /已选 2 场/);
+  await selectFolder(ui, 'analysis-library-list', 'path:A', 'invert'); assert.match(ui.get('analysis-library-count').textContent, /已选 0 场/);
+  await clickAndSettle(ui, 'analysis-library-all'); assert.match(ui.get('analysis-library-count').textContent, /已选 3 场/);
+  assert.equal(folderBody(ui, 'analysis-library-list', 'path:A').hidden, true); assert.equal(folderBody(ui, 'analysis-library-list', 'path:B').hidden, true);
+  assert.ok(folderButton(ui, 'analysis-library-list', 'path:A', 'none'), 'bulk controls remain outside the hidden body');
+  assert.equal(ui.parseBodies.length, 0);
+});
+
+test('all-folder defaults apply to newly discovered folders and survive resets, refresh and reload independently', async () => {
+  const one = folderDemo('one', ['A/one.dem']), two = folderDemo('two', ['B/two.dem']);
+  const ui = await page([one, two]);
+  await ui.change('demo-view-mode', 'folders'); await ui.change('analysis-library-view-mode', 'folders');
+  await clickAndSettle(ui, 'demo-collapse-all'); await clickAndSettle(ui, 'analysis-library-collapse-all');
+  await toggleFolder(ui, 'demo-list', 'path:A');
+  assert.deepEqual(ui.saved().sourceView.folderExpansion, { defaultExpanded: false, overrides: { 'path:A': true } });
+  assert.deepEqual(ui.saved().libraryView.folderExpansion, { defaultExpanded: false, overrides: {} });
+  const sourcePreference = ui.saved().sourceView.folderExpansion, libraryPreference = ui.saved().libraryView.folderExpansion;
+  await clickAndSettle(ui, 'clear-selection'); assert.deepEqual(ui.saved().sourceView.folderExpansion, sourcePreference); assert.deepEqual(ui.saved().libraryView.folderExpansion, libraryPreference);
+  const third = folderDemo('third', ['新文件夹/C/third.dem']); ui.setJob(third);
+  await clickAndSettle(ui, 'refresh-library');
+  assert.equal(folderBody(ui, 'demo-list', 'path:新文件夹/C').hidden, true); assert.equal(folderBody(ui, 'analysis-library-list', 'path:新文件夹/C').hidden, true);
+  assert.equal(folderBody(ui, 'demo-list', 'path:A').hidden, false); assert.equal(folderBody(ui, 'analysis-library-list', 'path:A').hidden, true);
+  const restored = await page([one, two, third], { saved: ui.saved() });
+  assert.equal(folderBody(restored, 'demo-list', 'path:A').hidden, false); assert.equal(folderBody(restored, 'demo-list', 'path:B').hidden, true); assert.equal(folderBody(restored, 'demo-list', 'path:新文件夹/C').hidden, true);
+  assert.equal(folderBody(restored, 'analysis-library-list', 'path:A').hidden, true); assert.equal(restored.parseBodies.length, 0);
+  const calls = restored.analysisCalls(), total = deaths(restored);
+  await clickAndSettle(restored, 'demo-expand-all');
+  assert.deepEqual(restored.saved().sourceView.folderExpansion, { defaultExpanded: true, overrides: {} });
+  assert.ok(restored.get('demo-list').querySelectorAll('div').filter(div => div.dataset.folderBody).every(div => !div.hidden));
+  assert.equal(folderBody(restored, 'analysis-library-list', 'path:A').hidden, true);
+  await clickAndSettle(restored, 'analysis-library-expand-all'); assert.deepEqual(restored.saved().libraryView.folderExpansion, { defaultExpanded: true, overrides: {} });
+  assert.equal(restored.analysisCalls(), calls); assert.equal(deaths(restored), total);
+});
+
+test('map changes and duplicated pending sections retain the same source-folder disclosure with unique control IDs', async () => {
+  const one = folderDemo('one', ['A/one.dem']), other = folderDemo('other', ['A/other.dem'], 'de_nuke');
+  const pending = { ...folderDemo('pending', ['A/pending.dem'], ''), jobStatus: 'queued' };
+  const ui = await page([one, other, pending], { saved: { map: 'de_mirage', sourceView: { mode: 'folders' } } });
+  const first = folderBody(ui, 'demo-list', 'path:A'), second = folderBody(ui, 'unmapped-demo-list', 'path:A');
+  assert.notEqual(first.id, second.id); assert.equal(folderToggle(ui, 'unmapped-demo-list', 'path:A')['aria-controls'], second.id);
+  await toggleFolder(ui, 'demo-list', 'path:A');
+  assert.equal(folderBody(ui, 'demo-list', 'path:A').hidden, true); assert.equal(folderBody(ui, 'unmapped-demo-list', 'path:A').hidden, true);
+  await ui.change('analysis-map', 'de_nuke'); assert.equal(folderBody(ui, 'demo-list', 'path:A').hidden, true);
+  await ui.change('analysis-map', 'de_mirage'); assert.equal(folderBody(ui, 'demo-list', 'path:A').hidden, true);
+  await toggleFolder(ui, 'unmapped-demo-list', 'path:A');
+  assert.equal(folderBody(ui, 'demo-list', 'path:A').hidden, false); assert.equal(folderBody(ui, 'unmapped-demo-list', 'path:A').hidden, false);
+  assert.equal(ui.parseBodies.length, 0);
+});
+
+test('malformed disclosure preferences fall back safely and snapshots contain only sanitized data', async () => {
+  const ui = await page([folderDemo('one', ['A/one.dem']), folderDemo('two', ['B/two.dem'])], { saved: {
+    sourceView: { mode: 'folders', folderExpansion: ['invalid'] },
+    libraryView: { mode: 'folders', folderExpansion: { defaultExpanded: 'false', overrides: { 'path:A': 'false', 'path:B': false } } },
+  } });
+  assert.equal(folderBody(ui, 'demo-list', 'path:A').hidden, false); assert.equal(folderBody(ui, 'demo-list', 'path:B').hidden, false);
+  assert.equal(folderBody(ui, 'analysis-library-list', 'path:A').hidden, false); assert.equal(folderBody(ui, 'analysis-library-list', 'path:B').hidden, true);
+  assert.deepEqual(ui.saved().sourceView.folderExpansion, { defaultExpanded: true, overrides: {} });
+  assert.deepEqual(ui.saved().libraryView.folderExpansion, { defaultExpanded: true, overrides: { 'path:B': false } });
+  await clickAndSettle(ui, 'analysis-library-expand-all'); assert.equal(folderBody(ui, 'analysis-library-list', 'path:B').hidden, false);
+  assert.equal(ui.get('global-error').textContent, ''); assert.equal(ui.parseBodies.length, 0);
 });
 
 test('ready playback caches are absent from analysis until chosen and are promoted without queuing a reparse', async () => {

@@ -529,7 +529,7 @@ function folderCatalog() {
     { id: 'c', name: 'c.dem', status: 'ready', available: false, map: 'de_mirage', sources: [{ path: '已移动/c.dem', kind: 'dem', available: false }] },
   ];
 }
-function visibleStatisticsIds(ui) { return ui.get('stats-library-list').querySelectorAll('button').map(button => button.dataset.demoId); }
+function visibleStatisticsIds(ui) { return ui.get('stats-library-list').querySelectorAll('button').filter(button => button.dataset.demoId).map(button => button.dataset.demoId); }
 
 test('single statistics library groups physical folders, root ZIPs and unavailable caches while counting unique demos', async () => {
   const ui = await page({ datasets: [fixture('a'), fixture('b'), fixture('c')], catalog: folderCatalog() });
@@ -559,4 +559,47 @@ test('single statistics folder preferences survive reload and a missing saved fo
   assert.equal(restored.requests.some(([url]) => url.endsWith('/statistics')), false);
   const missing = await page({ ...options, folderSaved: { libraryView: 'folders', libraryFolder: 'path:暂时移走' } });
   assert.deepEqual(visibleStatisticsIds(missing), []); assert.equal(missing.get('stats-library-folder').value, 'path:暂时移走'); assert.match(missing.get('stats-library-folder').children.at(-1).textContent, /当前无录像/);
+});
+
+function statisticsFolder(ui, key) {
+  const list = ui.get('stats-library-list'), button = list.querySelectorAll('button').find(el => el.dataset.folderToggle === key), body = list.querySelectorAll('div').find(el => el.dataset.folderBody === key);
+  assert.ok(button && body, `Missing folder ${key}`); return { button, body };
+}
+
+test('single folder disclosures preserve the selected report and filter without redrawing results or requesting data', async () => {
+  const options = { datasets: [fixture('a'), fixture('b'), fixture('c')], catalog: folderCatalog() }, ui = await page(options);
+  await ui.choose('a'); await ui.change('stats-player', 'p1'); await ui.change('stats-library-view', 'folders');
+  const firstRow = ui.get('stats-kill-rows').children[0], requests = ui.requests.length, group = statisticsFolder(ui, 'path:备份');
+  assert.equal(group.button.type, 'button'); assert.equal(group.button['aria-expanded'], 'true'); assert.equal(group.button['aria-controls'], group.body.id);
+  await group.button.click(); assert.equal(group.body.hidden, true); assert.equal(group.button['aria-expanded'], 'false'); assert.equal(statisticsFolder(ui, 'path:赛事/决赛').body.hidden, false);
+  assert.equal(ui.get('stats-kill-rows').children[0], firstRow, 'folding does not redraw or recompute statistics');
+  assert.equal(ui.get('stats-player').value, 'p1'); assert.equal(ui.get('stats-total-score').textContent, '+9'); assert.equal(ui.get('stats-match-name').textContent, 'a.dem'); assert.equal(ui.requests.length, requests);
+  await ui.search('a.dem'); assert.equal(statisticsFolder(ui, 'path:备份').body.hidden, true); await ui.search('');
+  await ui.get('stats-refresh-library').click(); await settle(); assert.equal(statisticsFolder(ui, 'path:备份').body.hidden, true);
+  await ui.change('stats-library-view', 'all'); assert.equal(ui.get('stats-library-fold-controls').hidden, true);
+  await ui.change('stats-library-view', 'folders'); assert.equal(statisticsFolder(ui, 'path:备份').body.hidden, true); assert.equal(ui.get('stats-library-fold-controls').hidden, false);
+  const restored = await page({ ...options, folderSaved: ui.folderSaved() }); assert.equal(statisticsFolder(restored, 'path:备份').body.hidden, true); assert.equal(statisticsFolder(restored, 'root').body.hidden, false);
+  assert.equal(restored.requests.some(([url]) => /\/(statistics|parse)$/.test(url)), false);
+  await statisticsFolder(restored, 'path:备份').button.click(); assert.equal(statisticsFolder(restored, 'path:备份').body.hidden, false);
+});
+
+test('single collapse-all applies to hidden and newly discovered folders while expand-all clears saved exceptions', async () => {
+  const ui = await page({ datasets: [fixture('a'), fixture('b'), fixture('c')], catalog: folderCatalog(), folderSaved: { libraryView: 'folders' } });
+  await ui.search('a.dem'); await ui.get('stats-library-collapse-all').click();
+  assert.deepEqual(ui.folderSaved().folderExpansion, { defaultExpanded: false, overrides: {} });
+  await statisticsFolder(ui, 'path:备份').button.click(); assert.deepEqual(ui.folderSaved().folderExpansion.overrides, { 'path:备份': true });
+  await ui.search(''); assert.equal(statisticsFolder(ui, 'root').body.hidden, true); assert.equal(statisticsFolder(ui, 'unavailable').body.hidden, true);
+  ui.setCatalog('b', { sources: [{ path: '新录像/比赛/b.dem', available: true }] }); await ui.get('stats-refresh-library').click(); await settle();
+  assert.equal(statisticsFolder(ui, 'path:新录像/比赛').body.hidden, true); assert.equal(statisticsFolder(ui, 'path:备份').body.hidden, false);
+  await ui.get('stats-library-expand-all').click(); assert.deepEqual(ui.folderSaved().folderExpansion, { defaultExpanded: true, overrides: {} });
+  assert.ok(ui.get('stats-library-list').querySelectorAll('div').filter(el => el.dataset.folderBody).every(el => !el.hidden));
+  assert.equal(ui.requests.some(([url]) => /\/(statistics|parse)$/.test(url)), false);
+});
+
+test('single malformed folder expansion preferences default to usable expanded groups', async () => {
+  for (const folderExpansion of [null, [], 'invalid', { defaultExpanded: 'false', overrides: { root: 'false' } }]) {
+    const ui = await page({ catalog: folderCatalog(), folderSaved: { libraryView: 'folders', folderExpansion } });
+    assert.equal(statisticsFolder(ui, 'root').body.hidden, false); await statisticsFolder(ui, 'root').button.click(); assert.equal(statisticsFolder(ui, 'root').body.hidden, true);
+    assert.deepEqual(ui.folderSaved().folderExpansion, { defaultExpanded: true, overrides: { root: false } });
+  }
 });
