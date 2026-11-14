@@ -1,4 +1,4 @@
-param([string]$Version = '4.0.3')
+param([string]$Version = '4.0.4')
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Use a numeric semantic version, for example 4.0.0.' }
@@ -15,6 +15,8 @@ $stageDirectory = Join-Path $outputDirectory ("stage-" + [Guid]::NewGuid().ToStr
 $packageDirectory = Join-Path $stageDirectory $packageName
 $binaryDirectory = Join-Path $packageDirectory 'bin'
 New-Item -ItemType Directory -Path $binaryDirectory -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $packageDirectory 'demo') -Force | Out-Null
+[IO.File]::WriteAllText((Join-Path $packageDirectory 'demo\README.txt'), '将解压后的 .dem 放入此文件夹。启动时自动读取；网页打开后点击“刷新文件夹”添加新录像。原始文件不会因移除分析记录而删除。', [Text.UTF8Encoding]::new($true))
 $oldGoos, $oldGoarch, $oldCgo = $env:GOOS, $env:GOARCH, $env:CGO_ENABLED
 try {
     $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '0'
@@ -46,12 +48,14 @@ $readme = @"
 CS2 Replay v$Version - Windows x64 便携版
 
 1. 完整解压本文件夹，双击 Start Viewer.cmd。
-2. 浏览器打开 http://127.0.0.1:8765，导入 .dem 进行回放。
-3. 点击“多 Demo 分析”，最多导入10场，按地图、玩家ID、队伍和CT/T筛选叠加。
-4. 查看移动、交火、死亡热力图，以及道具落点区域和相同投法的数量、频率与代表轨迹。
+2. 将解压后的 .dem 放入本目录 demo 文件夹，启动后自动读取，也可在网页手动导入。
+3. 浏览器打开 http://127.0.0.1:8765/analysis.html，按地图、玩家ID、队伍和CT/T筛选叠加，不设10场数量上限。
+4. 网页已经打开时，点击“刷新文件夹”读取新加入或修改的 Demo，重复刷新不会重复添加。
+5. 查看移动、交火、死亡热力图，以及道具落点区域和相同投法的数量、频率与代表轨迹。
 
 已包含可执行程序，不需要安装 Go、Node.js 或 CS2。地图与图标内嵌，可离线使用。
-保持启动终端开启，在终端按 Ctrl+C 停止。服务重启会清理临时比赛缓存，需要重新导入。
+保持启动终端开启，在终端按 Ctrl+C 停止。解析记录保存在本目录 data 文件夹，重启会自动恢复，无需逐个重新导入；原始 demo 文件不会删除。
+原目录升级时替换 bin 程序和说明文件，保留 demo 与 data 文件夹；目录名可以继续使用旧版本名。
 若端口冲突，在本目录运行 bin\cs2-viewer.exe -port 8766 -open。
 统计口径、地图版本限制和素材归属请参阅 README.md、MAP_SOURCES.md、ICON_SOURCES.md 及 licenses。
 

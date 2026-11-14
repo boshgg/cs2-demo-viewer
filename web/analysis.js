@@ -3,6 +3,8 @@
   const $ = id => document.getElementById(id), core = window.ReplayAnalysis, heat = window.ReplayHeatmap;
   const state = { jobs: new Map(), demos: new Map(), selectedDemos: null, selectedTeams: null, selectedPlayers: null, aliases: {}, map: '', mapInfo: null, image: null, result: null, worker: null, request: 0, mapRequest: 0, uploading: false, cancelled: false, controller: null, currentJob: null, queued: [], pendingCount: 0, selectedGroup: null, selectedThrow: null, zoom: 1, panX: 0, panY: 0, layers: new Map(), fallbackBounds: { minX: -3000, maxX: 3000, minY: -3000, maxY: 3000 } };
   const storageKey = 'cs2-analysis-v4';
+  let initializing = true, migratedSessionId = '', libraryEnabled = false, libraryRefreshing = false, syncPromise = null, libraryTimer, restoredView = null;
+  const loadingJobs = new Map();
   const metricNames = { movement: '移动', engagements: '交火', deaths: '死亡', shots: '开火' };
   const heatResolution = 384;
   const metrics = ['movement', 'engagements', 'deaths', 'shots'];
@@ -16,7 +18,22 @@
   function message(text, error = true) { $('global-error').hidden = !text; $('global-error').textContent = text || ''; $('global-error').classList.toggle('error', error); }
   async function json(response) { const body = await response.json().catch(() => ({})); if (!response.ok) throw new Error(body.error || body.message || `请求失败（${response.status}）`); return body; }
   function save() {
-    try { localStorage.setItem(storageKey, JSON.stringify({ ids: [...state.jobs.keys()], selectedDemos: state.selectedDemos && [...state.selectedDemos], map: state.map, aliases: state.aliases })); } catch { /* Private browsing may not offer localStorage. */ }
+    if (initializing) return;
+    const settings = { ids: [...state.jobs.keys()], selectedDemos: state.selectedDemos && [...state.selectedDemos], selectedTeams: state.selectedTeams && [...state.selectedTeams], selectedPlayers: state.selectedPlayers && [...state.selectedPlayers], map: state.map, aliases: state.aliases, side: $('analysis-side').value, floor: $('analysis-floor').value, utilityType: $('analysis-utility-type').value, utilitySort: $('utility-sort').value, query: $('player-search').value, layers: metrics.filter(name => $(`layer-${name}`).checked), radius: Number($('heat-radius').value), opacity: Number($('heat-opacity').value), scale: heatMode(), landingDistance: Number($('landing-distance').value), throwDistance: Number($('throw-distance').value), migratedSessionId };
+    if (restoredView) { settings.map = restoredView.map; settings.floor = restoredView.floor; }
+    try { localStorage.setItem(storageKey, JSON.stringify(settings)); } catch { /* Private browsing may not offer localStorage. */ }
+  }
+  function restoreSettings(saved) {
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return;
+    state.aliases = saved.aliases && typeof saved.aliases === 'object' && !Array.isArray(saved.aliases) ? Object.fromEntries(Object.entries(saved.aliases).filter(([, value]) => typeof value === 'string')) : {};
+    state.map = typeof saved.map === 'string' ? saved.map : '';
+    for (const key of ['selectedDemos', 'selectedTeams', 'selectedPlayers']) state[key] = Array.isArray(saved[key]) ? new Set(saved[key].filter(id => typeof id === 'string')) : null;
+    for (const [key, id, choices] of [['side', 'analysis-side', ['all', '2', '3']], ['floor', 'analysis-floor', ['all', 'upper', 'lower']], ['utilityType', 'analysis-utility-type', ['all', ...Object.keys(utilityNames)]], ['utilitySort', 'utility-sort', ['common', 'rare']], ['scale', 'heat-scale', ['log', 'linear']]]) if (choices.includes(saved[key])) $(id).value = saved[key];
+    if (typeof saved.query === 'string') $('player-search').value = saved.query;
+    if (Array.isArray(saved.layers)) for (const name of metrics) $(`layer-${name}`).checked = saved.layers.includes(name);
+    for (const [key, id, min, max] of [['radius', 'heat-radius', 64, 384], ['opacity', 'heat-opacity', 15, 100], ['landingDistance', 'landing-distance', 16, 512], ['throwDistance', 'throw-distance', 16, 256]]) if (Number.isFinite(saved[key])) $(id).value = String(Math.max(min, Math.min(max, saved[key])));
+    $('radius-value').textContent = `${$('heat-radius').value} 单位`; $('opacity-value').textContent = `${$('heat-opacity').value}%`;
+    migratedSessionId = typeof saved.migratedSessionId === 'string' ? saved.migratedSessionId : '';
   }
   function currentDemos() { return [...state.demos.values()].filter(d => d.map === state.map && (!state.selectedDemos || state.selectedDemos.has(d.id))); }
   function updateWorkerData() { state.worker?.postMessage({ type: 'datasets', datasets: [...state.demos.values()] }); }
@@ -26,7 +43,7 @@
       $('computing').hidden = true; $('analysis-empty').hidden = false; $('selection-empty').hidden = true;
       $('selection-summary').textContent = '选择比赛、队伍或玩家，开始分析。';
       for (const id of ['metric-movement', 'metric-engagements', 'metric-deaths', 'metric-utilities']) $(id).textContent = '—';
-      $('export-image').disabled = $('export-csv').disabled = true; renderUtilityGroups(); draw(); return;
+      $('export-image').disabled = $('export-csv').disabled = true; renderUtilityGroups(); draw(); save(); return;
     }
     const filter = { map: state.map, demoIds: state.selectedDemos && [...state.selectedDemos], teamIds: state.selectedTeams && [...state.selectedTeams], playerIds: state.selectedPlayers && [...state.selectedPlayers], sides: $('analysis-side').value === 'all' ? [2, 3] : [Number($('analysis-side').value)], floor: $('analysis-floor').value, lowerMaxZ: state.mapInfo?.lowerMaxZ, teamAliases: state.aliases, utilityType: $('analysis-utility-type').value };
     const cluster = { landing: Number($('landing-distance').value) || 128, throwing: Number($('throw-distance').value) || 64, lowerMaxZ: state.mapInfo?.lowerMaxZ };
@@ -64,7 +81,7 @@
     if (checked) state[key].add(id); else state[key].delete(id);
   }
   function renderJobs() {
-    $('demo-count').textContent = `${state.jobs.size + state.pendingCount} / 10`;
+    $('demo-count').textContent = `${state.jobs.size + state.pendingCount} 场`;
     const list = $('demo-list'); list.replaceChildren();
     for (const job of state.jobs.values()) {
       const row = node('div', null, 'check-item'), label = node('label'), check = document.createElement('input'), words = node('span');
@@ -80,7 +97,8 @@
       const remove = node('button', '×', 'demo-remove'); remove.title = job.owned ? '移除比赛并释放回放缓存' : '从分析移除'; remove.setAttribute('aria-label', `移除 ${job.name || '比赛'}`); remove.disabled = state.uploading && state.currentJob === job.id; remove.addEventListener('click', () => removeJob(job.id)); row.append(remove); list.append(row);
     }
     if (!state.jobs.size) list.append(node('p', '导入一场或多场 .dem，建立本次分析。', 'muted'));
-    $('sample-analysis').disabled = state.uploading || state.jobs.size >= 10;
+    $('sample-analysis').disabled = state.uploading;
+    $('refresh-library').disabled = !libraryEnabled || libraryRefreshing || state.uploading;
   }
   async function removeJob(id) {
     const job = state.jobs.get(id);
@@ -176,9 +194,16 @@
     for (const name of names) select.append(new Option(`${name} · ${[...state.demos.values()].filter(d => d.map === name).length} 场`, name));
     select.disabled = !names.length;
     if (!names.length) select.append(new Option('等待导入', ''));
-    const next = names.includes(preferredMap) ? preferredMap : names.includes(state.map) ? state.map : names[0] || '';
+    const waitingForSavedMap = restoredView && !names.includes(restoredView.map) && [...state.jobs.values()].some(job => job.status !== 'ready' && job.status !== 'error');
+    const preferred = preferredMap || restoredView?.map;
+    const next = waitingForSavedMap ? '' : names.includes(preferred) ? preferred : names.includes(state.map) ? state.map : names[0] || '';
     select.value = next;
     if (next !== state.map || !state.mapInfo) await loadMap(next);
+    if (restoredView && !waitingForSavedMap) {
+      if (next === restoredView.map && restoredView.floor !== 'all' && Number.isFinite(state.mapInfo?.lowerMaxZ)) { $('analysis-floor').value = restoredView.floor; await loadMapImage(); }
+      else if (next && next !== restoredView.map) { state.selectedTeams = state.selectedPlayers = null; $('player-search').value = ''; }
+      restoredView = null;
+    }
     $('map-hint').textContent = names.length > 1 ? `${names.length} 张地图已分组；只叠加当前地图。` : '不同地图分开统计，不会混合坐标。';
   }
   async function loadMap(name) {
@@ -210,16 +235,97 @@
     draw();
   }
   async function loadJob(id, options = {}) {
-    const data = await json(await fetch(`/api/demos/${encodeURIComponent(id)}/analysis`, { signal: options.signal }));
+    let pending = loadingJobs.get(id);
+    if (!pending) {
+      pending = fetch(`/api/demos/${encodeURIComponent(id)}/analysis`, { signal: options.signal }).then(json);
+      loadingJobs.set(id, pending);
+    }
+    let data;
+    try { data = await pending; } finally { if (loadingJobs.get(id) === pending) loadingJobs.delete(id); }
     if (!data || !Array.isArray(data.series) || !Array.isArray(data.players)) throw new Error('分析摘要格式不完整，请重新导入 Demo。');
+    if (options.batch && !state.jobs.has(id)) return null;
     const existing = state.jobs.get(id);
     state.jobs.set(id, { ...existing, ...options, id, name: data.name, map: data.map, status: 'ready', synthetic: data.synthetic, warnings: data.warnings }); state.demos.set(id, data);
+    if (options.batch) return data;
     updateWorkerData(); renderJobs();
     if (options.focus) await focusDemo(data);
     else { await refreshMaps(); renderFilters(); requestAnalysis(); }
     return data;
   }
+  function scheduleLibraryPoll() {
+    clearTimeout(libraryTimer);
+    if (!state.uploading && [...state.jobs.values()].some(job => job.owned && job.status !== 'ready' && job.status !== 'error')) {
+      libraryTimer = setTimeout(() => { void syncServerJobs().catch(error => { $('library-status').textContent = `更新解析进度失败：${error.message}。可点击刷新重试。`; }); }, 1200);
+    }
+  }
+  async function syncServerJobs(options = {}) {
+    if (syncPromise) return syncPromise;
+    syncPromise = (async () => {
+      const response = await json(await fetch('/api/analyses', { cache: 'no-store' }));
+      const jobs = Array.isArray(response) ? response : response.demos || [], known = new Set(jobs.map(job => job.id));
+      let changed = false;
+      if (options.pruneSelection && state.selectedDemos) {
+        const hadSelection = state.selectedDemos.size > 0;
+        state.selectedDemos = new Set([...state.selectedDemos].filter(id => known.has(id)));
+        if (hadSelection && !state.selectedDemos.size) state.selectedDemos = null;
+      }
+      for (const [id, job] of state.jobs) if (job.owned && !known.has(id)) {
+        state.jobs.delete(id); changed = state.demos.delete(id) || changed; state.selectedDemos?.delete(id);
+      }
+      const ready = [];
+      for (const job of jobs) {
+        const existing = state.jobs.get(job.id);
+        state.jobs.set(job.id, { ...existing, ...job, owned: true });
+        if (existing && job.revision && job.revision !== existing.revision) changed = state.demos.delete(job.id) || changed;
+        if (job.status !== 'ready') changed = state.demos.delete(job.id) || changed;
+        else if (!state.demos.has(job.id)) ready.push(job.id);
+      }
+      // Bound browser fetch/decode work; recompute once for the complete batch.
+      for (let offset = 0; offset < ready.length; offset += 3) {
+        await Promise.all(ready.slice(offset, offset + 3).map(async id => {
+          try { await loadJob(id, { owned: true, batch: true }); changed = true; }
+          catch (error) { if (state.jobs.has(id)) Object.assign(state.jobs.get(id), { status: 'error', error: error.message }); }
+        }));
+      }
+      renderJobs();
+      if (options.render !== false && (changed || !state.result)) {
+        if (!restoredView && state.map && ![...state.demos.values()].some(demo => demo.map === state.map)) restoredView = { map: state.map, floor: $('analysis-floor').value };
+        if (changed) updateWorkerData();
+        await refreshMaps(); renderFilters(); requestAnalysis();
+      }
+      const pending = [...state.jobs.values()].filter(job => job.status !== 'ready' && job.status !== 'error').length;
+      $('library-progress').textContent = pending ? `${pending} 场等待或正在解析 · 完成后自动更新` : '';
+      scheduleLibraryPoll();
+      return jobs;
+    })();
+    try { return await syncPromise; } finally { syncPromise = null; }
+  }
+  async function loadLibraryInfo() {
+    try {
+      const info = await json(await fetch('/api/library', { cache: 'no-store' }));
+      libraryEnabled = info.enabled === true;
+      $('library-directory').textContent = info.directory || '未配置 Demo 文件夹';
+      $('library-directory').title = info.directory || '';
+      $('library-status').textContent = libraryEnabled ? '把 .dem 放入此文件夹；新增或修改后点击刷新。' : info.message || '此服务未启用文件夹读取。';
+    } catch { $('library-status').textContent = '无法读取文件夹信息；仍可手动导入 Demo。'; }
+    $('refresh-library').disabled = !libraryEnabled;
+  }
+  async function refreshLibrary() {
+    if (!libraryEnabled || libraryRefreshing || state.uploading) return;
+    libraryRefreshing = true; $('refresh-library').disabled = true; $('library-status').textContent = '正在检查文件夹…';
+    try {
+      const result = await json(await fetch('/api/library/refresh', { method: 'POST' }));
+      if (result.directory) { $('library-directory').textContent = result.directory; $('library-directory').title = result.directory; }
+      // An earlier progress request may predate this scan; fetch a fresh snapshot.
+      if (syncPromise) await syncPromise;
+      await syncServerJobs();
+      const errors = Array.isArray(result.errors) ? result.errors.map(item => typeof item === 'string' ? item : item.message || item.error || '文件暂不可读取') : [];
+      $('library-status').textContent = `新增 ${number(result.added)} 场 · ${number(result.unchanged)} 场无需重复解析${errors.length ? `。${errors.join('；')}` : '。已有筛选已保留。'}`;
+    } catch (error) { $('library-status').textContent = `刷新失败：${error.message}。已有比赛仍可查看，可再次点击重试。`; }
+    finally { libraryRefreshing = false; renderJobs(); }
+  }
   async function focusDemo(data) {
+    restoredView = null;
     state.selectedDemos?.add(data.id); state.selectedTeams = state.selectedPlayers = null;
     $('player-search').value = ''; $('analysis-floor').value = 'all';
     const previousMap = state.map;
@@ -243,10 +349,10 @@
   async function importFiles(files) {
     if (state.uploading) { message('正在导入这一批比赛，请完成或取消后再添加文件。'); return; }
     const list = [...files]; if (!list.length) return;
-    if (state.jobs.size + list.length > 10) { message(`最多叠加 10 场比赛，当前已有 ${state.jobs.size} 场；请移除部分比赛或减少本次选择。`); return; }
     const invalid = list.find(f => !/\.dem$/i.test(f.name) || f.size === 0 || f.size > 2 * 1024 ** 3);
     if (invalid) { message(`${invalid.name} 不是可导入的 .dem 文件：请先解压，文件必须非空且不超过 2 GiB。`); return; }
     message(''); state.uploading = true; state.cancelled = false; state.queued = list; state.pendingCount = list.length; state.controller = new AbortController();
+    clearTimeout(libraryTimer);
     $('upload-status').hidden = false; $('cancel-upload').disabled = false; $('analysis-files').disabled = true; renderJobs();
     const failures = []; let focused = false;
     for (let i = 0; i < list.length && !state.cancelled; i++) {
@@ -271,12 +377,12 @@
       }
     }
     state.uploading = false; state.currentJob = null; state.pendingCount = 0; state.controller = null; state.queued = [];
-    $('upload-status').hidden = true; $('analysis-files').disabled = false; $('analysis-files').value = ''; renderJobs(); save();
+    $('upload-status').hidden = true; $('analysis-files').disabled = false; $('analysis-files').value = ''; renderJobs(); save(); scheduleLibraryPoll();
     if (failures.length) message(`部分比赛未导入，可重新选择重试。${failures.join('；')}`);
     else if (state.cancelled) message('已取消剩余导入；已经完成的比赛仍保留。', false);
   }
   async function sample() {
-    if (state.jobs.size >= 10 || state.uploading) return;
+    if (state.uploading) return;
     try {
       message(''); const data = await json(await fetch('/api/sample/analysis'));
       data.synthetic = true; state.jobs.set(data.id, { id: data.id, name: data.name || '合成示例', map: data.map, status: 'ready', synthetic: true, owned: false }); state.demos.set(data.id, data); state.selectedDemos?.add(data.id);
@@ -396,13 +502,14 @@
   }
   function download(blob, filename) { const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(url), 30000); }
   $('analysis-files').addEventListener('change', event => importFiles(event.target.files));
+  $('refresh-library').addEventListener('click', refreshLibrary);
   $('cancel-upload').addEventListener('click', () => { state.cancelled = true; state.controller?.abort(); $('cancel-upload').disabled = true; $('upload-message').textContent = '正在取消当前任务…'; });
   $('sample-analysis').addEventListener('click', sample);
-  $('analysis-map').addEventListener('change', async event => { state.selectedTeams = null; state.selectedPlayers = null; await loadMap(event.target.value); renderFilters(); requestAnalysis(); });
+  $('analysis-map').addEventListener('change', async event => { restoredView = null; state.selectedTeams = null; state.selectedPlayers = null; await loadMap(event.target.value); renderFilters(); requestAnalysis(); });
   $('analysis-side').addEventListener('change', requestAnalysis);
   $('analysis-floor').addEventListener('change', async () => { await loadMapImage(); requestAnalysis(); });
   $('analysis-utility-type').addEventListener('change', requestAnalysis);
-  $('utility-sort').addEventListener('change', renderUtilityGroups);
+  $('utility-sort').addEventListener('change', () => { renderUtilityGroups(); save(); });
   for (const id of ['landing-distance', 'throw-distance']) $(id).addEventListener('change', event => { const input = event.target; input.value = String(Math.max(Number(input.min), Math.min(Number(input.max), Number(input.value) || Number(input.defaultValue)))); requestAnalysis(); });
   $('teams-all').addEventListener('click', () => { state.selectedTeams = null; renderFilters(); requestAnalysis(); });
   $('teams-none').addEventListener('click', () => { state.selectedTeams = new Set(); renderFilters(); requestAnalysis(); });
@@ -410,15 +517,15 @@
   $('players-all').addEventListener('click', () => { state.selectedPlayers = null; renderPlayers(); requestAnalysis(); });
   $('players-none').addEventListener('click', () => { state.selectedPlayers = new Set(); renderPlayers(); requestAnalysis(); });
   $('players-invert').addEventListener('click', () => { state.selectedPlayers = new Set(availablePlayers().map(p => p.id).filter(id => state.selectedPlayers && !state.selectedPlayers.has(id))); renderPlayers(); requestAnalysis(); });
-  $('player-search').addEventListener('input', renderPlayers);
+  $('player-search').addEventListener('input', () => { renderPlayers(); save(); });
   $('apply-aliases').addEventListener('click', () => { $('team-aliases').querySelectorAll('input').forEach(input => { const value = input.value.trim(); if (value) state.aliases[input.dataset.teamId] = value; else delete state.aliases[input.dataset.teamId]; }); state.selectedTeams = null; renderFilters(); requestAnalysis(); });
   $('clear-selection').addEventListener('click', () => { state.selectedDemos = state.selectedTeams = state.selectedPlayers = null; $('analysis-side').value = 'all'; $('analysis-floor').value = 'all'; $('analysis-utility-type').value = 'all'; $('player-search').value = ''; renderJobs(); renderFilters(); void loadMapImage(); requestAnalysis(); });
   $('clear-utility').addEventListener('click', () => { state.selectedGroup = state.selectedThrow = null; renderUtilityGroups(); draw(); });
-  for (const name of metrics) $(`layer-${name}`).addEventListener('change', rebuildHeat);
+  for (const name of metrics) $(`layer-${name}`).addEventListener('change', () => { rebuildHeat(); save(); });
   let radiusTimer;
-  $('heat-radius').addEventListener('input', () => { $('radius-value').textContent = `${$('heat-radius').value} 单位`; clearTimeout(radiusTimer); radiusTimer = setTimeout(rebuildHeat, 75); });
-  $('heat-opacity').addEventListener('input', () => { $('opacity-value').textContent = `${$('heat-opacity').value}%`; draw(); });
-  $('heat-scale').addEventListener('change', colorHeat);
+  $('heat-radius').addEventListener('input', () => { $('radius-value').textContent = `${$('heat-radius').value} 单位`; clearTimeout(radiusTimer); radiusTimer = setTimeout(rebuildHeat, 75); save(); });
+  $('heat-opacity').addEventListener('input', () => { $('opacity-value').textContent = `${$('heat-opacity').value}%`; draw(); save(); });
+  $('heat-scale').addEventListener('change', () => { colorHeat(); save(); });
   function fit() { state.zoom = 1; state.panX = state.panY = 0; draw(); }
   $('fit-map').addEventListener('click', fit);
   canvas.addEventListener('wheel', event => { event.preventDefault(); const before = dimensions(), rect = canvas.getBoundingClientRect(), px = event.clientX - rect.left, py = event.clientY - rect.top, old = state.zoom; state.zoom = Math.max(1, Math.min(5, state.zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12))); const ratio = state.zoom / old; state.panX = (state.panX + before.width / 2 - px) * ratio - before.width / 2 + px; state.panY = (state.panY + before.height / 2 - py) * ratio - before.height / 2 + py; draw(); }, { passive: false });
@@ -471,30 +578,28 @@
   document.addEventListener('dragover', event => { if (event.dataTransfer?.types.includes('Files')) event.preventDefault(); });
   document.addEventListener('drop', event => { if (event.dataTransfer?.files.length) { event.preventDefault(); void importFiles(event.dataTransfer.files); } });
   async function init() {
-    try { const saved = JSON.parse(localStorage.getItem(storageKey) || '{}'); state.aliases = saved.aliases || {}; state.map = saved.map || ''; state.selectedDemos = saved.selectedDemos ? new Set(saved.selectedDemos) : null; } catch { /* Ignore malformed local UI preferences. */ }
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem(storageKey) || '{}') || {}; } catch { /* Ignore malformed local UI preferences. */ }
+    try {
+      const session = await json(await fetch('/api/session-settings', { cache: 'no-store' }));
+      if (session.sessionId && session.sessionId !== saved.migratedSessionId && session.settings && typeof session.settings === 'object' && !Array.isArray(session.settings)) saved = { ...session.settings, migratedSessionId: session.sessionId };
+    } catch { /* A viewer without a restored session still uses browser settings. */ }
+    restoreSettings(saved);
+    if (state.map) restoredView = { map: state.map, floor: $('analysis-floor').value };
     try {
       state.worker = new Worker('/analysis-core.js');
       state.worker.onmessage = ({ data }) => { if (data.error) { if (data.id === state.request) { message(`分析失败：${data.error}`); $('computing').hidden = true; } } else applyAnalysis(data.id, data.result); };
       state.worker.onerror = () => { state.worker.terminate(); state.worker = null; requestAnalysis(); };
     } catch { state.worker = null; }
     try {
-      const response = await json(await fetch('/api/analyses', { cache: 'no-store' }));
-      const jobs = (Array.isArray(response) ? response : response.demos || []).slice(0, 10);
-      if (state.selectedDemos) {
-        const hadSelection = state.selectedDemos.size > 0, ids = new Set(jobs.map(job => job.id));
-        state.selectedDemos = new Set([...state.selectedDemos].filter(id => ids.has(id)));
-        if (hadSelection && !state.selectedDemos.size) state.selectedDemos = null;
-      }
-      for (const job of jobs) state.jobs.set(job.id, { ...job, owned: true }); renderJobs();
-      for (const job of jobs) {
-        if (job.status === 'ready') { try { await loadJob(job.id, { owned: true }); } catch (error) { Object.assign(state.jobs.get(job.id), { status: 'error', error: error.message }); } }
-        else if (job.status !== 'error') void pollJob(job.id).catch(error => { if (state.jobs.has(job.id)) Object.assign(state.jobs.get(job.id), { status: 'error', error: error.message }); renderJobs(); });
-      }
+      await Promise.all([syncServerJobs({ render: false, pruneSelection: true }), loadLibraryInfo()]);
+      updateWorkerData(); await refreshMaps();
       const currentId = new URL(location.href).searchParams.get('demo');
-      if (currentId && !state.jobs.has(currentId) && state.jobs.size < 10) await loadJob(currentId, { owned: false, focus: true });
+      if (currentId && !state.jobs.has(currentId)) await loadJob(currentId, { owned: false, focus: true });
       else if (currentId && state.demos.has(currentId)) await focusDemo(state.demos.get(currentId));
-      renderJobs(); await refreshMaps(); renderFilters(); requestAnalysis();
+      initializing = false; renderJobs(); renderFilters(); requestAnalysis(); save();
     } catch (error) { message(`无法恢复本机分析：${error.message}。仍可尝试导入新的 Demo。`); }
+    finally { initializing = false; }
   }
   void init();
 })();

@@ -22,8 +22,8 @@ function dataset(id, map = 'de_mirage', x = 256, y = 768) {
 
 async function page(datasets = [dataset('one')], pageOptions = {}) {
   const elements = new Map(), canvases = [], downloads = [], requests = [], timers = new Map();
-  const mapGates = new Map(), resizeObservers = [];
-  let nextTimer = 0;
+  const mapGates = new Map(), resizeObservers = [], timerDelays = new Map(), savedWrites = [];
+  let nextTimer = 0, analysisCalls = 0, refreshError = '';
   class Element {
     constructor(tag = 'div') {
       this.tagName = tag; this.children = []; this.listeners = {}; this.style = {}; this.dataset = {};
@@ -82,10 +82,19 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
   const response = data => ({ ok: true, json: async () => data });
   const source = new Map(datasets.map(demo => [demo.id, demo]));
   const uploads = new Map((pageOptions.uploads || []).map(demo => [demo.name, demo]));
+  const libraryFiles = new Map((pageOptions.libraryDemos || []).map(demo => [demo.id, demo]));
   const stored = new Map(pageOptions.saved ? [['cs2-analysis-v4', JSON.stringify(pageOptions.saved)]] : []);
   const fetch = async (url, options = {}) => {
     requests.push([url, options.method || 'GET']);
-    if (url === '/api/analyses') return response([...source.values()].map(d => ({ id: d.id, name: d.name, map: d.map, status: 'ready' })));
+    if (url === '/api/session-settings') return response(pageOptions.session || { sessionId: '', settings: null });
+    if (url === '/api/library') return response({ enabled: true, directory: 'F:\\viewer\\demo', count: libraryFiles.size, ...(pageOptions.library || {}) });
+    if (url === '/api/library/refresh' && options.method === 'POST') {
+      if (refreshError) return { ok: false, status: 500, json: async () => ({ error: refreshError }) };
+      let added = 0;
+      for (const [id, demo] of libraryFiles) if (!source.has(id)) { source.set(id, demo); added++; }
+      return response({ added, unchanged: libraryFiles.size - added, queued: [...source.values()].filter(d => d.jobStatus === 'queued').length, directory: 'F:\\viewer\\demo', errors: pageOptions.libraryErrors || [] });
+    }
+    if (url === '/api/analyses') return response([...source.values()].map(d => ({ id: d.id, name: d.name, map: d.map, status: d.jobStatus || 'ready', revision: d.revision })));
     if (url === '/api/demos?mode=analysis' && options.method === 'POST') {
       const file = options.body.get('demo'), demo = uploads.get(file.name);
       assert.ok(demo, `Unexpected uploaded fixture ${file.name}`); source.set(demo.id, demo); return response({ id: demo.id });
@@ -102,7 +111,7 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
     if (url.startsWith('/api/maps/')) {
       const name = decodeURIComponent(url.slice('/api/maps/'.length));
       if (mapGates.has(name)) await mapGates.get(name);
-      return response({ posX: 0, posY: 1024, scale: 1, radarSize: 1024, radar: `/maps/${name}.png` });
+      return response({ posX: 0, posY: 1024, scale: 1, radarSize: 1024, radar: `/maps/${name}.png`, ...pageOptions.mapInfo });
     }
     throw new Error(`Unexpected fetch: ${url}`);
   };
@@ -111,16 +120,16 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
     static revokeObjectURL() {}
   }
   const sandbox = {
-    window: { ReplayAnalysis: analysis, ReplayHeatmap: heatmap }, document: { getElementById: get, createElement: create, addEventListener: noop },
+    window: { ReplayAnalysis: { ...analysis, aggregate: (...args) => { analysisCalls++; return analysis.aggregate(...args); } }, ReplayHeatmap: heatmap }, document: { getElementById: get, createElement: create, addEventListener: noop },
     Option: function (text, value) { const option = new Element('option'); option.textContent = text; option.value = value; return option; },
     Image: class { decode() { return Promise.resolve(); } },
     ImageData: class { constructor(data, width, height) { this.data = data; this.width = width; this.height = height; } },
     ResizeObserver: class { constructor(callback) { resizeObservers.push(callback); } observe() {} },
-    localStorage: { getItem: key => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) }, location: { href: pageOptions.href || 'http://127.0.0.1:8765/analysis.html' },
+    localStorage: { getItem: key => stored.get(key) ?? null, setItem: (key, value) => { stored.set(key, value); if (key === 'cs2-analysis-v4') savedWrites.push(JSON.parse(value)); } }, location: { href: pageOptions.href || 'http://127.0.0.1:8765/analysis.html' },
     FormData: class { constructor() { this.values = new Map(); } append(key, value) { this.values.set(key, value); } get(key) { return this.values.get(key); } },
     AbortController, DOMException, devicePixelRatio: 2, URL: PageURL, Blob, fetch, console,
-    setTimeout: (callback, delay = 0) => { const id = ++nextTimer; timers.set(id, callback); if (!delay) queueMicrotask(() => { if (timers.has(id)) { timers.delete(id); callback(); } }); return id; },
-    clearTimeout: id => timers.delete(id),
+    setTimeout: (callback, delay = 0) => { const id = ++nextTimer; timers.set(id, callback); timerDelays.set(id, delay); if (!delay) queueMicrotask(() => { if (timers.has(id)) { timers.delete(id); timerDelays.delete(id); callback(); } }); return id; },
+    clearTimeout: id => { timers.delete(id); timerDelays.delete(id); },
   };
   vm.runInNewContext(script, sandbox, { filename: 'analysis.js' });
   await settle();
@@ -130,6 +139,11 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
   const hasVisibleHeat = () => renderedHeat()?.imageData.data.some((value, index) => index % 4 === 3 && value > 0) || false;
   return { get, main, canvases, downloads, requests, renderedHeat, hasVisibleHeat,
     saved: () => JSON.parse(stored.get('cs2-analysis-v4') || '{}'),
+    savedWrites, analysisCalls: () => analysisCalls,
+    setLibraryFiles(demos) { libraryFiles.clear(); for (const demo of demos) libraryFiles.set(demo.id, demo); },
+    setJob(demo) { source.set(demo.id, demo); },
+    failRefresh(message) { refreshError = message; },
+    async pollLibrary() { for (const [id, callback] of [...timers]) if (timerDelays.get(id) === 1200) { timers.delete(id); timerDelays.delete(id); callback(); } await settle(); },
     async upload(...names) { get('analysis-files').files = names.map(name => ({ name, size: 1024 })); await get('analysis-files').dispatch('change'); await settle(); },
     async change(id, value) { get(id).value = value; await get(id).dispatch('change'); await settle(); },
     blockMap(name) { let release; mapGates.set(name, new Promise(resolve => { release = resolve; })); return release; },
@@ -408,4 +422,131 @@ test('viewing a demo row resets hidden player filters without discarding other s
   assert.equal(ui.get('analysis-map').value, 'de_ancient'); assert.equal(ui.get('player-search').value, ''); assert.equal(ui.get('analysis-floor').value, 'all');
   assert.equal(deaths(ui), 20); assert.equal(selectedPlayerIds(ui).length, 20); assert.equal(ui.get('team-list').querySelectorAll('input').length, 4);
   assert.ok(demoCheckbox(ui, ancient.name).checked); assert.ok(demoCheckbox(ui, second.name).checked); assert.ok(demoCheckbox(ui, anubis.name).checked);
+});
+
+test('restoring more than ten cached demos loads every summary once and computes one batch', async () => {
+  const demos = Array.from({ length: 24 }, (_, index) => dataset(`cached-${index}`));
+  const ui = await page(demos, { saved: { ids: demos.map(demo => demo.id), map: 'de_mirage' } });
+  assert.equal(ui.get('demo-count').textContent, '24 场'); assert.equal(deaths(ui), 24);
+  assert.equal(ui.analysisCalls(), 1, 'restoration does not repeatedly aggregate growing datasets');
+  for (const demo of demos) assert.equal(ui.requests.filter(([url]) => url === `/api/demos/${demo.id}/analysis`).length, 1);
+  assert.ok(ui.savedWrites.length > 0); assert.ok(ui.savedWrites.every(saved => saved.ids.length === 24), 'no partial restore overwrites preferences');
+  assert.equal(ui.saved().selectedDemos, null);
+});
+
+test('manual upload accepts a batch larger than ten demos', async () => {
+  const demos = Array.from({ length: 12 }, (_, index) => dataset(`upload-${index}`));
+  const ui = await page([dataset('existing')], { uploads: demos });
+  await ui.upload(...demos.map(demo => demo.name));
+  assert.equal(ui.get('demo-count').textContent, '13 场'); assert.equal(deaths(ui), 13);
+  assert.equal(ui.get('global-error').textContent, ''); assert.equal(ui.get('upload-status').hidden, true);
+  assert.equal(ui.requests.filter(([url, method]) => url === '/api/demos?mode=analysis' && method === 'POST').length, 12);
+});
+
+test('folder refresh adds demos without changing an explicit subset, map, roster or display filters', async () => {
+  const old = rosterDemo('old', 'de_nuke'), incoming = rosterDemo('incoming', 'de_ancient');
+  const saved = { ids: ['old'], selectedDemos: ['old'], selectedTeams: ['alias:squad'], selectedPlayers: ['p1'], aliases: { alpha: 'Squad' }, map: 'de_nuke', side: '3', floor: 'lower', query: 'Alice', layers: ['deaths'], radius: 224, opacity: 85, scale: 'linear', utilityType: 'smoke', utilitySort: 'rare', landingDistance: 192, throwDistance: 96 };
+  const ui = await page([old], { saved, libraryDemos: [old, incoming], mapInfo: { lowerMaxZ: 100, lowerRadar: '/maps/lower.png' } });
+  const before = ui.saved();
+  await clickAndSettle(ui, 'refresh-library');
+  assert.equal(ui.get('demo-count').textContent, '2 场'); assert.equal(ui.get('analysis-map').value, 'de_nuke');
+  assert.equal(ui.get('analysis-floor').value, 'lower'); assert.equal(ui.get('analysis-side').value, '3');
+  assert.deepEqual(selectedPlayerIds(ui), ['p1']); assert.equal(deaths(ui), 1);
+  assert.equal(demoCheckbox(ui, incoming.name).checked, false); assert.equal(demoCheckbox(ui, old.name).checked, true);
+  assert.match(ui.get('library-status').textContent, /新增 1 场/); assert.equal(ui.get('refresh-library').disabled, false);
+  for (const key of Object.keys(before).filter(key => key !== 'ids')) assert.deepEqual(ui.saved()[key], before[key], `${key} must survive folder refresh`);
+  const calls = ui.analysisCalls();
+  await clickAndSettle(ui, 'refresh-library');
+  assert.equal(ui.analysisCalls(), calls, 'unchanged refresh needs no aggregation');
+  assert.match(ui.get('library-status').textContent, /新增 0 场 · 2 场无需重复解析/);
+  for (const demo of [old, incoming]) assert.equal(ui.requests.filter(([url]) => url === `/api/demos/${demo.id}/analysis`).length, 1);
+});
+
+test('folder refresh under the default all selection automatically includes new demos on the current map', async () => {
+  const old = dataset('old'), added = dataset('added');
+  const ui = await page([old], { libraryDemos: [old, added] });
+  await clickAndSettle(ui, 'refresh-library');
+  assert.equal(deaths(ui), 2); assert.equal(ui.saved().selectedDemos, null); assert.ok(demoCheckbox(ui, added.name).checked);
+  assert.equal(ui.get('library-directory').textContent, 'F:\\viewer\\demo');
+});
+
+test('queued folder demos update when parsing finishes and do not repeatedly load cached summaries', async () => {
+  const old = dataset('old'), queued = { ...dataset('pending'), jobStatus: 'queued', revision: 'first' };
+  const ui = await page([old], { libraryDemos: [old, queued] });
+  await clickAndSettle(ui, 'refresh-library');
+  assert.equal(deaths(ui), 1); assert.equal(demoCheckbox(ui, queued.name).disabled, true);
+  assert.match(ui.get('library-progress').textContent, /1 场等待或正在解析/);
+  ui.setJob({ ...queued, jobStatus: 'ready' }); await ui.pollLibrary();
+  assert.equal(deaths(ui), 2); assert.equal(demoCheckbox(ui, queued.name).disabled, false);
+  assert.equal(ui.get('library-progress').textContent, '');
+  await ui.pollLibrary(); await clickAndSettle(ui, 'refresh-library');
+  for (const demo of [old, queued]) assert.equal(ui.requests.filter(([url]) => url === `/api/demos/${demo.id}/analysis`).length, 1);
+});
+
+test('refresh failure keeps cached analysis and filters usable and permits retry', async () => {
+  const old = dataset('old'), next = dataset('next');
+  const ui = await page([old], { libraryDemos: [old, next], saved: { selectedDemos: ['old'], side: '3' }, libraryErrors: ['copying.dem 尚在写入，稍后刷新重试'] });
+  ui.failRefresh('目录暂不可读取'); await clickAndSettle(ui, 'refresh-library');
+  assert.match(ui.get('library-status').textContent, /刷新失败：目录暂不可读取/);
+  assert.equal(ui.get('refresh-library').disabled, false); assert.equal(deaths(ui), 1);
+  assert.deepEqual(ui.saved().selectedDemos, ['old']); assert.equal(ui.get('demo-count').textContent, '1 场');
+  ui.failRefresh(''); await clickAndSettle(ui, 'refresh-library');
+  assert.equal(ui.get('demo-count').textContent, '2 场'); assert.equal(deaths(ui), 1);
+  assert.match(ui.get('library-status').textContent, /copying.dem 尚在写入/);
+  assert.equal(ui.get('global-error').textContent, '');
+});
+
+test('a ready-to-ready revision change refreshes only that demo and replaces its old analysis', async () => {
+  const old = { ...dataset('edited'), revision: 'v1' }, other = { ...dataset('untouched'), revision: 'v1' };
+  const ui = await page([old, other]);
+  const updated = { ...dataset('edited'), revision: 'v2' }; updated.series[0].cells[0][5] = 9;
+  ui.setJob(updated); await clickAndSettle(ui, 'refresh-library');
+  assert.equal(deaths(ui), 10); assert.equal(ui.get('demo-count').textContent, '2 场');
+  assert.equal(ui.requests.filter(([url]) => url === '/api/demos/edited/analysis').length, 2);
+  assert.equal(ui.requests.filter(([url]) => url === '/api/demos/untouched/analysis').length, 1);
+  await clickAndSettle(ui, 'refresh-library'); assert.equal(deaths(ui), 10);
+  assert.equal(ui.requests.filter(([url]) => url === '/api/demos/edited/analysis').length, 2);
+});
+
+test('migration applies complete settings once, preserving subsequent local edits on reload', async () => {
+  const demos = [rosterDemo('restored', 'de_nuke'), rosterDemo('second', 'de_nuke')];
+  const settings = { ids: demos.map(d => d.id), selectedDemos: ['restored'], selectedTeams: ['alias:squad'], selectedPlayers: ['p1'], map: 'de_nuke', aliases: { alpha: 'Squad' }, side: '3', floor: 'lower', query: 'Alice', layers: ['deaths', 'shots'], radius: 224, opacity: 80, scale: 'linear', utilityType: 'flash', utilitySort: 'rare', landingDistance: 192, throwDistance: 96 };
+  const session = { sessionId: 'migration-2026', settings }, mapInfo = { lowerMaxZ: 100, lowerRadar: '/maps/lower.png' };
+  const ui = await page(demos, { session, mapInfo, saved: { ids: ['expired'], map: 'de_ancient', selectedDemos: [] } });
+  assert.equal(deaths(ui), 1); assert.deepEqual(selectedPlayerIds(ui), ['p1']);
+  for (const [key, value] of Object.entries(settings)) assert.deepEqual(ui.saved()[key], value, `migration must restore ${key}`);
+  assert.equal(ui.saved().migratedSessionId, session.sessionId);
+  assert.ok(ui.savedWrites.every(saved => saved.floor === 'lower' && saved.ids.length === 2 && saved.selectedPlayers[0] === 'p1'), 'initialization never writes half-restored settings');
+  await ui.change('analysis-side', '2'); await ui.change('heat-scale', 'log'); await searchPlayers(ui, 'Squad');
+  await clickAndSettle(ui, 'players-none');
+  const locallyEdited = ui.saved(), reopened = await page(demos, { saved: locallyEdited, session, mapInfo });
+  for (const [key, value] of Object.entries(locallyEdited)) assert.deepEqual(reopened.saved()[key], value, `same session must not overwrite updated ${key}`);
+  assert.equal(deaths(reopened), 0); assert.equal(reopened.get('analysis-side').value, '2');
+  assert.equal(reopened.get('heat-scale').value, 'log'); assert.equal(reopened.get('player-search').value, 'Squad');
+});
+
+test('saved map and floor wait for a queued dataset instead of being replaced by the first ready map', async () => {
+  const other = dataset('other', 'de_ancient'), waiting = { ...rosterDemo('waiting', 'de_nuke'), jobStatus: 'queued' };
+  const settings = { map: 'de_nuke', floor: 'lower', selectedDemos: ['waiting'], selectedTeams: ['alpha'], selectedPlayers: ['p1'], query: 'Alice', side: '3' };
+  const ui = await page([other, waiting], { saved: settings, mapInfo: { lowerMaxZ: 100, lowerRadar: '/maps/lower.png' } });
+  assert.equal(ui.saved().map, 'de_nuke'); assert.equal(ui.saved().floor, 'lower');
+  assert.deepEqual(ui.saved().selectedPlayers, ['p1']); assert.equal(ui.get('analysis-empty').hidden, false);
+  ui.setJob({ ...waiting, jobStatus: 'ready' }); await ui.pollLibrary();
+  assert.equal(ui.get('analysis-map').value, 'de_nuke'); assert.equal(ui.get('analysis-floor').value, 'lower');
+  assert.equal(ui.get('player-search').value, 'Alice'); assert.deepEqual(selectedPlayerIds(ui), ['p1']); assert.equal(deaths(ui), 1);
+  assert.equal(ui.saved().map, 'de_nuke'); assert.equal(ui.saved().floor, 'lower');
+});
+
+test('reparsing the only demo on the active map preserves its filters until its new revision is ready', async () => {
+  const other = dataset('other', 'de_ancient'), original = { ...rosterDemo('updated', 'de_nuke'), revision: 'v1' };
+  const ui = await page([other, original], { saved: { map: 'de_nuke', floor: 'lower', selectedDemos: ['updated'], selectedTeams: ['alpha'], selectedPlayers: ['p1'], query: 'Alice', side: '3' }, mapInfo: { lowerMaxZ: 100 } });
+  assert.equal(deaths(ui), 1);
+  ui.setJob({ ...original, jobStatus: 'parsing', revision: 'v2' }); await clickAndSettle(ui, 'refresh-library');
+  assert.equal(ui.saved().map, 'de_nuke'); assert.equal(ui.saved().floor, 'lower');
+  assert.equal(ui.hasVisibleHeat(), false, 'old revision is not shown as current results');
+  const updated = { ...rosterDemo('updated', 'de_nuke'), revision: 'v2' }; updated.series[0].cells[0][5] = 9;
+  ui.setJob(updated); await ui.pollLibrary();
+  assert.equal(ui.get('analysis-map').value, 'de_nuke'); assert.equal(ui.get('analysis-floor').value, 'lower');
+  assert.equal(ui.get('player-search').value, 'Alice'); assert.deepEqual(selectedPlayerIds(ui), ['p1']); assert.equal(deaths(ui), 9);
+  assert.equal(ui.requests.filter(([url]) => url === '/api/demos/updated/analysis').length, 2);
 });

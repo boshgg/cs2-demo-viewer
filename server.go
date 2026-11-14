@@ -22,12 +22,12 @@ import (
 )
 
 const maxUploadBytes int64 = 2 << 30
-const maxAnalysisDemos = 10
 const maxReplayHistory = 6
 
 type job struct {
 	mu                   sync.Mutex
 	ID                   string  `json:"id"`
+	Revision             string  `json:"revision"`
 	Status               string  `json:"status"`
 	Progress             float64 `json:"progress"`
 	Message              string  `json:"message,omitempty"`
@@ -37,44 +37,64 @@ type job struct {
 	Analysis             bool    `json:"analysis"`
 	name, source, result string
 	analysisResult       string
-	releaseAnalysis      sync.Once
+	ownedSource          bool
+	sourceSize           int64
+	sourceModTime        int64
 	created              time.Time
 	ctx                  context.Context
 	cancel               context.CancelFunc
 }
 
 type app struct {
-	root          string
-	assets        fs.FS
-	mu            sync.Mutex
-	jobs          map[string]*job
-	queue         chan *job
-	slots         chan struct{}
-	analysisSlots chan struct{}
-	ctx           context.Context
-	cancel        context.CancelFunc
-	wg            sync.WaitGroup
+	root            string
+	assets          fs.FS
+	mu              sync.Mutex
+	jobs            map[string]*job
+	queue           chan struct{}
+	pending         []*job
+	slots           chan struct{}
+	ctx             context.Context
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
+	sessionID       string
+	sessionSettings json.RawMessage
+	persistent      bool
+	demoDir         string
+	persistMu       sync.Mutex
+	scanMu          sync.Mutex
+	scanning        bool
+	libraryLock     *os.File
+	closeOnce       sync.Once
 }
 
 func newApp(root string, assets fs.FS) *app {
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &app{root: root, assets: assets, jobs: map[string]*job{}, queue: make(chan *job, 3), slots: make(chan struct{}, 3), analysisSlots: make(chan struct{}, maxAnalysisDemos), ctx: ctx, cancel: cancel}
+	a := &app{root: root, assets: assets, jobs: map[string]*job{}, queue: make(chan struct{}, 1), slots: make(chan struct{}, 3), ctx: ctx, cancel: cancel}
 	a.wg.Add(1)
 	go a.worker()
 	return a
 }
 
 func (a *app) close() {
-	a.cancel()
-	a.wg.Wait()
-	// Only delete generated files in this instance's private temp directory.
-	entries, _ := os.ReadDir(a.root)
-	for _, e := range entries {
-		if !e.IsDir() {
-			_ = os.Remove(filepath.Join(a.root, e.Name()))
+	a.closeOnce.Do(func() {
+		a.cancel()
+		a.wg.Wait()
+		if a.persistent {
+			a.saveLibrary()
+			if a.libraryLock != nil {
+				_ = a.libraryLock.Close()
+			}
+			return
 		}
-	}
-	_ = os.Remove(a.root)
+		// Only delete generated files in this instance's private temp directory.
+		entries, _ := os.ReadDir(a.root)
+		for _, e := range entries {
+			if !e.IsDir() {
+				_ = os.Remove(filepath.Join(a.root, e.Name()))
+			}
+		}
+		_ = os.Remove(a.root)
+	})
 }
 
 func jsonResponse(w http.ResponseWriter, status int, v any) {
@@ -96,6 +116,9 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("GET /api/demos/{id}/status", a.status)
 	mux.HandleFunc("GET /api/demos/{id}/analysis", a.analysisResult)
 	mux.HandleFunc("GET /api/analyses", a.analyses)
+	mux.HandleFunc("GET /api/session-settings", a.sessionSettingsResult)
+	mux.HandleFunc("GET /api/library", a.libraryInfo)
+	mux.HandleFunc("POST /api/library/refresh", a.refreshLibrary)
 	mux.HandleFunc("GET /api/demos/{id}", a.result)
 	mux.HandleFunc("DELETE /api/demos/{id}", a.remove)
 	mux.HandleFunc("GET /api/maps/{map}", a.mapInfo)
@@ -145,20 +168,6 @@ func (a *app) handler() http.Handler {
 
 func (a *app) upload(w http.ResponseWriter, r *http.Request) {
 	analysis := r.URL.Query().Get("mode") == "analysis"
-	analysisRegistered := false
-	if analysis {
-		select {
-		case a.analysisSlots <- struct{}{}:
-		default:
-			apiError(w, 409, "分析工作台最多保留 10 个 Demo，请先移除不需要的比赛")
-			return
-		}
-		defer func() {
-			if !analysisRegistered {
-				<-a.analysisSlots
-			}
-		}()
-	}
 	select {
 	case a.slots <- struct{}{}:
 	default:
@@ -166,11 +175,7 @@ func (a *app) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	queued := false
-	defer func() {
-		if !queued {
-			<-a.slots
-		}
-	}()
+	defer func() { <-a.slots }()
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes+(256<<10))
 	reader, err := r.MultipartReader()
 	if err != nil {
@@ -235,10 +240,10 @@ func (a *app) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	id := hex.EncodeToString(b)
 	ctx, cancel := context.WithCancel(a.ctx)
-	j := &job{ID: id, Name: name, Analysis: analysis, Status: "queued", Message: "已上传，等待解析", name: name, source: source, result: filepath.Join(a.root, id+".json.gz"), analysisResult: filepath.Join(a.root, id+".analysis.json.gz"), created: time.Now(), ctx: ctx, cancel: cancel}
+	j := &job{ID: id, Name: name, Analysis: analysis, Status: "queued", Message: "已上传，等待解析", name: name, source: source, ownedSource: true, result: filepath.Join(a.root, id+".json.gz"), analysisResult: filepath.Join(a.root, id+".analysis.json.gz"), created: time.Now(), ctx: ctx, cancel: cancel}
 	a.mu.Lock()
-	// Analysis jobs have their own ten-slot quota and are never silently evicted
-	// by a later playback import. Ordinary playback retains six recent matches.
+	// Analysis jobs are never silently evicted. Ordinary playback keeps a small
+	// recent list; sequential parsing remains bounded independently of count.
 	replayCount := 0
 	for _, x := range a.jobs {
 		if !x.Analysis {
@@ -259,24 +264,25 @@ func (a *app) upload(w http.ResponseWriter, r *http.Request) {
 			delete(a.jobs, oldest.ID)
 			_ = os.Remove(oldest.result)
 			_ = os.Remove(oldest.analysisResult)
+			if oldest.ownedSource {
+				_ = os.Remove(oldest.source)
+			}
 			oldest.cancel()
 		}
 	}
+	j.Revision = id
 	a.jobs[id] = j
-	analysisRegistered = analysis
 	a.mu.Unlock()
-	select {
-	case a.queue <- j:
-		queued = true
-	case <-a.ctx.Done():
+	if !a.enqueue(j) {
 		cancel()
 		a.mu.Lock()
 		delete(a.jobs, id)
 		a.mu.Unlock()
-		a.releaseAnalysisSlot(j)
 		apiError(w, 503, "服务正在关闭")
 		return
 	}
+	queued = true
+	a.saveLibrary()
 	jsonResponse(w, 202, map[string]string{"id": id})
 }
 
@@ -328,7 +334,7 @@ func (a *app) serveResult(w http.ResponseWriter, r *http.Request, analysis bool)
 		_ = f.Close()
 		// Windows cannot unlink an open cache. DELETE may have raced with
 		// this response; retry only this generated file after closing it.
-		if j.ctx != nil && j.ctx.Err() != nil {
+		if j.ctx != nil && j.ctx.Err() != nil && (!a.persistent || a.ctx.Err() == nil) {
 			_ = os.Remove(path)
 		}
 	}()
@@ -376,7 +382,7 @@ func (a *app) analyses(w http.ResponseWriter, r *http.Request) {
 	// Copy metadata while holding each job's lock. Never decode ten full demos
 	// just to populate the analysis library.
 	a.mu.Lock()
-	jobs := make([]*job, 0, maxAnalysisDemos)
+	jobs := make([]*job, 0, len(a.jobs))
 	for _, j := range a.jobs {
 		if j.Analysis {
 			jobs = append(jobs, j)
@@ -386,32 +392,30 @@ func (a *app) analyses(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0, len(jobs))
 	for _, j := range jobs {
 		j.mu.Lock()
-		items = append(items, map[string]any{"id": j.ID, "name": j.Name, "map": j.Map, "analysis": true, "status": j.Status, "progress": j.Progress, "message": j.Message, "error": j.Error})
+		items = append(items, map[string]any{"id": j.ID, "revision": j.Revision, "name": j.Name, "map": j.Map, "analysis": true, "status": j.Status, "progress": j.Progress, "message": j.Message, "error": j.Error})
 		j.mu.Unlock()
 	}
 	a.mu.Unlock()
-	jsonResponse(w, 200, map[string]any{"demos": items, "maxDemos": maxAnalysisDemos})
-}
-
-func (a *app) releaseAnalysisSlot(j *job) {
-	if j.Analysis {
-		j.releaseAnalysis.Do(func() { <-a.analysisSlots })
-	}
+	jsonResponse(w, 200, map[string]any{"demos": items, "maxDemos": 0})
 }
 
 func (a *app) remove(w http.ResponseWriter, r *http.Request) {
-	j := a.getJob(r)
+	a.mu.Lock()
+	j := a.jobs[r.PathValue("id")]
 	if j == nil {
+		a.mu.Unlock()
 		w.WriteHeader(204)
 		return
 	}
 	j.cancel()
-	a.mu.Lock()
 	delete(a.jobs, j.ID)
 	a.mu.Unlock()
-	a.releaseAnalysisSlot(j)
 	_ = os.Remove(j.result)
 	_ = os.Remove(j.analysisResult)
+	if j.ownedSource {
+		_ = os.Remove(j.source)
+	}
+	a.saveLibrary()
 	w.WriteHeader(204)
 }
 func (a *app) mapInfo(w http.ResponseWriter, r *http.Request) {
@@ -436,17 +440,33 @@ func (a *app) mapInfo(w http.ResponseWriter, r *http.Request) {
 func (a *app) worker() {
 	defer a.wg.Done()
 	for {
+		if a.ctx.Err() != nil {
+			return
+		}
+		a.mu.Lock()
+		var j *job
+		if len(a.pending) > 0 {
+			j, a.pending = a.pending[0], a.pending[1:]
+		}
+		a.mu.Unlock()
+		if j != nil {
+			a.process(j)
+			continue
+		}
 		select {
 		case <-a.ctx.Done():
 			return
-		case j := <-a.queue:
-			a.process(j)
-			<-a.slots
+		case <-a.queue:
 		}
 	}
 }
 func (a *app) process(j *job) {
-	defer os.Remove(j.source)
+	defer a.cleanupDeletedSource(j)
+	if !a.persistent && j.ownedSource {
+		defer os.Remove(j.source)
+	}
+	defer a.saveLibrary()
+	defer a.cleanupCompletedUpload(j)
 	if j.ctx.Err() != nil {
 		return
 	}
@@ -454,7 +474,18 @@ func (a *app) process(j *job) {
 	j.Status = "parsing"
 	j.Message = "正在本地解析比赛"
 	j.mu.Unlock()
-	d, err := parseDemo(j.ctx, j.source, j.ID, j.name, func(p float64) { j.mu.Lock(); j.Progress = p; j.mu.Unlock() })
+	parseSource, cleanup, err := a.snapshotDemo(j)
+	defer cleanup()
+	var d *DemoData
+	if err == nil {
+		d, err = parseDemo(j.ctx, parseSource, j.ID, j.name, func(p float64) { j.mu.Lock(); j.Progress = p; j.mu.Unlock() })
+	}
+	if err == nil && !j.ownedSource && j.sourceSize > 0 {
+		info, statErr := os.Stat(j.source)
+		if statErr != nil || info.Size() != j.sourceSize || info.ModTime().UnixNano() != j.sourceModTime {
+			err = errors.New("Demo 在解析期间发生变化，请写入完成后刷新重试")
+		}
+	}
 	if err == nil && j.ctx.Err() == nil {
 		j.mu.Lock()
 		j.Message = "正在准备回放与热力图分析数据"
@@ -479,6 +510,12 @@ func (a *app) process(j *job) {
 	if j.ctx.Err() != nil {
 		_ = os.Remove(j.result)
 		_ = os.Remove(j.analysisResult)
+		if a.persistent && a.ctx.Err() != nil {
+			j.mu.Lock()
+			j.Status = "queued"
+			j.Message = "等待下次启动继续解析"
+			j.mu.Unlock()
+		}
 		return
 	}
 	j.mu.Lock()

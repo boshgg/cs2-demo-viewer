@@ -25,25 +25,22 @@ func analysisUpload(t *testing.T, h http.Handler, name string, content []byte) *
 	return w
 }
 
-func TestAnalysisQuotaAndReplayRetention(t *testing.T) {
+func TestUnlimitedAnalysisAndReplayRetention(t *testing.T) {
 	a, h := testViewer(t)
 	if w := analysisUpload(t, h, "bad.dem", []byte("invalid")); w.Code != 400 {
 		t.Fatalf("invalid upload=%d", w.Code)
 	}
-	if len(a.analysisSlots) != 0 {
-		t.Fatal("invalid upload leaked analysis quota")
+	if len(a.jobs) != 0 {
+		t.Fatal("invalid upload registered a job")
 	}
 	ids := []string{}
-	for i := 0; i < maxAnalysisDemos; i++ {
+	for i := 0; i < 13; i++ {
 		id := acceptedDemoID(t, analysisUpload(t, h, fmt.Sprintf("match-%d.dem", i), []byte("PBDEMS2\x00")))
 		waitForTestJob(t, h, id)
 		ids = append(ids, id)
 	}
-	if w := analysisUpload(t, h, "eleventh.dem", []byte("PBDEMS2\x00")); w.Code != 409 {
-		t.Fatalf("eleventh analysis=%d", w.Code)
-	}
-	// Import enough ordinary replays to trigger eviction. All ten analysis jobs
-	// must survive; their explicit errors still occupy visible library slots.
+	// Import enough ordinary replays to trigger eviction. All analysis jobs
+	// survive independently of their total count.
 	for i := 0; i < maxReplayHistory+1; i++ {
 		id := acceptedDemoID(t, submitTestDemo(t, h, "playback.dem", []byte("PBDEMS2\x00")))
 		waitForTestJob(t, h, id)
@@ -64,7 +61,7 @@ func TestAnalysisQuotaAndReplayRetention(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &listing); err != nil {
 		t.Fatal(err)
 	}
-	if len(listing.Demos) != 10 || listing.MaxDemos != 10 {
+	if len(listing.Demos) != 13 || listing.MaxDemos != 0 {
 		t.Fatalf("listing=%+v", listing)
 	}
 	for _, j := range listing.Demos {
@@ -74,21 +71,17 @@ func TestAnalysisQuotaAndReplayRetention(t *testing.T) {
 	}
 	localRequest(h, "DELETE", "/api/demos/"+ids[0])
 	localRequest(h, "DELETE", "/api/demos/"+ids[0])
-	if len(a.analysisSlots) != 9 {
-		t.Fatal("remove must release exactly one slot")
+	if localRequest(h, "GET", "/api/demos/"+ids[0]+"/status").Code != 404 {
+		t.Fatal("remove must remove the selected job")
 	}
 	id := acceptedDemoID(t, analysisUpload(t, h, "replacement.dem", []byte("PBDEMS2\x00")))
 	waitForTestJob(t, h, id)
-	if len(a.analysisSlots) != 10 {
-		t.Fatal("replacement did not reclaim quota")
-	}
 }
 
 func TestAnalysisCacheAndConcurrentRemoval(t *testing.T) {
 	a, h := testViewer(t)
 	ctx, cancel := context.WithCancel(a.ctx)
 	j := &job{ID: "analysis-fixture", Name: "fixture.dem", name: "fixture.dem", Map: "de_mirage", Status: "ready", Analysis: true, created: time.Now(), ctx: ctx, cancel: cancel, result: filepath.Join(a.root, "replay.json.gz"), analysisResult: filepath.Join(a.root, "analysis.json.gz")}
-	a.analysisSlots <- struct{}{}
 	a.mu.Lock()
 	a.jobs[j.ID] = j
 	a.mu.Unlock()
@@ -131,8 +124,8 @@ func TestAnalysisCacheAndConcurrentRemoval(t *testing.T) {
 		go func() { defer wg.Done(); localRequest(h, "DELETE", "/api/demos/"+j.ID) }()
 	}
 	wg.Wait()
-	if len(a.analysisSlots) != 0 || ctx.Err() != context.Canceled {
-		t.Fatal("concurrent deletion leaked quota or cancellation")
+	if ctx.Err() != context.Canceled {
+		t.Fatal("concurrent deletion did not cancel the job")
 	}
 	for _, path := range []string{j.result, j.analysisResult} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -160,7 +153,6 @@ func TestAnalysisDeleteDuringDownloadCleansWindowsCache(t *testing.T) {
 	a, h := testViewer(t)
 	ctx, cancel := context.WithCancel(a.ctx)
 	j := &job{ID: "downloading", Name: "download.dem", Status: "ready", Analysis: true, created: time.Now(), ctx: ctx, cancel: cancel, result: filepath.Join(a.root, "download.json.gz"), analysisResult: filepath.Join(a.root, "download.analysis.json.gz")}
-	a.analysisSlots <- struct{}{}
 	a.mu.Lock()
 	a.jobs[j.ID] = j
 	a.mu.Unlock()

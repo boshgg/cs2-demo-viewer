@@ -44,6 +44,14 @@ func canReuseViewer(health viewerHealth) (bool, error) {
 func main() {
 	port := flag.Int("port", 8765, "Local HTTP port")
 	open := flag.Bool("open", false, "Open the viewer in the default browser")
+	restore := flag.String("restore-session", "", "Restore an explicitly selected local session manifest and parsed caches")
+	executable, err := os.Executable()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defaultDemoDir, defaultDataDir := installationDirectories(executable)
+	demoDir := flag.String("demo-dir", defaultDemoDir, "Directory automatically scanned for local .dem files")
+	dataDir := flag.String("data-dir", defaultDataDir, "Persistent parsed demo library directory")
 	flag.Parse()
 	if *port < 1 || *port > 65535 {
 		log.Fatal("invalid port")
@@ -72,16 +80,36 @@ func main() {
 		}
 		log.Fatalf("Cannot listen on %s: %v. Try -port 8766", addr, err)
 	}
-	root, err := os.MkdirTemp("", "cs2-local-viewer-")
-	if err != nil {
-		log.Fatal(err)
-	}
 	assets, err := fs.Sub(webFiles, "web")
 	if err != nil {
 		log.Fatal(err)
 	}
-	a := newApp(root, assets)
+	a, err := openLibrary(*dataDir, *demoDir, assets)
+	if err != nil {
+		_ = listener.Close()
+		log.Fatalf("Cannot open local library: %v", err)
+	}
 	defer a.close()
+	if *restore != "" {
+		if err := a.restoreSession(*restore); err != nil {
+			_ = listener.Close()
+			a.close()
+			log.Fatalf("Cannot restore session: %v", err)
+		}
+		fmt.Printf("Restored %d analysed demos from the selected local session.\n", len(a.jobs))
+	}
+	if err := a.persistLibrary(); err != nil {
+		a.close()
+		_ = listener.Close()
+		log.Fatal(err)
+	}
+	if result, err := a.scanLibrary(); err != nil {
+		log.Printf("Scan demo directory: %v", err)
+	} else {
+		for _, message := range result.Errors {
+			log.Print(message)
+		}
+	}
 	server := &http.Server{Handler: a.handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt)
@@ -97,7 +125,7 @@ func main() {
 		}
 		close(shutdownDone)
 	}()
-	fmt.Printf("\nCS2 2D Demo Viewer v%s\n%s\n\nImport a .dem file in your browser. Files stay on this computer.\nPress Ctrl+C to stop.\nCache: %s\n\n", appVersion, url, root)
+	fmt.Printf("\nCS2 2D Demo Viewer v%s\n%s\n\nDemo directory: %s\nPersistent data: %s\nFiles stay on this computer. Press Ctrl+C to stop.\n\n", appVersion, url, a.demoDir, a.root)
 	if *open {
 		openBrowser(url)
 	}
