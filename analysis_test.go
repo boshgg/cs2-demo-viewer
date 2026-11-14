@@ -171,7 +171,7 @@ func analysisSwapFixture(nameA, nameB string) *DemoData {
 }
 
 func TestAnalysisTeamsRetainRosterIdentityAcrossSides(t *testing.T) {
-	for _, names := range [][2]string{{"Alpha Club", "Beta Club"}, {"TERRORISTS", "COUNTER-TERRORISTS"}, {"Team A", "Team B"}, {"Duplicate Clan", "Duplicate Clan"}} {
+	for _, names := range [][2]string{{"", ""}, {"Alpha Club", "Beta Club"}, {"TERRORISTS", "COUNTER-TERRORISTS"}, {"Team A", "Team B"}, {"Duplicate Clan", "Duplicate Clan"}} {
 		t.Run(names[0]+"/"+names[1], func(t *testing.T) {
 			a := BuildAnalysis(analysisSwapFixture(names[0], names[1]))
 			if len(a.Teams) != 2 {

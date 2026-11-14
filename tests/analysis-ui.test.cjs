@@ -20,7 +20,7 @@ function dataset(id, map = 'de_mirage', x = 256, y = 768) {
       cells: [[x, y, 0, 100, 5, 1, 10], [x + 128, y, 0, 1, 0, 0, 0]] }], utilities: [] };
 }
 
-async function page(datasets = [dataset('one')]) {
+async function page(datasets = [dataset('one')], pageOptions = {}) {
   const elements = new Map(), canvases = [], downloads = [], requests = [], timers = new Map();
   const mapGates = new Map(), resizeObservers = [];
   let nextTimer = 0;
@@ -81,13 +81,23 @@ async function page(datasets = [dataset('one')]) {
   const get = id => { assert.ok(elements.has(id), `HTML is missing #${id}`); return elements.get(id); };
   const response = data => ({ ok: true, json: async () => data });
   const source = new Map(datasets.map(demo => [demo.id, demo]));
+  const uploads = new Map((pageOptions.uploads || []).map(demo => [demo.name, demo]));
+  const stored = new Map(pageOptions.saved ? [['cs2-analysis-v4', JSON.stringify(pageOptions.saved)]] : []);
   const fetch = async (url, options = {}) => {
     requests.push([url, options.method || 'GET']);
     if (url === '/api/analyses') return response([...source.values()].map(d => ({ id: d.id, name: d.name, map: d.map, status: 'ready' })));
-    const match = /^\/api\/demos\/([^/]+)(\/analysis)?$/.exec(url);
+    if (url === '/api/demos?mode=analysis' && options.method === 'POST') {
+      const file = options.body.get('demo'), demo = uploads.get(file.name);
+      assert.ok(demo, `Unexpected uploaded fixture ${file.name}`); source.set(demo.id, demo); return response({ id: demo.id });
+    }
+    const match = /^\/api\/demos\/([^/]+)(\/(?:analysis|status))?$/.exec(url);
     if (match) {
       if (options.method === 'DELETE') { source.delete(match[1]); return response({}); }
-      if (match[2] && source.has(match[1])) return response(source.get(match[1]));
+      if (match[2] === '/analysis' && source.has(match[1])) return response(source.get(match[1]));
+      if (match[2] === '/status' && source.has(match[1])) {
+        const demo = source.get(match[1]);
+        return response({ status: demo.parseError ? 'error' : 'ready', progress: 1, error: demo.parseError || '', map: demo.map });
+      }
     }
     if (url.startsWith('/api/maps/')) {
       const name = decodeURIComponent(url.slice('/api/maps/'.length));
@@ -106,8 +116,9 @@ async function page(datasets = [dataset('one')]) {
     Image: class { decode() { return Promise.resolve(); } },
     ImageData: class { constructor(data, width, height) { this.data = data; this.width = width; this.height = height; } },
     ResizeObserver: class { constructor(callback) { resizeObservers.push(callback); } observe() {} },
-    localStorage: { getItem: () => null, setItem: noop }, location: { href: 'http://127.0.0.1:8765/analysis.html' },
-    devicePixelRatio: 2, URL: PageURL, Blob, fetch, console,
+    localStorage: { getItem: key => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) }, location: { href: pageOptions.href || 'http://127.0.0.1:8765/analysis.html' },
+    FormData: class { constructor() { this.values = new Map(); } append(key, value) { this.values.set(key, value); } get(key) { return this.values.get(key); } },
+    AbortController, DOMException, devicePixelRatio: 2, URL: PageURL, Blob, fetch, console,
     setTimeout: (callback, delay = 0) => { const id = ++nextTimer; timers.set(id, callback); if (!delay) queueMicrotask(() => { if (timers.has(id)) { timers.delete(id); callback(); } }); return id; },
     clearTimeout: id => timers.delete(id),
   };
@@ -118,6 +129,8 @@ async function page(datasets = [dataset('one')]) {
   const renderedHeat = () => main.context.draws.map(args => args[0]).find(image => image.imageData) || null;
   const hasVisibleHeat = () => renderedHeat()?.imageData.data.some((value, index) => index % 4 === 3 && value > 0) || false;
   return { get, main, canvases, downloads, requests, renderedHeat, hasVisibleHeat,
+    saved: () => JSON.parse(stored.get('cs2-analysis-v4') || '{}'),
+    async upload(...names) { get('analysis-files').files = names.map(name => ({ name, size: 1024 })); await get('analysis-files').dispatch('change'); await settle(); },
     async change(id, value) { get(id).value = value; await get(id).dispatch('change'); await settle(); },
     blockMap(name) { let release; mapGates.set(name, new Promise(resolve => { release = resolve; })); return release; },
     resize() { for (const callback of resizeObservers) callback(); },
@@ -128,7 +141,7 @@ test('removing the last demo then changing color scale cannot resurrect its heat
   const ui = await page();
   assert.ok(ui.hasVisibleHeat());
   const row = ui.get('demo-list').children[0];
-  await row.children.find(child => child.tagName === 'button').click(); await settle();
+  await row.querySelectorAll('button').find(child => child.className === 'demo-remove').click(); await settle();
   assert.equal(ui.get('analysis-empty').hidden, false);
   assert.equal(ui.hasVisibleHeat(), false);
   await ui.change('heat-scale', 'linear');
@@ -198,4 +211,201 @@ test('hover density is cleared when zoom, reset, resize or the selected layer ch
   await ui.get('fit-map').click(); await hover(); ui.resize(); assert.equal(tip.hidden, true);
   await hover(); ui.get('layer-movement').checked = false; await ui.get('layer-movement').dispatch('change');
   assert.equal(tip.hidden, true);
+});
+
+function rosterDemo(id = 'roster', map = 'de_mirage') {
+  const players = [
+    ['p1', 'Alice'], ['p2', 'Bob'], ['p3', 'Cara'], ['p4', 'Dan'], ['p5', 'Orphan'], ['p6', 'Shared'],
+  ].map(([id, name]) => ({ id, name, stable: true }));
+  const teams = [
+    { id: 'alpha', name: 'Alpha', playerIds: ['p1', 'p2', 'p6'] },
+    { id: 'beta', name: 'Beta', playerIds: ['p3', 'p4', 'p6'] },
+  ];
+  const series = [
+    ['p1', 'alpha', 3, 1], ['p2', 'alpha', 2, 2], ['p3', 'beta', 3, 4],
+    ['p4', 'beta', 2, 8], ['p5', 'unknown', 3, 16], ['p6', 'alpha', 3, 32], ['p6', 'beta', 2, 64],
+  ].map(([playerId, teamId, side, weight], index) => ({ playerId, teamId, side,
+    cells: [[128 + index * 64, 768, 0, weight, weight, weight, weight]] }));
+  return { id, name: `${id}.dem`, map, roundCount: 1, players, teams, series, utilities: [] };
+}
+function playerInputs(ui, root = ui.get('player-list')) {
+  return root.querySelectorAll('input').filter(input => input.dataset.playerId);
+}
+function group(ui, teamId) {
+  const result = ui.get('player-list').children.find(child => child.dataset.teamId === teamId);
+  assert.ok(result, `Missing player group ${teamId}`); return result;
+}
+function selectedPlayerIds(ui) { return [...new Set(playerInputs(ui).filter(input => input.checked).map(input => input.dataset.playerId))].sort(); }
+async function clickGroup(ui, teamId, action) {
+  const button = group(ui, teamId).querySelectorAll('button').find(button => button.dataset.action === action);
+  assert.ok(button, `Missing ${action} button in ${teamId}`); await button.click(); await settle();
+}
+async function selectPlayer(ui, id, checked, teamId) {
+  const input = playerInputs(ui, teamId ? group(ui, teamId) : ui.get('player-list')).find(input => input.dataset.playerId === id);
+  assert.ok(input, `Missing player ${id}`); input.checked = checked; await input.dispatch('change'); await settle();
+}
+function deaths(ui) { return Number(ui.get('metric-deaths').textContent.replaceAll(',', '')); }
+async function clickAndSettle(ui, id) { await ui.get(id).click(); await settle(); }
+async function searchPlayers(ui, query) { ui.get('player-search').value = query; await ui.get('player-search').dispatch('input'); await settle(); }
+
+test('global player inversion complements both implicit-all and partial selections, and two inversions restore them', async () => {
+  const ui = await page([rosterDemo()]);
+  assert.equal(deaths(ui), 127);
+  await clickAndSettle(ui, 'players-invert');
+  assert.deepEqual(selectedPlayerIds(ui), []); assert.equal(deaths(ui), 0); assert.equal(ui.get('selection-empty').hidden, false);
+  await clickAndSettle(ui, 'players-invert');
+  assert.deepEqual(selectedPlayerIds(ui), ['p1', 'p2', 'p3', 'p4', 'p5', 'p6']); assert.equal(deaths(ui), 127);
+  await selectPlayer(ui, 'p2', false);
+  await clickAndSettle(ui, 'players-invert'); assert.deepEqual(selectedPlayerIds(ui), ['p2']); assert.equal(deaths(ui), 2);
+  await clickAndSettle(ui, 'players-invert'); assert.equal(deaths(ui), 125);
+  await clickAndSettle(ui, 'players-all'); assert.equal(deaths(ui), 127);
+  await clickAndSettle(ui, 'players-none'); assert.deepEqual(selectedPlayerIds(ui), []); assert.equal(deaths(ui), 0);
+});
+
+test('team player actions affect only that roster and preserve other players, including unassigned IDs', async () => {
+  const ui = await page([rosterDemo()]);
+  assert.deepEqual(playerInputs(ui, group(ui, 'unassigned')).map(input => input.dataset.playerId), ['p5']);
+  await clickGroup(ui, 'alpha', 'invert');
+  assert.deepEqual(selectedPlayerIds(ui), ['p3', 'p4', 'p5']); assert.equal(deaths(ui), 28);
+  assert.match(group(ui, 'alpha').querySelectorAll('span').find(span => span.className === 'player-group-count').textContent, /0\s*\/\s*3/);
+  await clickGroup(ui, 'alpha', 'invert'); assert.equal(deaths(ui), 127);
+  await selectPlayer(ui, 'p2', false);
+  await clickGroup(ui, 'alpha', 'all'); assert.equal(deaths(ui), 127);
+  await clickAndSettle(ui, 'players-none'); await clickGroup(ui, 'unassigned', 'all');
+  assert.deepEqual(selectedPlayerIds(ui), ['p5']); assert.equal(deaths(ui), 16);
+  await clickGroup(ui, 'unassigned', 'invert'); assert.equal(deaths(ui), 0);
+});
+
+test('search hides rows without restricting team or global bulk-selection membership', async () => {
+  const ui = await page([rosterDemo()]);
+  await clickAndSettle(ui, 'players-none'); await searchPlayers(ui, 'Alice');
+  assert.deepEqual(playerInputs(ui).map(input => input.dataset.playerId), ['p1']);
+  await clickGroup(ui, 'alpha', 'all'); assert.equal(deaths(ui), 99);
+  await searchPlayers(ui, ''); assert.deepEqual(selectedPlayerIds(ui), ['p1', 'p2', 'p6']);
+  await searchPlayers(ui, 'Alice'); await clickAndSettle(ui, 'players-invert');
+  await searchPlayers(ui, ''); assert.deepEqual(selectedPlayerIds(ui), ['p3', 'p4', 'p5']); assert.equal(deaths(ui), 28);
+});
+
+test('a shared player ID stays linked in every roster after individual and group changes', async () => {
+  const ui = await page([rosterDemo()]);
+  assert.equal(playerInputs(ui).filter(input => input.dataset.playerId === 'p6').length, 2);
+  await selectPlayer(ui, 'p6', false, 'alpha');
+  assert.ok(playerInputs(ui).filter(input => input.dataset.playerId === 'p6').every(input => !input.checked)); assert.equal(deaths(ui), 31);
+  for (const teamId of ['alpha', 'beta']) assert.match(group(ui, teamId).querySelectorAll('span').find(span => span.className === 'player-group-count').textContent, /2\s*\/\s*3/);
+  await clickGroup(ui, 'beta', 'all');
+  assert.ok(playerInputs(ui).filter(input => input.dataset.playerId === 'p6').every(input => input.checked)); assert.equal(deaths(ui), 127);
+});
+
+test('cross-demo rosters deduplicate IDs while bulk selection still includes all of their observations', async () => {
+  const second = rosterDemo('second'); second.players[0].name = 'Alice Alternate';
+  second.players.push({ id: 'p7', name: 'Extra', stable: true }); second.teams[0].playerIds.push('p7');
+  second.series.push({ playerId: 'p7', teamId: 'alpha', side: 3, cells: [[576, 768, 0, 128, 128, 128, 128]] });
+  const otherMap = rosterDemo('other-map', 'de_nuke'); otherMap.players.push({ id: 'not-this-map', name: 'Different map', stable: true }); otherMap.teams[0].playerIds.push('not-this-map');
+  const ui = await page([rosterDemo('first'), second, otherMap]);
+  assert.deepEqual(playerInputs(ui, group(ui, 'alpha')).map(input => input.dataset.playerId).sort(), ['p1', 'p2', 'p6', 'p7']);
+  assert.equal(playerInputs(ui).filter(input => input.dataset.playerId === 'p1').length, 1);
+  assert.ok(!playerInputs(ui).some(input => input.dataset.playerId === 'not-this-map'));
+  await clickAndSettle(ui, 'players-none'); await clickGroup(ui, 'alpha', 'all');
+  assert.deepEqual(selectedPlayerIds(ui), ['p1', 'p2', 'p6', 'p7']); assert.equal(deaths(ui), 326);
+  const secondDemoCheck = ui.get('demo-list').children.find(row => row.querySelectorAll('input')[0]?.['aria-label'] === '叠加 second.dem').querySelectorAll('input')[0];
+  secondDemoCheck.checked = false; await secondDemoCheck.dispatch('change'); await settle();
+  assert.ok(!playerInputs(ui).some(input => input.dataset.playerId === 'p7'));
+  await clickAndSettle(ui, 'players-none'); await clickGroup(ui, 'alpha', 'all'); assert.equal(deaths(ui), 99);
+});
+
+test('team filters remain an independent intersection and CT/T changes do not split the roster', async () => {
+  const ui = await page([rosterDemo()]);
+  await clickAndSettle(ui, 'players-none'); await clickAndSettle(ui, 'teams-none');
+  await clickGroup(ui, 'alpha', 'all'); assert.equal(deaths(ui), 0);
+  assert.ok(group(ui, 'alpha').querySelectorAll('p').some(element => element.className === 'player-group-excluded'));
+  const alphaFilter = ui.get('team-list').querySelectorAll('input').find(input => input['aria-label'] === '筛选队伍 Alpha');
+  alphaFilter.checked = true; await alphaFilter.dispatch('change'); await settle();
+  assert.equal(deaths(ui), 35); assert.deepEqual(selectedPlayerIds(ui), ['p1', 'p2', 'p6']);
+  await ui.change('analysis-side', '3'); assert.equal(deaths(ui), 33); assert.equal(playerInputs(ui, group(ui, 'alpha')).length, 3);
+  await ui.change('analysis-side', '2'); assert.equal(deaths(ui), 2); assert.equal(playerInputs(ui, group(ui, 'alpha')).length, 3);
+  await ui.change('analysis-side', 'all'); await clickAndSettle(ui, 'teams-invert'); assert.equal(deaths(ui), 64);
+  await clickAndSettle(ui, 'teams-invert'); assert.equal(deaths(ui), 35);
+  await clickAndSettle(ui, 'teams-all'); assert.equal(deaths(ui), 99);
+});
+
+test('bulk controls are safe with no imported demos and leave the analysis empty', async () => {
+  const ui = await page([]);
+  for (const id of ['players-invert', 'players-all', 'players-none', 'teams-invert', 'teams-all', 'teams-none']) await clickAndSettle(ui, id);
+  assert.deepEqual(selectedPlayerIds(ui), []); assert.equal(ui.hasVisibleHeat(), false);
+  assert.equal(ui.get('analysis-empty').hidden, false); assert.equal(ui.get('global-error').textContent, '');
+});
+
+function ladderDemo(id, map) {
+  const players = Array.from({ length: 10 }, (_, index) => ({ id: `${id}-player-${index}`, name: `Player ${index + 1}`, stable: true }));
+  const teams = [0, 1].map(index => ({ id: `${id}-roster-${index}`, name: '', identitySource: 'roster', playerIds: players.slice(index * 5, index * 5 + 5).map(player => player.id) }));
+  const series = players.map((player, index) => ({ playerId: player.id, teamId: teams[index < 5 ? 0 : 1].id, side: index < 5 ? 3 : 2,
+    cells: [[128 + index * 32, 768, 0, 1, 1, 1, 1]] }));
+  return { id, name: `${id}.dem`, map, roundCount: 1, players, teams, series, utilities: [] };
+}
+function demoCheckbox(ui, name) {
+  const input = ui.get('demo-list').querySelectorAll('input').find(input => input['aria-label'] === `叠加 ${name}`);
+  assert.ok(input, `Missing demo checkbox ${name}`); return input;
+}
+async function focusDemoRow(ui, name) {
+  const button = ui.get('demo-list').querySelectorAll('button').find(button => button['aria-label'] === `查看 ${name} 所在地图`);
+  assert.ok(button, `Missing focus button ${name}`); await button.click(); await settle();
+}
+
+test('uploading Ancient after Anubis focuses the imported map and restores both anonymous rosters', async () => {
+  const anubis = ladderDemo('anubis', 'de_anubis'), ancient = ladderDemo('ancient', 'de_ancient');
+  const ui = await page([anubis], { uploads: [ancient], saved: { map: 'de_anubis', selectedDemos: ['anubis'] } });
+  await clickAndSettle(ui, 'players-none'); await clickAndSettle(ui, 'teams-none'); await searchPlayers(ui, 'old player search');
+  ui.get('analysis-floor').value = 'lower';
+  await ui.upload(ancient.name);
+  assert.equal(ui.get('global-error').textContent, ''); assert.equal(ui.get('canvas-map-name').textContent, 'de_ancient');
+  assert.equal(ui.get('analysis-map').value, 'de_ancient'); assert.equal(ui.get('player-search').value, ''); assert.equal(ui.get('analysis-floor').value, 'all');
+  assert.equal(playerInputs(ui).length, 10); assert.equal(ui.get('team-list').querySelectorAll('input').length, 2);
+  assert.deepEqual(selectedPlayerIds(ui), ancient.players.map(player => player.id).sort()); assert.equal(deaths(ui), 10);
+  assert.ok(demoCheckbox(ui, ancient.name).checked); assert.ok(demoCheckbox(ui, anubis.name).checked);
+  assert.equal(ui.saved().map, 'de_ancient'); assert.ok(ui.saved().selectedDemos.includes('ancient'));
+});
+
+test('a multi-map upload batch focuses only its first successful demo even when an earlier parse fails', async () => {
+  const anubis = ladderDemo('old-anubis', 'de_anubis'), bad = { ...ladderDemo('bad-upload', 'de_mirage'), parseError: 'Fixture parse failure' };
+  const ancient = ladderDemo('first-good', 'de_ancient'), later = ladderDemo('later-anubis', 'de_anubis');
+  const ui = await page([anubis], { uploads: [bad, ancient, later] });
+  await ui.upload(bad.name, ancient.name, later.name);
+  assert.match(ui.get('global-error').textContent, /Fixture parse failure/);
+  assert.equal(ui.get('analysis-map').value, 'de_ancient'); assert.equal(ui.get('canvas-map-name').textContent, 'de_ancient');
+  assert.deepEqual(selectedPlayerIds(ui), ancient.players.map(player => player.id).sort()); assert.equal(deaths(ui), 10);
+  assert.ok(demoCheckbox(ui, ancient.name).checked); assert.ok(demoCheckbox(ui, later.name).checked);
+  assert.ok(ui.requests.some(([url, method]) => url === '/api/demos/bad-upload' && method === 'DELETE'));
+  assert.equal(ui.get('demo-list').children.length, 3); assert.equal(ui.get('upload-status').hidden, true);
+});
+
+test('restoring stale demo selections drops expired IDs but preserves an explicit empty selection', async () => {
+  const anubis = ladderDemo('new-anubis-id', 'de_anubis'), ancient = ladderDemo('new-ancient-id', 'de_ancient');
+  const stale = await page([anubis, ancient], { saved: { map: 'de_anubis', selectedDemos: ['expired-server-id'] } });
+  assert.equal(stale.saved().selectedDemos, null); assert.equal(deaths(stale), 10);
+  assert.ok(demoCheckbox(stale, anubis.name).checked); assert.ok(demoCheckbox(stale, ancient.name).checked);
+  const partial = await page([anubis, ancient], { saved: { map: 'de_anubis', selectedDemos: [anubis.id, 'expired-server-id'] } });
+  assert.deepEqual(partial.saved().selectedDemos, [anubis.id]); assert.ok(demoCheckbox(partial, anubis.name).checked); assert.equal(demoCheckbox(partial, ancient.name).checked, false);
+  assert.equal(deaths(partial), 10);
+  const empty = await page([anubis, ancient], { saved: { map: 'de_anubis', selectedDemos: [] } });
+  assert.deepEqual(empty.saved().selectedDemos, []); assert.equal(deaths(empty), 0); assert.deepEqual(selectedPlayerIds(empty), []);
+  assert.equal(demoCheckbox(empty, anubis.name).checked, false); assert.equal(demoCheckbox(empty, ancient.name).checked, false);
+});
+
+test('a URL for an already cached demo overrides the old map and includes its roster in the selection', async () => {
+  const anubis = ladderDemo('anubis', 'de_anubis'), ancient = ladderDemo('ancient', 'de_ancient');
+  const ui = await page([anubis, ancient], { saved: { map: 'de_anubis', selectedDemos: ['anubis'] }, href: 'http://127.0.0.1:8765/analysis.html?demo=ancient' });
+  assert.equal(ui.get('analysis-map').value, 'de_ancient'); assert.equal(ui.get('canvas-map-name').textContent, 'de_ancient');
+  assert.equal(deaths(ui), 10); assert.deepEqual(selectedPlayerIds(ui), ancient.players.map(player => player.id).sort());
+  assert.ok(demoCheckbox(ui, ancient.name).checked); assert.ok(demoCheckbox(ui, anubis.name).checked);
+  assert.equal(ui.saved().map, 'de_ancient');
+});
+
+test('viewing a demo row resets hidden player filters without discarding other selected demos on that map', async () => {
+  const anubis = ladderDemo('anubis', 'de_anubis'), ancient = ladderDemo('ancient', 'de_ancient'), second = ladderDemo('ancient-two', 'de_ancient');
+  const ui = await page([anubis, ancient, second], { saved: { map: 'de_anubis', selectedDemos: ['anubis', 'ancient-two'] } });
+  await clickAndSettle(ui, 'players-none'); await clickAndSettle(ui, 'teams-none'); await searchPlayers(ui, 'not in this match');
+  await focusDemoRow(ui, ancient.name);
+  assert.equal(ui.get('analysis-map').value, 'de_ancient'); assert.equal(ui.get('player-search').value, ''); assert.equal(ui.get('analysis-floor').value, 'all');
+  assert.equal(deaths(ui), 20); assert.equal(selectedPlayerIds(ui).length, 20); assert.equal(ui.get('team-list').querySelectorAll('input').length, 4);
+  assert.ok(demoCheckbox(ui, ancient.name).checked); assert.ok(demoCheckbox(ui, second.name).checked); assert.ok(demoCheckbox(ui, anubis.name).checked);
 });

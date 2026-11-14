@@ -75,6 +75,8 @@
       words.append(title, info);
       if (job.warnings?.length) { const warning = node('small', `⚠ ${job.warnings[0]}${job.warnings.length > 1 ? `（另有 ${job.warnings.length - 1} 条提示）` : ''}`, 'warning-inline'); warning.title = job.warnings.join('\n'); words.append(warning); }
       label.append(check, words); row.append(label);
+      const focus = node('button', '查看', 'text-button demo-focus'); focus.type = 'button'; focus.disabled = !state.demos.has(job.id); focus.title = '切换到这场 Demo 的地图并显示其队伍与玩家'; focus.setAttribute('aria-label', `查看 ${job.name || '比赛'} 所在地图`);
+      focus.addEventListener('click', () => { const data = state.demos.get(job.id); if (data) void focusDemo(data); }); row.append(focus);
       const remove = node('button', '×', 'demo-remove'); remove.title = job.owned ? '移除比赛并释放回放缓存' : '从分析移除'; remove.setAttribute('aria-label', `移除 ${job.name || '比赛'}`); remove.disabled = state.uploading && state.currentJob === job.id; remove.addEventListener('click', () => removeJob(job.id)); row.append(remove); list.append(row);
     }
     if (!state.jobs.size) list.append(node('p', '导入一场或多场 .dem，建立本次分析。', 'muted'));
@@ -103,7 +105,7 @@
     for (const team of teams) {
       const label = node('label', null, 'check-item'), check = document.createElement('input'), text = node('span');
       check.type = 'checkbox'; check.checked = !state.selectedTeams || state.selectedTeams.has(team.id); check.setAttribute('aria-label', `筛选队伍 ${team.name}`);
-      check.addEventListener('change', () => { toggleSet('selectedTeams', team.id, teams.map(t => t.id), check.checked); requestAnalysis(); });
+      check.addEventListener('change', () => { toggleSet('selectedTeams', team.id, teams.map(t => t.id), check.checked); renderPlayers(); requestAnalysis(); });
       const identity = team.source === 'clan' ? '队名识别' : team.source === 'roster' ? '阵容识别' : team.source === 'ambiguous' ? '身份有歧义 · 未跨场合并' : '单场身份';
       text.append(node('strong', team.name), node('small', `${team.demos.size} 场 · ${team.playerIds.size} 个 ID${team.id.startsWith('alias:') ? ' · 手动分组' : ` · ${identity}`}`)); label.append(check, text); list.append(label);
     }
@@ -116,31 +118,65 @@
     }
     renderPlayers();
   }
-  function renderPlayers() {
-    const players = new Map(), query = $('player-search').value.toLocaleLowerCase();
+  function availablePlayers() {
+    const players = new Map();
     for (const d of currentDemos()) for (const p of d.players || []) {
       if (!players.has(p.id)) players.set(p.id, { ...p, names: new Set(), demos: new Set() });
       players.get(p.id).names.add(p.name); players.get(p.id).demos.add(d.id);
     }
-    const all = [...players.values()].sort((a, b) => String(a.name).localeCompare(String(b.name))), list = $('player-list'); list.replaceChildren();
-    for (const player of all) {
-      const names = [...player.names].filter(Boolean).join(' / ');
-      if (query && !`${names} ${player.id}`.toLocaleLowerCase().includes(query)) continue;
-      const label = node('label', null, 'check-item'), check = document.createElement('input'), text = node('span'); check.type = 'checkbox'; check.checked = !state.selectedPlayers || state.selectedPlayers.has(player.id); check.setAttribute('aria-label', `筛选玩家 ${names} ${player.id}`);
-      check.addEventListener('change', () => { toggleSet('selectedPlayers', player.id, all.map(p => p.id), check.checked); requestAnalysis(); });
-      const title = node('strong', names || '未知玩家'); title.title = names;
-      const detail = node('small', `${player.stable ? player.id : '非稳定 ID · 单场隔离'} · ${player.demos.size} 场`); detail.title = player.id;
-      text.append(title, detail); label.append(check, text); list.append(label);
+    return [...players.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  }
+  function selectTeamPlayers(ids, invert) {
+    if (!state.selectedPlayers) state.selectedPlayers = new Set(availablePlayers().map(p => p.id));
+    for (const id of ids) {
+      if (invert && state.selectedPlayers.has(id)) state.selectedPlayers.delete(id);
+      else state.selectedPlayers.add(id);
+    }
+    renderPlayers(); requestAnalysis();
+  }
+  function renderPlayers() {
+    const all = availablePlayers(), query = $('player-search').value.trim().toLocaleLowerCase(), list = $('player-list'); list.replaceChildren();
+    const allIds = all.map(p => p.id), checked = id => !state.selectedPlayers || state.selectedPlayers.has(id);
+    $('player-selection-count').textContent = `已勾选 ${allIds.filter(checked).length} / ${all.length} 个 ID`;
+    for (const id of ['players-all', 'players-none', 'players-invert']) $(id).disabled = !all.length;
+    const groups = availableTeams().map(team => ({ ...team, members: all.filter(p => team.playerIds.has(p.id)) }));
+    const grouped = new Set(groups.flatMap(group => group.members.map(p => p.id)));
+    const unassigned = all.filter(p => !grouped.has(p.id));
+    if (unassigned.length) groups.push({ id: 'unassigned', name: '未分组', members: unassigned });
+    for (const group of groups) {
+      const visible = group.members.filter(player => !query || group.name.toLocaleLowerCase().includes(query) || `${[...player.names].join(' / ')} ${player.id}`.toLocaleLowerCase().includes(query));
+      if (!visible.length) continue;
+      const excluded = group.id !== 'unassigned' && state.selectedTeams && !state.selectedTeams.has(group.id);
+      const section = node('section', null, `player-group${excluded ? ' is-excluded' : ''}`); section.dataset.teamId = group.id;
+      const header = node('div', null, 'player-group-header'), title = node('strong', group.name), count = node('span', `${group.members.filter(p => checked(p.id)).length} / ${group.members.length} 已选`, 'player-group-count'); title.title = group.name;
+      const actions = node('div', null, 'selection-actions');
+      for (const [action, label] of [['all', '全选'], ['invert', '反选']]) {
+        const button = node('button', label, 'text-button'); button.type = 'button'; button.dataset.action = action;
+        button.setAttribute('aria-label', `${label} ${group.name} 的队员`); button.title = `${label}该队全部 ${group.members.length} 个 ID，包含搜索隐藏的队员`;
+        button.addEventListener('click', () => selectTeamPlayers(group.members.map(p => p.id), action === 'invert')); actions.append(button);
+      }
+      header.append(title, count, actions); section.append(header);
+      if (excluded) section.append(node('p', '队伍筛选已排除此队；勾选上方队伍后生效。', 'player-group-excluded'));
+      for (const player of visible) {
+        const names = [...player.names].filter(Boolean).join(' / ');
+        const label = node('label', null, 'check-item'), check = document.createElement('input'), text = node('span'); check.type = 'checkbox'; check.checked = !state.selectedPlayers || state.selectedPlayers.has(player.id); check.setAttribute('aria-label', `筛选玩家 ${names} ${player.id}`);
+        check.dataset.playerId = player.id;
+        check.addEventListener('change', () => { toggleSet('selectedPlayers', player.id, allIds, check.checked); renderPlayers(); requestAnalysis(); });
+        const title = node('strong', names || '未知玩家'); title.title = names;
+        const detail = node('small', `${player.stable ? player.id : '非稳定 ID · 单场隔离'} · ${player.demos.size} 场`); detail.title = player.id;
+        text.append(title, detail); label.append(check, text); section.append(label);
+      }
+      list.append(section);
     }
     if (!list.childElementCount) list.append(node('p', query ? '没有匹配的玩家' : '当前地图没有可选玩家', 'muted'));
   }
-  async function refreshMaps() {
+  async function refreshMaps(preferredMap) {
     const names = [...new Set([...state.demos.values()].map(d => d.map))].sort();
     const select = $('analysis-map'); select.replaceChildren();
     for (const name of names) select.append(new Option(`${name} · ${[...state.demos.values()].filter(d => d.map === name).length} 场`, name));
     select.disabled = !names.length;
     if (!names.length) select.append(new Option('等待导入', ''));
-    const next = names.includes(state.map) ? state.map : names[0] || '';
+    const next = names.includes(preferredMap) ? preferredMap : names.includes(state.map) ? state.map : names[0] || '';
     select.value = next;
     if (next !== state.map || !state.mapInfo) await loadMap(next);
     $('map-hint').textContent = names.length > 1 ? `${names.length} 张地图已分组；只叠加当前地图。` : '不同地图分开统计，不会混合坐标。';
@@ -178,9 +214,20 @@
     if (!data || !Array.isArray(data.series) || !Array.isArray(data.players)) throw new Error('分析摘要格式不完整，请重新导入 Demo。');
     const existing = state.jobs.get(id);
     state.jobs.set(id, { ...existing, ...options, id, name: data.name, map: data.map, status: 'ready', synthetic: data.synthetic, warnings: data.warnings }); state.demos.set(id, data);
-    updateWorkerData(); renderJobs(); await refreshMaps(); renderFilters(); requestAnalysis(); return data;
+    updateWorkerData(); renderJobs();
+    if (options.focus) await focusDemo(data);
+    else { await refreshMaps(); renderFilters(); requestAnalysis(); }
+    return data;
   }
-  async function pollJob(id, signal) {
+  async function focusDemo(data) {
+    state.selectedDemos?.add(data.id); state.selectedTeams = state.selectedPlayers = null;
+    $('player-search').value = ''; $('analysis-floor').value = 'all';
+    const previousMap = state.map;
+    await refreshMaps(data.map);
+    if (previousMap === data.map) await loadMapImage();
+    renderJobs(); renderFilters(); requestAnalysis(); save();
+  }
+  async function pollJob(id, signal, focus = false) {
     for (;;) {
       if (signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
       const status = await json(await fetch(`/api/demos/${encodeURIComponent(id)}/status`, { cache: 'no-store', signal }));
@@ -189,7 +236,7 @@
       if (state.currentJob === id) { $('upload-message').textContent = `${job.name} · ${status.message || '解析中'}`; $('upload-progress').value = Number(status.progress) || 0; }
       renderJobs();
       if (status.status === 'error') throw new Error(status.error || '解析失败，请重新选择此文件。');
-      if (status.status === 'ready') return loadJob(id, { signal, owned: true });
+      if (status.status === 'ready') return loadJob(id, { signal, owned: true, focus });
       await sleep(650);
     }
   }
@@ -201,7 +248,7 @@
     if (invalid) { message(`${invalid.name} 不是可导入的 .dem 文件：请先解压，文件必须非空且不超过 2 GiB。`); return; }
     message(''); state.uploading = true; state.cancelled = false; state.queued = list; state.pendingCount = list.length; state.controller = new AbortController();
     $('upload-status').hidden = false; $('cancel-upload').disabled = false; $('analysis-files').disabled = true; renderJobs();
-    const failures = [];
+    const failures = []; let focused = false;
     for (let i = 0; i < list.length && !state.cancelled; i++) {
       const file = list[i]; state.currentJob = null;
       $('upload-message').textContent = `上传 ${i + 1}/${list.length} · ${file.name}`; $('upload-progress').value = 0;
@@ -212,7 +259,7 @@
         state.jobs.set(job.id, { id: job.id, name: file.name, status: 'queued', owned: true });
         if (state.selectedDemos) state.selectedDemos.add(job.id);
         renderJobs(); save();
-        await pollJob(job.id, state.controller.signal);
+        await pollJob(job.id, state.controller.signal, !focused); focused = true;
       } catch (error) {
         if (!state.cancelled) failures.push(`${file.name}：${error.message}`);
         if (state.currentJob) {
@@ -358,7 +405,11 @@
   $('utility-sort').addEventListener('change', renderUtilityGroups);
   for (const id of ['landing-distance', 'throw-distance']) $(id).addEventListener('change', event => { const input = event.target; input.value = String(Math.max(Number(input.min), Math.min(Number(input.max), Number(input.value) || Number(input.defaultValue)))); requestAnalysis(); });
   $('teams-all').addEventListener('click', () => { state.selectedTeams = null; renderFilters(); requestAnalysis(); });
+  $('teams-none').addEventListener('click', () => { state.selectedTeams = new Set(); renderFilters(); requestAnalysis(); });
+  $('teams-invert').addEventListener('click', () => { state.selectedTeams = new Set(availableTeams().map(t => t.id).filter(id => state.selectedTeams && !state.selectedTeams.has(id))); renderFilters(); requestAnalysis(); });
   $('players-all').addEventListener('click', () => { state.selectedPlayers = null; renderPlayers(); requestAnalysis(); });
+  $('players-none').addEventListener('click', () => { state.selectedPlayers = new Set(); renderPlayers(); requestAnalysis(); });
+  $('players-invert').addEventListener('click', () => { state.selectedPlayers = new Set(availablePlayers().map(p => p.id).filter(id => state.selectedPlayers && !state.selectedPlayers.has(id))); renderPlayers(); requestAnalysis(); });
   $('player-search').addEventListener('input', renderPlayers);
   $('apply-aliases').addEventListener('click', () => { $('team-aliases').querySelectorAll('input').forEach(input => { const value = input.value.trim(); if (value) state.aliases[input.dataset.teamId] = value; else delete state.aliases[input.dataset.teamId]; }); state.selectedTeams = null; renderFilters(); requestAnalysis(); });
   $('clear-selection').addEventListener('click', () => { state.selectedDemos = state.selectedTeams = state.selectedPlayers = null; $('analysis-side').value = 'all'; $('analysis-floor').value = 'all'; $('analysis-utility-type').value = 'all'; $('player-search').value = ''; renderJobs(); renderFilters(); void loadMapImage(); requestAnalysis(); });
@@ -429,13 +480,19 @@
     try {
       const response = await json(await fetch('/api/analyses', { cache: 'no-store' }));
       const jobs = (Array.isArray(response) ? response : response.demos || []).slice(0, 10);
+      if (state.selectedDemos) {
+        const hadSelection = state.selectedDemos.size > 0, ids = new Set(jobs.map(job => job.id));
+        state.selectedDemos = new Set([...state.selectedDemos].filter(id => ids.has(id)));
+        if (hadSelection && !state.selectedDemos.size) state.selectedDemos = null;
+      }
       for (const job of jobs) state.jobs.set(job.id, { ...job, owned: true }); renderJobs();
       for (const job of jobs) {
         if (job.status === 'ready') { try { await loadJob(job.id, { owned: true }); } catch (error) { Object.assign(state.jobs.get(job.id), { status: 'error', error: error.message }); } }
         else if (job.status !== 'error') void pollJob(job.id).catch(error => { if (state.jobs.has(job.id)) Object.assign(state.jobs.get(job.id), { status: 'error', error: error.message }); renderJobs(); });
       }
       const currentId = new URL(location.href).searchParams.get('demo');
-      if (currentId && !state.jobs.has(currentId) && state.jobs.size < 10) { await loadJob(currentId, { owned: false }); state.selectedDemos?.add(currentId); }
+      if (currentId && !state.jobs.has(currentId) && state.jobs.size < 10) await loadJob(currentId, { owned: false, focus: true });
+      else if (currentId && state.demos.has(currentId)) await focusDemo(state.demos.get(currentId));
       renderJobs(); await refreshMaps(); renderFilters(); requestAnalysis();
     } catch (error) { message(`无法恢复本机分析：${error.message}。仍可尝试导入新的 Demo。`); }
   }

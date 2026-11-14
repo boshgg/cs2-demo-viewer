@@ -21,3 +21,36 @@
 .heat-tooltip strong{font-size:10px;color:#a8bfd0;font-weight:500}.heat-tooltip small{font-size:9px;color:#8b9fae}
 .heat-tooltip[hidden]{display:none}
 @media(max-width:600px){.heat-legend-heading{font-size:10px}.heat-controls{gap:12px}.heat-controls input[type=range]{width:90px}}
+
+.selection-actions{display:flex;align-items:center;gap:12px;flex-shrink:0}
+.player-list{max-height:440px;gap:10px}
+.player-group{border:1px solid #33404c;border-radius:5px;overflow:hidden;flex-shrink:0}
+.player-group-header{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px 8px;padding:9px 8px;background:#25313b}
+.player-group-header>strong{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;grid-column:1 / -1}
+.player-group-count{font-size:10px;color:#a9bdcc;align-self:center}
+.player-group-header .selection-actions{gap:12px}.player-group-header .text-button{font-size:10px}
+.player-group .check-item{margin:3px;border-radius:2px}
+.player-group-excluded{font-size:10px;color:#d4b981;line-height:1.6;margin:7px 8px}
+.player-group.is-excluded .check-item{opacity:.6}
+.player-group .check-item strong,.player-group-header>strong{font-size:12px}
+.player-group .check-item small{font-size:10px}
+.player-group .check-item{padding:8px 7px}
+
+/* Adjustable filters keep long rosters usable without moving the map away. */
+.workspace{--filter-width:320px;--filter-teams:320px;--filter-players:480px;grid-template-columns:var(--filter-width) minmax(420px,1fr) 300px}
+.filter-pane{position:sticky;top:0;align-self:start;height:calc(100dvh - 65px);padding:0;min-height:320px}
+.filter-scroll{height:100%;overflow-y:auto;overflow-x:hidden;padding:20px 18px;scrollbar-width:thin;scrollbar-color:#536777 #191e25;overscroll-behavior-y:contain}
+.filter-pane .check-item{flex-shrink:0}
+.filter-pane .layout-hint{margin-top:8px;color:#7fa9ad;font-size:9px}
+#team-list{height:var(--filter-teams);max-height:none;min-height:140px}
+#player-list{height:var(--filter-players);max-height:none;min-height:180px;margin-top:8px}
+.filter-width-handle{position:absolute;z-index:6;right:-5px;top:0;bottom:0;width:10px;padding:0;background:transparent;color:#91a7b6;cursor:col-resize;touch-action:none}
+.filter-width-handle:before{content:'';position:absolute;top:0;bottom:0;left:4px;width:2px;background:#52647388}
+.filter-width-handle>span{position:absolute;top:45%;left:0;width:10px;padding:9px 0;background:#344653;border-radius:3px;font-size:16px}
+.filter-width-handle:hover:before,.filter-width-handle:focus-visible:before{background:#79d4ca}
+.filter-height-handle{display:block;width:100%;height:24px;padding:3px 8px;border:1px solid #354450;border-radius:0 0 4px 4px;background:#222d36;color:#93aebd;font-size:9px;text-align:center;cursor:row-resize;touch-action:none}
+.filter-height-handle>span{margin-right:5px;font-size:12px;color:#b6d6dc}.filter-height-handle:hover,.filter-height-handle:focus-visible{background:#30434c;color:#d1ecea}
+html[data-filter-resizing] body{user-select:none}html[data-filter-resizing=width],html[data-filter-resizing=width] *{cursor:col-resize!important}html[data-filter-resizing=height],html[data-filter-resizing=height] *{cursor:row-resize!important}
+@media(min-width:1600px){.workspace{grid-template-columns:var(--filter-width) minmax(600px,1fr) 340px}.filter-scroll{padding:24px}}
+@media(min-width:701px) and (max-width:1150px){.workspace{grid-template-columns:var(--filter-width) minmax(0,1fr)}}
+@media(max-width:700px){.filter-pane{position:static;height:auto;min-height:0;display:block;padding:0;align-self:stretch}.filter-scroll{height:auto;overflow:visible;padding:15px;display:grid;grid-template-columns:1fr 1fr;gap:0 14px}.filter-width-handle{display:none}.filter-scroll>.pane-title{grid-column:1/-1}.filter-scroll>.filter-section:nth-of-type(1),.filter-scroll>.filter-section:nth-of-type(4){grid-column:1/-1}.filter-height-handle{height:30px}}
