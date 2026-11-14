@@ -48,6 +48,14 @@
     splitSelect.value = multi ? 'byDemo' : 'byRound'; splitLabel.append(splitSelect); splits.append(splitLabel);
     const splitBody = table(splits, ['范围', '击杀贡献', '死亡扣分', '综合总分', '每回合', '有效 / 观察玩家回合'], 'groups');
     const deathSection = section('逐次死亡与扣分依据'); deathSection.append(make('p', '按死亡玩家筛选。展开“计算依据”可查看首死、枪械差距、死前击杀、人数、胜负以及次回合装备变化；未计分记录保留原因。', 'micro'));
+    const deathControls = make('div', null, 'impact-death-controls'); deathControls.setAttribute('role', 'group'); deathControls.setAttribute('aria-label', '死亡明细排序与筛选');
+    const deathSortLabel = make('label', '排列方式', 'impact-death-sort-label'), deathSort = identify(make('select'), 'death-sort'); deathSort.setAttribute('aria-label', '死亡明细排列方式');
+    for (const [value, title] of [['time', multi ? '时间顺序（逐场）' : '时间顺序'], ['penalty', '扣分最多优先']]) { const option = make('option', title); option.value = value; deathSort.append(option); }
+    deathSort.value = 'time'; deathSortLabel.append(deathSort); deathControls.append(deathSortLabel);
+    function deathToggle(suffix, title) { const label = make('label', null, 'impact-death-toggle'), check = identify(make('input'), suffix); check.type = 'checkbox'; check.checked = false; label.append(check, make('span', title)); deathControls.append(label); return check; }
+    const deathFirstOnly = deathToggle('death-first-only', '只看首死'), deathLossOnly = deathToggle('death-loss-only', '只看输局死亡');
+    const deathCount = identify(make('p', null, 'micro impact-death-count'), 'death-count'); deathCount.setAttribute('role', 'status'); deathCount.setAttribute('aria-live', 'polite');
+    deathSection.append(deathControls, make('p', '以上条件仅改变死亡明细；综合分、排行、分项与击杀贡献明细保持当前统计范围。', 'micro'), deathCount);
     const deathBody = table(deathSection, ['来源 / 回合 / 时间', '死亡玩家 ← 对手', '本人手持 / 击杀枪', '死亡前局势', '死亡影响', '计算依据', '回放'], 'death-rows');
     const killSection = make('details', null, 'impact-kill-audit'); killSection.append(make('summary', '逐次击杀贡献与综合分关联')); const killBody = table(killSection, ['来源 / 回合 / 时间', '玩家', '击杀贡献', '依据', '回放'], 'kill-rows');
     let result = null, deathPage = 0, killPage = 0, signature = '';
@@ -58,6 +66,7 @@
       bar.append(prev, info, next); parent.append(bar); return { prev, next, info };
     }
     const deathPaging = pagination(deathSection, 'death'), killPaging = pagination(killSection, 'kill');
+    for (const control of [deathSort, deathFirstOnly, deathLossOnly]) control.addEventListener('change', () => { deathPage = 0; renderAudit('death'); });
     content.append(grid, rating, quality, warnings, methodology, players, splits, deathSection, killSection); root.replaceChildren(heading, intro, unavailable, content);
     function sourceCell(row, item) { const td = cell(row, `R${item.round} · ${clock(item.time)}`); if (multi) td.append(make('small', `${item.demoName || item.demoId} · ${item.map || '地图未知'}`)); return td; }
     function linkCell(row, item) { const link = make('a', '回放 ↗', 'text-button'); link.href = replayLink(item.demoId, Math.max(0, (item.time || 0) - 2)); link.target = '_blank'; link.rel = 'noopener'; cell(row).append(link); }
@@ -80,8 +89,26 @@
       if (death.approx) lines.push('近似记录：部分证据由邻近帧或事件重建，需结合回放。');
       for (const text of lines) detail.append(make('p', text)); return detail;
     }
+    function visibleDeaths() {
+      const demos = new Map();
+      const records = (result?.deaths || []).map((item, ordinal) => { if (!demos.has(item.demoId)) demos.set(item.demoId, demos.size); return { item, ordinal }; }).filter(({ item }) => (!deathFirstOnly.checked || item.firstDeath === true) && (!deathLossOnly.checked || item.outcome === 'loss'));
+      records.sort((a, b) => {
+        if (deathSort.value === 'penalty') {
+          const validA = a.item.included === true && finite(a.item.penalty) && a.item.penalty <= 0, validB = b.item.included === true && finite(b.item.penalty) && b.item.penalty <= 0;
+          if (validA !== validB) return validA ? -1 : 1;
+          if (validA && a.item.penalty !== b.item.penalty) return a.item.penalty - b.item.penalty;
+        } else {
+          const demoOrder = demos.get(a.item.demoId) - demos.get(b.item.demoId); if (demoOrder) return demoOrder;
+          const aTime = finite(a.item.time) ? a.item.time : Infinity, bTime = finite(b.item.time) ? b.item.time : Infinity;
+          if (aTime !== bTime) return aTime - bTime;
+        }
+        return a.ordinal - b.ordinal;
+      });
+      return records.map(({ item }) => item);
+    }
     function renderAudit(type) {
-      const deaths = type === 'death', records = result?.[deaths ? 'deaths' : 'kills'] || [], pages = Math.max(1, Math.ceil(records.length / pageSize));
+      const deaths = type === 'death', records = deaths ? visibleDeaths() : result?.kills || [], pages = Math.max(1, Math.ceil(records.length / pageSize));
+      if (deaths) deathCount.textContent = `显示 ${records.length} / ${(result?.deaths || []).length} 条死亡记录${deathFirstOnly.checked || deathLossOnly.checked ? ' · 已应用明细筛选' : ''}`;
       let page = deaths ? deathPage : killPage; page = Math.max(0, Math.min(page, pages - 1)); if (deaths) deathPage = page; else killPage = page;
       const body = deaths ? deathBody : killBody, paging = deaths ? deathPaging : killPaging; body.replaceChildren(); paging.prev.disabled = page === 0; paging.next.disabled = page >= pages - 1; paging.info.textContent = `${records.length} 条 · ${page + 1} / ${pages} 页 · 每页 ${pageSize} 条`;
       for (const item of records.slice(page * pageSize, (page + 1) * pageSize)) {
@@ -99,7 +126,7 @@
         }
         linkCell(row, item); body.append(row);
       }
-      if (!records.length) empty(body, deaths ? 7 : 5, deaths ? '当前筛选没有死亡记录。' : '当前筛选没有击杀贡献记录。');
+      if (!records.length) empty(body, deaths ? 7 : 5, deaths ? deathFirstOnly.checked || deathLossOnly.checked ? '没有符合首死 / 回合胜负条件的死亡记录；可取消明细筛选。' : '当前筛选没有死亡记录。' : '当前筛选没有击杀贡献记录。');
     }
     function renderGroups() {
       splitBody.replaceChildren(); const grouping = splitSelect.value;

@@ -72,3 +72,73 @@ test('names and reasons remain literal text, never HTML injection', () => {
   const view = page(); view.render(core.aggregate([demo]));
   assert.match(text(view.get('death-rows')), /<img src=x onerror=alert\(1\)>/); assert.equal(all(view.root).some(node => node.tagName === 'img' || node.tagName === 'script'), false);
 });
+
+const deathIndexes = view => view.get('death-rows').children.filter(row => row.dataset.impactKey).map(row => JSON.parse(row.dataset.impactKey)[2]);
+const selectAudit = (view, suffix, value) => { const control = view.get(suffix); if (control.type === 'checkbox') control.checked = value; else control.value = value; control.dispatch('change'); };
+
+for (const multi of [false, true]) {
+  test(`${multi ? 'cross-demo' : 'single'} death sorting puts greatest counted penalties first with stable ties and exclusions last`, () => {
+    const demo = fixture(), base = demo.impact.deaths[0];
+    demo.impact.deaths = [
+      { ...base, index: 0, time: 50, penalty: null, excludedReason: '资料缺失' },
+      { ...base, index: 1, time: 40, penalty: -1000 },
+      { ...base, index: 2, time: 20, penalty: -10000 },
+      { ...base, index: 3, time: 10, penalty: -10000 },
+      { ...base, index: 4, time: 30, penalty: -99999, excludedReason: '胜负确定后死亡' },
+      { ...base, index: 5, time: 60, penalty: 0 },
+      { ...base, index: 6, time: 70, penalty: NaN },
+      { ...base, index: 7, time: 80, penalty: 100 },
+    ];
+    const result = core.aggregate([demo]), before = structuredClone(result), view = page(multi);
+    Object.freeze(result.deaths); for (const row of result.deaths) Object.freeze(row);
+    view.render(result); assert.equal(view.get('death-sort').value, 'time'); assert.deepEqual(deathIndexes(view), [3, 2, 4, 1, 0, 5, 6, 7]);
+    selectAudit(view, 'death-sort', 'penalty'); assert.deepEqual(deathIndexes(view), [2, 3, 1, 5, 0, 4, 6, 7]);
+    assert.match(view.get('death-count').textContent, /显示 8 \/ 8 条死亡记录/);
+    assert.deepEqual(result, before, 'sorting must not mutate report scores or event order');
+    selectAudit(view, 'death-sort', 'time'); assert.deepEqual(deathIndexes(view), [3, 2, 4, 1, 0, 5, 6, 7]);
+  });
+
+  test(`${multi ? 'cross-demo' : 'single'} first-death and lost-round filters intersect without affecting any aggregate or kill audit`, () => {
+    const demo = fixture(), base = demo.impact.deaths[0];
+    demo.impact.deaths = [
+      { ...base, index: 0, firstDeath: true, outcome: 'loss', penalty: -2000 },
+      { ...base, index: 1, firstDeath: true, outcome: 'win', penalty: -700 },
+      { ...base, index: 2, firstDeath: false, outcome: 'loss', penalty: -1000 },
+      { ...base, index: 3, firstDeath: true, outcome: 'unknown', penalty: null, excludedReason: '胜负未知' },
+      { ...base, index: 4, firstDeath: 'true', outcome: 'loss', penalty: -900 },
+    ];
+    const result = core.aggregate([demo]), view = page(multi); view.render(result);
+    const snapshots = Object.fromEntries(['killContribution', 'deathPenalty', 'combined', 'perRound', 'rating', 'quality', 'players', 'groups', 'kill-rows', 'kill-page'].map(key => [key, { text: text(view.get(key)), children: [...view.get(key).children] }]));
+    selectAudit(view, 'death-first-only', true); assert.deepEqual(deathIndexes(view), [0, 1, 3]);
+    selectAudit(view, 'death-loss-only', true); assert.deepEqual(deathIndexes(view), [0]); assert.match(view.get('death-count').textContent, /显示 1 \/ 5 条死亡记录/);
+    selectAudit(view, 'death-sort', 'penalty'); assert.deepEqual(deathIndexes(view), [0]);
+    for (const [key, snapshot] of Object.entries(snapshots)) { assert.equal(text(view.get(key)), snapshot.text, `${key} text changed`); assert.deepEqual(view.get(key).children, snapshot.children, `${key} was redrawn`); }
+    view.render(result); assert.equal(view.get('death-first-only').checked, true); assert.equal(view.get('death-loss-only').checked, true); assert.equal(view.get('death-sort').value, 'penalty'); assert.deepEqual(deathIndexes(view), [0]);
+    selectAudit(view, 'death-first-only', false); assert.deepEqual(deathIndexes(view), [0, 2, 4]);
+    selectAudit(view, 'death-loss-only', false); assert.deepEqual(deathIndexes(view), [0, 2, 4, 1, 3]);
+  });
+}
+
+test('death audit filtering and sorting reset only death pagination, retain controls across refresh, and explain zero matches', () => {
+  const demo = fixture(), base = demo.impact.deaths[0];
+  demo.impact.deaths = Array.from({ length: 65 }, (_, index) => ({ ...base, index, time: index, firstDeath: index === 0, outcome: index === 0 ? 'win' : 'loss', penalty: -(index + 1) * 100 }));
+  demo.impact.kills = Array.from({ length: 32 }, (_, index) => ({ ...demo.impact.kills[0], index, time: index }));
+  const result = core.aggregate([demo]), view = page(); view.render(result); view.get('death-next').click(); view.get('kill-next').click();
+  assert.match(view.get('death-page').textContent, /2 \/ 3 页/); assert.match(view.get('kill-page').textContent, /2 \/ 2 页/);
+  selectAudit(view, 'death-sort', 'penalty'); assert.match(view.get('death-page').textContent, /1 \/ 3 页/); assert.equal(deathIndexes(view)[0], 64);
+  view.get('death-next').click(); selectAudit(view, 'death-first-only', true); assert.match(view.get('death-page').textContent, /1 \/ 1 页/); assert.equal(view.get('death-next').disabled, true);
+  selectAudit(view, 'death-loss-only', true); assert.match(view.get('death-count').textContent, /显示 0 \/ 65 条死亡记录/); assert.match(text(view.get('death-rows')), /可取消明细筛选/);
+  assert.match(view.get('kill-page').textContent, /2 \/ 2 页/); assert.equal(view.get('kill-rows').children.length, 2);
+  const updated = structuredClone(result); updated.deaths[0].outcome = 'loss'; view.render(updated);
+  assert.equal(view.get('death-sort').value, 'penalty'); assert.equal(view.get('death-first-only').checked, true); assert.equal(view.get('death-loss-only').checked, true); assert.deepEqual(deathIndexes(view), [0]);
+  assert.match(view.get('death-count').textContent, /显示 1 \/ 65 条死亡记录/);
+});
+
+test('default chronological ordering keeps each demo together and control labels are accessible', () => {
+  const a = fixture('a'), b = fixture('b'); a.impact.deaths[0].time = 90; b.impact.deaths[0].time = 20;
+  const view = page(true); view.render(core.aggregate([a, b]));
+  assert.match(text(view.get('death-rows').children[0]), /a.dem/); assert.match(text(view.get('death-rows').children[1]), /b.dem/);
+  assert.equal(view.get('death-sort')['aria-label'], '死亡明细排列方式'); assert.equal(view.get('death-count')['aria-live'], 'polite');
+  const firstLabel = all(view.root).find(node => node.tagName === 'label' && node.children.includes(view.get('death-first-only'))); assert.match(text(firstLabel), /只看首死/);
+  const lossLabel = all(view.root).find(node => node.tagName === 'label' && node.children.includes(view.get('death-loss-only'))); assert.match(text(lossLabel), /只看输局死亡/);
+});
