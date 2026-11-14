@@ -46,7 +46,7 @@ func safeArchiveMember(name string) bool {
 }
 
 func validLibrarySource(dir string, s librarySource) bool {
-	if !containedFile(dir, s.Source) || filepath.Dir(filepath.Clean(s.Source)) != filepath.Clean(dir) || !validSessionID(s.JobID) || !validSessionHash(s.ContentSHA256) || s.SourceSize <= 0 || s.MemberSize <= 0 || s.MemberSize > maxUploadBytes {
+	if !containedFile(dir, s.Source) || !validSessionID(s.JobID) || !validSessionHash(s.ContentSHA256) || s.SourceSize <= 0 || s.MemberSize <= 0 || s.MemberSize > maxUploadBytes {
 		return false
 	}
 	if s.Member == "" {
@@ -104,10 +104,13 @@ func (a *app) reuseSource(s librarySource) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	previous, ok := a.sources[sourceKey(s)]
-	return ok && sourceUnchanged(previous, s) && usableJob(a.jobs[previous.JobID])
+	return ok && sourceUnchanged(previous, s) && a.jobs[previous.JobID] != nil
 }
 
 func (a *app) scanPlainFile(file string, info os.FileInfo, result *libraryScan) error {
+	if !safeSourcePath(a.demoDir, file) {
+		return fmt.Errorf("跳过不安全或含链接的来源")
+	}
 	source := librarySource{Source: file, SourceSize: info.Size(), SourceModTime: info.ModTime().UnixNano(), MemberSize: info.Size()}
 	if a.reuseSource(source) {
 		result.Unchanged++
@@ -131,6 +134,7 @@ func (a *app) scanPlainFile(file string, info os.FileInfo, result *libraryScan) 
 		if unchanged && usableJob(existing) {
 			existing.mu.Lock()
 			existing.contentSHA256 = hash
+			existing.catalog = true
 			existing.mu.Unlock()
 			source.JobID = existing.ID
 			a.sources[sourceKey(source)] = source
@@ -175,6 +179,9 @@ func (r contextReader) Read(p []byte) (int, error) {
 }
 
 func (a *app) scanArchive(file string, info os.FileInfo, result *libraryScan) error {
+	if !safeSourcePath(a.demoDir, file) {
+		return fmt.Errorf("跳过不安全或含链接的来源")
+	}
 	archive, err := zip.OpenReader(file)
 	if err != nil {
 		return fmt.Errorf("无法打开 ZIP（可能尚未下载完成或已损坏）：%w", err)
@@ -209,34 +216,12 @@ func (a *app) scanArchive(file string, info os.FileInfo, result *libraryScan) er
 			continue
 		}
 		source.ContentSHA256 = hash
-		j, retained, err := a.registerSource(source, path.Base(member.Name), extracted, true, result)
-		if !retained {
-			_ = os.Remove(extracted)
-		}
+		_, _, err = a.registerSource(source, path.Base(member.Name), "", false, result)
+		_ = os.Remove(extracted)
 		if err != nil {
 			return err
 		}
 		a.publishScanProgress(*result)
-		// At most one extracted member is waiting for the parser. A large archive
-		// cannot fill disk by extracting every member before any has been parsed.
-		if retained {
-			if err := a.persistLibrary(); err != nil {
-				return err
-			}
-			for {
-				j.mu.Lock()
-				done := j.Status == "ready" || j.Status == "error"
-				j.mu.Unlock()
-				if done || j.ctx.Err() != nil {
-					break
-				}
-				select {
-				case <-a.ctx.Done():
-					return a.ctx.Err()
-				case <-time.After(50 * time.Millisecond):
-				}
-			}
-		}
 	}
 	if !found {
 		return fmt.Errorf("压缩包内未找到 .dem 文件")
@@ -281,8 +266,8 @@ func (a *app) extractArchiveMember(member *zip.File, source string, expected os.
 	return file, hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// registerSource is the only place that maps verified bytes to an analysis.
-// retained means ownership of the private extraction passed to the parse job.
+// Discovery records content identity, but never runs or enqueues the demo parser.
+// The second return value stays false: scanner scratch files are never retained.
 func (a *app) registerSource(source librarySource, name, parseFile string, owned bool, result *libraryScan) (*job, bool, error) {
 	a.mu.Lock()
 	if a.ctx.Err() != nil {
@@ -302,9 +287,6 @@ func (a *app) registerSource(source librarySource, name, parseFile string, owned
 	}
 	var canonical *job
 	for _, candidate := range a.jobs {
-		if !candidate.Analysis {
-			continue
-		}
 		candidate.mu.Lock()
 		equal := candidate.contentSHA256 == source.ContentSHA256
 		candidate.mu.Unlock()
@@ -312,17 +294,15 @@ func (a *app) registerSource(source librarySource, name, parseFile string, owned
 			canonical = candidate
 		}
 	}
-	if canonical != nil && usableJob(canonical) {
+	if canonical != nil {
+		canonical.mu.Lock()
+		canonical.catalog = true
+		canonical.mu.Unlock()
 		source.JobID = canonical.ID
 		a.sources[key] = source
 		a.mu.Unlock()
 		result.Unchanged++
 		return canonical, false, nil
-	}
-	// Failed/incomplete copies still represent the same bytes. Retry that identity
-	// instead of creating a second error row for every duplicate ZIP/DEM source.
-	if canonical != nil {
-		existing = canonical
 	}
 	if existing != nil {
 		shared := false
@@ -356,7 +336,13 @@ func (a *app) registerSource(source librarySource, name, parseFile string, owned
 		id = hex.EncodeToString(b)
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
-	j := &job{ID: id, Revision: fmt.Sprintf("%s-%d", id, time.Now().UnixNano()), Name: name, name: name, Analysis: true, Status: "queued", Message: "已校验本机 Demo，等待解析", source: parseFile, ownedSource: owned, contentSHA256: source.ContentSHA256, sourceSize: source.MemberSize, sourceModTime: source.SourceModTime, created: created, ctx: ctx, cancel: cancel}
+	analysis := false
+	if existing != nil {
+		existing.mu.Lock()
+		analysis = existing.Analysis
+		existing.mu.Unlock()
+	}
+	j := &job{ID: id, Revision: fmt.Sprintf("%s-%d", id, time.Now().UnixNano()), Name: name, name: name, Analysis: analysis, Status: "discovered", Message: "已发现录像，选择后解析", source: parseFile, ownedSource: owned, contentSHA256: source.ContentSHA256, catalog: true, sourceSize: source.MemberSize, sourceModTime: source.SourceModTime, created: created, ctx: ctx, cancel: cancel}
 	j.result, j.analysisResult = jobCachePaths(a.root, j.ID, j.Revision)
 	if existing != nil {
 		existing.cancel()
@@ -371,7 +357,5 @@ func (a *app) registerSource(source librarySource, name, parseFile string, owned
 	} else {
 		result.Added++
 	}
-	result.Queued++
-	a.enqueue(j)
-	return j, owned, nil
+	return j, false, nil
 }

@@ -93,7 +93,7 @@ func TestArchiveContentDeduplicationAndPersistentBindings(t *testing.T) {
 	if err != nil || result.Added != 0 || result.Queued != 0 || result.Unchanged != 3 || len(b.jobs) != 1 {
 		t.Fatalf("restart reparsed duplicates: %+v %v", result, err)
 	}
-	localRequest(b.handler(), "DELETE", "/api/demos/"+j.ID)
+	localRequest(b.handler(), "DELETE", "/api/library/demos/"+j.ID)
 	for _, file := range []string{plain, first, second} {
 		if _, err := os.Stat(file); err != nil {
 			t.Fatal("original removed", err)
@@ -130,11 +130,11 @@ func TestArchiveChangesForkSharedContentButReuseUniqueIdentity(t *testing.T) {
 	// Only the ZIP owns this identity: changed bytes replace its revision.
 	writeTestArchive(t, a.demoDir, "match.zip", testArchiveMember{"match.dem", []byte("PBDEMS2\x00changed-and-invalid"), 0})
 	result, err := a.scanLibrary()
-	if err != nil || result.Added != 0 || result.Queued != 1 || len(a.jobs) != 1 {
+	if err != nil || result.Added != 0 || result.Queued != 0 || len(a.jobs) != 1 {
 		t.Fatalf("unique source did not update: %+v %v", result, err)
 	}
 	j := a.jobs[ready.ID]
-	if j.Revision == ready.Revision || j.Status != "error" || a.sources[sourceKey(librarySource{Source: file, Member: "match.dem"})].JobID != ready.ID {
+	if j.Revision == ready.Revision || j.Status != "discovered" || a.sources[sourceKey(librarySource{Source: file, Member: "match.dem"})].JobID != ready.ID {
 		t.Fatal("changed source identity/revision incorrect")
 	}
 	// A second source sharing the old bytes must keep its original analysis.
@@ -174,6 +174,8 @@ func TestArchiveSharedMissingCacheAndFailedContentKeepOneIdentity(t *testing.T) 
 			t.Fatal("shared source stopped referring to original ID")
 		}
 	}
+	requestCatalogParse(t, a, j.ID, "analysis", 202)
+	waitForTestJob(t, a.handler(), j.ID)
 	// The parser rejects these test bytes. Another ZIP must reuse the error ID.
 	writeTestArchive(t, a.demoDir, "another.zip", testArchiveMember{"different-name.dem", body, 0})
 	result, err = a.scanLibrary()

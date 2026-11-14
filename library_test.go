@@ -163,7 +163,7 @@ func TestRestoreMoreThanTenAndPersistentRestart(t *testing.T) {
 	if err := b.restoreSession(path); err != nil {
 		t.Fatal("same migration must be idempotent", err)
 	}
-	localRequest(b.handler(), "DELETE", "/api/demos/"+m.Demos[0].ID)
+	localRequest(b.handler(), "DELETE", "/api/library/demos/"+m.Demos[0].ID)
 	b.close()
 	c := persistentViewer(t, root, demoDir)
 	if len(c.jobs) != 12 {
@@ -246,13 +246,13 @@ func TestBoundFolderFilesDoNotDuplicateMigratedJobs(t *testing.T) {
 		}
 	}
 	first := m.Demos[0]
-	localRequest(a.handler(), "DELETE", "/api/demos/"+first.ID)
+	localRequest(a.handler(), "DELETE", "/api/library/demos/"+first.ID)
 	if !regularDemo(filepath.Join(a.demoDir, first.Name)) {
 		t.Fatal("removal deleted user demo")
 	}
 }
 
-func TestScanIgnoresArchivesAndRetriesChangedOrFailedFiles(t *testing.T) {
+func TestScanPreservesFailedFilesUntilExplicitRetry(t *testing.T) {
 	a := persistentViewer(t, t.TempDir(), t.TempDir())
 	path := writeLocalDemo(t, a.demoDir, "match.dem")
 	os.WriteFile(filepath.Join(a.demoDir, "archive.zip"), []byte("not a demo"), 0600)
@@ -268,14 +268,19 @@ func TestScanIgnoresArchivesAndRetriesChangedOrFailedFiles(t *testing.T) {
 		revision = j.Revision
 	}
 	a.mu.Unlock()
+	if a.jobs[id].Status != "discovered" || scan.Queued != 0 {
+		t.Fatal("scan unexpectedly parsed a file")
+	}
+	requestCatalogParse(t, a, id, "playback", 202)
 	waitForTestJob(t, a.handler(), id)
 	if !regularDemo(path) {
 		t.Fatal("failed parser removed original")
 	}
 	scan, err = a.scanLibrary()
-	if err != nil || scan.Added != 0 || scan.Queued != 1 {
+	if err != nil || scan.Added != 0 || scan.Queued != 0 {
 		t.Fatalf("retry=%+v %v", scan, err)
 	}
+	requestCatalogParse(t, a, id, "playback", 202)
 	waitForTestJob(t, a.handler(), id)
 	a.mu.Lock()
 	j := a.jobs[id]
@@ -299,13 +304,13 @@ func TestScanIgnoresArchivesAndRetriesChangedOrFailedFiles(t *testing.T) {
 	}
 }
 
-func TestFolderScanQueuesMoreThanTenWithoutDuplicateIDs(t *testing.T) {
+func TestFolderScanDiscoversMoreThanTenWithoutParsing(t *testing.T) {
 	a := persistentViewer(t, t.TempDir(), t.TempDir())
 	for i := 0; i < 13; i++ {
 		writeLocalDemo(t, a.demoDir, fmt.Sprintf("folder-%02d.dem", i))
 	}
 	scan, err := a.scanLibrary()
-	if err != nil || scan.Added != 13 || scan.Queued != 13 {
+	if err != nil || scan.Added != 13 || scan.Queued != 0 {
 		t.Fatalf("scan %+v: %v", scan, err)
 	}
 	a.mu.Lock()
@@ -318,7 +323,9 @@ func TestFolderScanQueuesMoreThanTenWithoutDuplicateIDs(t *testing.T) {
 		t.Fatal("folder scan retained a ten-demo ceiling")
 	}
 	for _, id := range ids {
-		waitForTestJob(t, a.handler(), id)
+		if a.jobs[id].Status != "discovered" {
+			t.Fatal("unselected source parsed")
+		}
 	}
 	scan, err = a.scanLibrary()
 	if err != nil || scan.Added != 0 {
@@ -355,7 +362,7 @@ func TestSnapshotIsPrivateAndRejectsChangedSource(t *testing.T) {
 	}
 }
 
-func TestPersistentUploadRestoresInterruptedQueueAndRejectsEscapingManifest(t *testing.T) {
+func TestInterruptedUploadWaitsForSelectionAndRejectsEscapingManifest(t *testing.T) {
 	root, demoDir := t.TempDir(), t.TempDir()
 	id := fmt.Sprintf("%024x", 99)
 	source := writeLocalDemo(t, root, "upload-test.dem")
@@ -363,6 +370,13 @@ func TestPersistentUploadRestoresInterruptedQueueAndRejectsEscapingManifest(t *t
 	data, _ := json.Marshal(m)
 	os.WriteFile(filepath.Join(root, "library.json"), data, 0600)
 	a := persistentViewer(t, root, demoDir)
+	if a.jobs[id].Status != "discovered" {
+		t.Fatal("restart automatically resumed parsing")
+	}
+	if !regularDemo(source) {
+		t.Fatal("pending uploaded source was removed")
+	}
+	requestCatalogParse(t, a, id, "analysis", 202)
 	waitForTestJob(t, a.handler(), id)
 	deadline := time.Now().Add(time.Second)
 	for {

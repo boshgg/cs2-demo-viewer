@@ -31,6 +31,7 @@ type libraryRecord struct {
 	SourceSize    int64     `json:"sourceSize,omitempty"`
 	SourceModTime int64     `json:"sourceModTime,omitempty"`
 	ContentSHA256 string    `json:"contentSHA256,omitempty"`
+	Catalog       bool      `json:"catalog,omitempty"`
 	Created       time.Time `json:"created"`
 }
 type libraryManifest struct {
@@ -167,7 +168,7 @@ func (a *app) persistLibrary() error {
 	m := libraryManifest{Version: 1, Jobs: []libraryRecord{}, SessionID: a.sessionID, Settings: append(json.RawMessage(nil), a.sessionSettings...)}
 	for _, j := range a.jobs {
 		j.mu.Lock()
-		m.Jobs = append(m.Jobs, libraryRecord{ID: j.ID, Revision: j.Revision, Name: j.Name, Map: j.Map, Analysis: j.Analysis, Status: j.Status, Error: j.Error, Source: j.source, OwnedSource: j.ownedSource, SourceSize: j.sourceSize, SourceModTime: j.sourceModTime, ContentSHA256: j.contentSHA256, Created: j.created})
+		m.Jobs = append(m.Jobs, libraryRecord{ID: j.ID, Revision: j.Revision, Name: j.Name, Map: j.Map, Analysis: j.Analysis, Status: j.Status, Error: j.Error, Source: j.source, OwnedSource: j.ownedSource, SourceSize: j.sourceSize, SourceModTime: j.sourceModTime, ContentSHA256: j.contentSHA256, Catalog: j.catalog, Created: j.created})
 		j.mu.Unlock()
 	}
 	for _, source := range a.sources {
@@ -239,7 +240,7 @@ func (a *app) loadLibrary() error {
 	a.sessionSettings = m.Settings
 	for _, entry := range m.Jobs {
 		ctx, cancel := context.WithCancel(a.ctx)
-		j := &job{ID: entry.ID, Name: entry.Name, name: entry.Name, Map: entry.Map, Analysis: entry.Analysis, Status: entry.Status, Error: entry.Error, source: entry.Source, ownedSource: entry.OwnedSource, sourceSize: entry.SourceSize, sourceModTime: entry.SourceModTime, contentSHA256: entry.ContentSHA256, created: entry.Created, ctx: ctx, cancel: cancel, result: filepath.Join(a.root, entry.ID+".json.gz"), analysisResult: filepath.Join(a.root, entry.ID+".analysis.json.gz")}
+		j := &job{ID: entry.ID, Name: entry.Name, name: entry.Name, Map: entry.Map, Analysis: entry.Analysis, Status: entry.Status, Error: entry.Error, source: entry.Source, ownedSource: entry.OwnedSource, sourceSize: entry.SourceSize, sourceModTime: entry.SourceModTime, contentSHA256: entry.ContentSHA256, catalog: entry.Catalog || a.persistent, created: entry.Created, ctx: ctx, cancel: cancel, result: filepath.Join(a.root, entry.ID+".json.gz"), analysisResult: filepath.Join(a.root, entry.ID+".analysis.json.gz")}
 		j.Revision = entry.Revision
 		if j.Revision == "" {
 			j.Revision = j.ID
@@ -249,23 +250,19 @@ func (a *app) loadLibrary() error {
 			j.Progress = 1
 			j.Message = "已从本机资料库恢复"
 		} else if j.Status != "error" {
-			if regularDemo(j.source) {
-				j.Status = "queued"
-				j.Error = ""
-				j.Message = "等待恢复解析"
-			} else {
-				j.Status = "error"
-				j.Error = "缓存不完整且原始 Demo 不可用，请重新导入"
-				j.Message = "需要重新导入"
-			}
+			j.Status = "discovered"
+			j.Error = ""
+			j.Message = "已发现录像，选择后解析"
+		}
+		if j.Status == "discovered" {
+			j.catalog = true
 		}
 		a.jobs[j.ID] = j
 	}
-	// Preserve saved order, including interrupted uploads. Only one worker parses.
-	for _, entry := range m.Jobs {
-		if j := a.jobs[entry.ID]; j.Status == "queued" {
-			a.enqueue(j)
-		}
+	// Starting the app restores the catalog/cache only. Even interrupted jobs
+	// wait for an explicit selection; discovering files never invokes the parser.
+	for _, source := range a.sources {
+		a.jobs[source.JobID].catalog = true
 	}
 	return nil
 }
@@ -297,7 +294,7 @@ func (a *app) libraryInfo(w http.ResponseWriter, r *http.Request) {
 	result := a.scanResult
 	result.Errors = append([]string{}, result.Errors...)
 	a.mu.Unlock()
-	jsonResponse(w, 200, map[string]any{"directory": a.demoDir, "enabled": a.persistent, "scanning": scanning, "count": count, "result": result, "message": "读取 .dem 和 ZIP 中的录像，后台校验去重并按顺序解析"})
+	jsonResponse(w, 200, map[string]any{"directory": a.demoDir, "enabled": a.persistent, "scanning": scanning, "count": count, "result": result, "message": "递归发现 .dem 和 ZIP 中的录像，校验去重后等待选择，不会自动解析"})
 }
 func (a *app) refreshLibrary(w http.ResponseWriter, r *http.Request) {
 	if !a.persistent {
@@ -322,45 +319,38 @@ func (a *app) scanLibrary() (result libraryScan, err error) {
 		a.scanResult = result
 		a.mu.Unlock()
 	}()
-	entries, err := os.ReadDir(a.demoDir)
+	files, err := a.collectLibraryFiles(&result)
 	if err != nil {
 		return result, err
 	}
 	// Plain files go first so an archive alongside an existing .dem reuses its
 	// original ID and cached analysis after its content hash has been verified.
-	for _, entry := range entries {
+	for _, entry := range files {
 		if a.ctx.Err() != nil {
 			return result, a.ctx.Err()
 		}
-		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.EqualFold(filepath.Ext(entry.Name()), ".dem") {
+		if !strings.EqualFold(filepath.Ext(entry.path), ".dem") {
 			continue
 		}
-		info, err := entry.Info()
-		if err != nil || !info.Mode().IsRegular() {
-			continue
-		}
+		info := entry.info
 		if info.Size() == 0 || info.Size() > maxUploadBytes {
-			result.Errors = append(result.Errors, entry.Name()+"：文件为空或超过 2 GiB，写入完成后刷新重试")
+			result.Errors = append(result.Errors, entry.path+"：文件为空或超过 2 GiB，写入完成后刷新重试")
 			continue
 		}
-		if e := a.scanPlainFile(filepath.Join(a.demoDir, entry.Name()), info, &result); e != nil {
-			result.Errors = append(result.Errors, entry.Name()+"："+e.Error())
+		if e := a.scanPlainFile(entry.path, info, &result); e != nil {
+			result.Errors = append(result.Errors, entry.path+"："+e.Error())
 		}
 		a.publishScanProgress(result)
 	}
-	for _, entry := range entries {
+	for _, entry := range files {
 		if a.ctx.Err() != nil {
 			return result, a.ctx.Err()
 		}
-		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.EqualFold(filepath.Ext(entry.Name()), ".zip") {
+		if !strings.EqualFold(filepath.Ext(entry.path), ".zip") {
 			continue
 		}
-		info, e := entry.Info()
-		if e != nil || !info.Mode().IsRegular() {
-			continue
-		}
-		if e = a.scanArchive(filepath.Join(a.demoDir, entry.Name()), info, &result); e != nil {
-			result.Errors = append(result.Errors, entry.Name()+"："+e.Error())
+		if e := a.scanArchive(entry.path, entry.info, &result); e != nil {
+			result.Errors = append(result.Errors, entry.path+"："+e.Error())
 		}
 		a.publishScanProgress(result)
 	}
@@ -372,8 +362,26 @@ func (a *app) scanLibrary() (result libraryScan, err error) {
 
 // A parser reads a private stable snapshot, never the user's original path.
 func (a *app) snapshotDemo(j *job) (string, func(), error) {
+	// A fresh explicit upload is already a private verified copy. Prefer it when
+	// deduplication reuses an ID whose previous catalog origins are now missing.
+	if j.ownedSource && safeSourcePath(a.root, j.source) {
+		return a.snapshotDirectDemo(j)
+	}
+	if sources := a.sourcesForJob(j.ID); len(sources) > 0 {
+		return a.snapshotSelectedSource(j, sources)
+	}
+	return a.snapshotDirectDemo(j)
+}
+
+func (a *app) snapshotDirectDemo(j *job) (string, func(), error) {
 	if j.ownedSource {
+		if !safeSourcePath(a.root, j.source) {
+			return "", func() {}, fmt.Errorf("本机上传副本不可用")
+		}
 		return j.source, func() {}, nil
+	}
+	if !safeSourcePath(a.demoDir, j.source) {
+		return "", func() {}, fmt.Errorf("原始 Demo 不可用或路径包含链接")
 	}
 	if !regularDemo(j.source) {
 		return "", func() {}, fmt.Errorf("Demo 不存在或不是普通文件")

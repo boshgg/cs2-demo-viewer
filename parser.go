@@ -97,7 +97,7 @@ func parseDemo(ctx context.Context, path, id, name string, progress func(float64
 	cfg.MsgQueueBufferSize = 0 // bounded, deterministic event dispatch
 	p := demo.NewParserWithConfig(reader, cfg)
 	defer p.Close()
-	d := &DemoData{ID: id, Name: name, SampleRate: sampleRate, Players: []PlayerInfo{}, Rounds: []Round{}, Frames: []Frame{}, Events: []Event{}, Shots: []Shot{}, Damage: []DamageEvent{}, Utilities: []Utility{}, Warnings: []string{}}
+	d := &DemoData{ID: id, Name: name, SampleRate: sampleRate, StatisticsVersion: 1, Players: []PlayerInfo{}, Rounds: []Round{}, Frames: []Frame{}, Events: []Event{}, Shots: []Shot{}, Damage: []DamageEvent{}, Utilities: []Utility{}, Warnings: []string{}}
 	players := map[string]PlayerInfo{}
 	seenWarnings := map[string]bool{}
 	warn := func(s string) {
@@ -112,6 +112,9 @@ func parseDemo(ctx context.Context, path, id, name string, progress func(float64
 	bombState := "dropped"
 	lastSample := -1.0
 	limited := false
+	lastActiveWeapons := map[string]activeWeaponObservation{}
+	var pendingEconomy *EconomySnapshot
+	pendingEconomyRound := 0
 	p.RegisterNetMessageHandler(func(m *msg.CDemoFileHeader) {
 		if m.GetMapName() != "" {
 			d.Map = m.GetMapName()
@@ -159,10 +162,18 @@ func parseDemo(ctx context.Context, path, id, name string, progress func(float64
 	p.RegisterEventHandler(func(e events.RoundStart) {
 		pendingRound, bombState = true, "dropped"
 		roundTimeLimit = max(0, e.TimeLimit)
+		clear(lastActiveWeapons)
 	})
 	p.RegisterEventHandler(func(e events.RoundFreezetimeEnd) {
-		if clock.initialized && len(d.Rounds) > 0 && !p.GameState().IsWarmupPeriod() {
-			d.Rounds[len(d.Rounds)-1].FreezeEnd = rounded(now())
+		if clock.initialized && !p.GameState().IsWarmupPeriod() {
+			t := rounded(now())
+			pendingEconomyRound = currentRound()
+			pendingEconomy = captureEconomySnapshot(p.GameState(), pendingEconomyRound, t)
+			if !pendingRound && len(d.Rounds) > 0 && d.Rounds[len(d.Rounds)-1].Number == pendingEconomyRound {
+				d.Rounds[len(d.Rounds)-1].FreezeEnd = t
+				d.Rounds[len(d.Rounds)-1].Economy = pendingEconomy
+				pendingEconomy = nil
+			}
 		}
 	})
 	p.RegisterEventHandler(func(e events.RoundEnd) {
@@ -175,12 +186,17 @@ func parseDemo(ctx context.Context, path, id, name string, progress func(float64
 		addEvent(Event{Type: "round_end", Text: e.Message})
 	})
 	p.RegisterEventHandler(func(e events.Kill) {
+		if !clock.initialized || p.GameState().IsWarmupPeriod() {
+			return
+		}
 		weapon := ""
 		if e.Weapon != nil {
 			weapon = e.Weapon.String()
 		}
+		victimWeapon, victimWeaponSource, victimWeaponTime := deathActiveWeapon(e.Victim, lastActiveWeapons[playerID(e.Victim)], currentRound(), now())
 		addEvent(Event{Type: "kill", Killer: playerName(e.Killer), Victim: playerName(e.Victim), KillerID: playerID(e.Killer), VictimID: playerID(e.Victim), Weapon: weapon, Headshot: e.IsHeadshot,
 			Assister: optionalPlayerName(e.Assister), AssisterID: playerID(e.Assister), KillerTeam: playerTeam(e.Killer), VictimTeam: playerTeam(e.Victim),
+			VictimWeapon: victimWeapon, VictimWeaponSource: victimWeaponSource, VictimWeaponTime: rounded(victimWeaponTime),
 			Penetrated: e.PenetratedObjects, NoScope: e.NoScope, ThroughSmoke: e.ThroughSmoke, AttackerBlind: e.AttackerBlind, AssistedFlash: e.AssistedFlash,
 			KillerPos: playerPosition(e.Killer), VictimPos: playerPosition(e.Victim)})
 	})
@@ -236,6 +252,15 @@ func parseDemo(ctx context.Context, path, id, name string, progress func(float64
 			return
 		}
 		t := now()
+		// Keep the last living active weapon on every tick, independently of the
+		// lower-frequency replay frames. Death may clear the active weapon handle.
+		for _, pl := range playing {
+			if pl != nil && pl.Entity != nil && pl.PlayerPawnEntity() != nil && pl.IsAlive() {
+				if weapon := pl.ActiveWeapon(); weapon != nil {
+					lastActiveWeapons[playerID(pl)] = activeWeaponObservation{weapon.String(), currentRound(), t}
+				}
+			}
+		}
 		newRound := pendingRound || len(d.Rounds) == 0
 		if !newRound && t-lastSample < 1.0/sampleRate-.0001 {
 			return
@@ -302,6 +327,13 @@ func parseDemo(ctx context.Context, path, id, name string, progress func(float64
 			pendingRound = false
 		}
 		frame.Round = d.Rounds[len(d.Rounds)-1].Number
+		if pendingEconomy != nil && pendingEconomyRound == frame.Round {
+			round := &d.Rounds[len(d.Rounds)-1]
+			if pendingEconomy.Time >= round.Start {
+				round.FreezeEnd, round.Economy = pendingEconomy.Time, pendingEconomy
+			}
+			pendingEconomy = nil
+		}
 		d.Rounds[len(d.Rounds)-1].CTScore = frame.CTScore
 		d.Rounds[len(d.Rounds)-1].TScore = frame.TScore
 		for _, g := range gs.GrenadeProjectiles() {

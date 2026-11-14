@@ -5,6 +5,8 @@
   const storageKey = 'cs2-analysis-v4';
   let initializing = true, migratedSessionId = '', libraryEnabled = false, libraryRefreshing = false, libraryScanning = false, syncPromise = null, libraryTimer, restoredView = null;
   const loadingJobs = new Map();
+  const catalog = new Map(), catalogSelection = new Set();
+  let catalogAdding = false, catalogLoading = false, catalogOpener = null;
   const metricNames = { movement: '移动', engagements: '交火', deaths: '死亡', shots: '开火' };
   const heatResolution = 384;
   const metrics = ['movement', 'engagements', 'deaths', 'shots'];
@@ -102,19 +104,21 @@
       label.append(check, words); row.append(label);
       const focus = node('button', '查看', 'text-button demo-focus'); focus.type = 'button'; focus.disabled = !state.demos.has(job.id); focus.title = '切换到这场 Demo 的地图并显示其队伍与玩家'; focus.setAttribute('aria-label', `查看 ${job.name || '比赛'} 所在地图`);
       focus.addEventListener('click', () => { const data = state.demos.get(job.id); if (data) void focusDemo(data); }); row.append(focus);
-      const remove = node('button', '×', 'demo-remove'); remove.title = job.owned ? '移除比赛并释放回放缓存' : '从分析移除'; remove.setAttribute('aria-label', `移除 ${job.name || '比赛'}`); remove.disabled = state.uploading && state.currentJob === job.id; remove.addEventListener('click', () => removeJob(job.id)); row.append(remove); (mapOf(job) === activeMap && activeMap ? list : pendingList).append(row);
+      const remove = node('button', '×', 'demo-remove'); remove.title = '从分析移除，保留录像库与回放缓存'; remove.setAttribute('aria-label', `移除 ${job.name || '比赛'}`); remove.disabled = state.uploading && state.currentJob === job.id; remove.addEventListener('click', () => removeJob(job.id)); row.append(remove); (mapOf(job) === activeMap && activeMap ? list : pendingList).append(row);
     }
-    if (!current.length) list.append(node('p', activeMap ? '当前地图暂无比赛。' : jobs.length ? '等待识别地图，或在下方选择已有地图。' : '将 .dem 或 .zip 放入文件夹并刷新，建立分析。', 'muted'));
-    $('sample-analysis').disabled = state.uploading;
-    $('refresh-library').disabled = !libraryEnabled || libraryRefreshing || libraryScanning || state.uploading;
+    if (!current.length) list.append(node('p', activeMap ? '当前地图暂无比赛。' : jobs.length ? '等待识别地图，或在下方选择已有地图。' : '从本地录像库选择比赛，加入后才开始分析。', 'muted'));
+    $('sample-analysis').disabled = state.uploading || catalogAdding;
+    $('refresh-library').disabled = !libraryEnabled || libraryRefreshing || libraryScanning || state.uploading || catalogAdding;
+    renderCatalog();
   }
   async function removeJob(id) {
     const job = state.jobs.get(id);
     if (!job) return;
     if (job.owned) {
-      try { const response = await fetch(`/api/demos/${encodeURIComponent(id)}`, { method: 'DELETE' }); if (!response.ok) throw new Error('释放比赛缓存失败'); }
+      try { const response = await fetch(`/api/analyses/${encodeURIComponent(id)}`, { method: 'DELETE' }); if (!response.ok) throw new Error('从分析移除比赛失败'); }
       catch (error) { message(error.message); return; }
     }
+    if (catalog.has(id)) catalog.get(id).analysis = false;
     state.jobs.delete(id); state.demos.delete(id); state.selectedDemos?.delete(id); updateWorkerData(); renderJobs(); await refreshMaps(); renderFilters(); requestAnalysis(); save();
   }
   function availableTeams() {
@@ -264,7 +268,7 @@
   }
   function scheduleLibraryPoll() {
     clearTimeout(libraryTimer);
-    if (!state.uploading && (libraryScanning || [...state.jobs.values()].some(job => job.owned && job.status !== 'ready' && job.status !== 'error'))) {
+    if (!state.uploading && (libraryScanning || [...state.jobs.values()].some(job => job.owned && !['ready', 'error', 'discovered'].includes(job.status)))) {
       libraryTimer = setTimeout(async () => {
         try { await loadLibraryInfo(true); await syncServerJobs(); }
         catch (error) { $('library-status').textContent = `更新解析进度失败：${error.message}。正在重试…`; scheduleLibraryPoll(); }
@@ -274,16 +278,22 @@
   async function syncServerJobs(options = {}) {
     if (syncPromise) return syncPromise;
     syncPromise = (async () => {
-      const response = await json(await fetch('/api/analyses', { cache: 'no-store' }));
-      const jobs = Array.isArray(response) ? response : response.demos || [], known = new Set(jobs.map(job => job.id));
+      const [response, library] = await Promise.all([json(await fetch('/api/analyses', { cache: 'no-store' })), json(await fetch('/api/library/demos', { cache: 'no-store' }))]);
+      catalog.clear();
+      for (const demo of library.demos || []) catalog.set(demo.id, demo);
+      for (const id of catalogSelection) if (!catalog.has(id)) catalogSelection.delete(id);
+      const jobs = Array.isArray(response) ? response : response.demos || [];
+      // Keep changed, previously selected sources visible without reusing their stale summary.
+      for (const demo of catalog.values()) if (demo.analysis && demo.status === 'discovered' && !jobs.some(job => job.id === demo.id)) jobs.push({ ...demo, message: '来源已更新，请从录像库选择后重新解析' });
+      const known = new Set(jobs.map(job => job.id)), knownSources = new Set([...known, ...catalog.keys()]);
       let changed = false;
       if (options.pruneSelection && state.selectedDemos) {
         const hadSelection = state.selectedDemos.size > 0;
-        state.selectedDemos = new Set([...state.selectedDemos].filter(id => known.has(id)));
+        state.selectedDemos = new Set([...state.selectedDemos].filter(id => knownSources.has(id)));
         if (hadSelection && !state.selectedDemos.size) state.selectedDemos = null;
       }
       for (const [id, job] of state.jobs) if (job.owned && !known.has(id)) {
-        state.jobs.delete(id); changed = state.demos.delete(id) || changed; state.selectedDemos?.delete(id);
+        state.jobs.delete(id); changed = state.demos.delete(id) || changed; if (!catalog.has(id)) state.selectedDemos?.delete(id);
       }
       const ready = [];
       for (const job of jobs) {
@@ -306,7 +316,7 @@
         if (changed) updateWorkerData();
         await refreshMaps(); renderFilters(); requestAnalysis();
       }
-      const pending = [...state.jobs.values()].filter(job => job.status !== 'ready' && job.status !== 'error').length;
+      const pending = [...state.jobs.values()].filter(job => !['ready', 'error', 'discovered'].includes(job.status)).length;
       $('library-progress').textContent = pending ? `${pending} 场等待或正在解析 · 完成后自动更新` : '';
       scheduleLibraryPoll();
       return jobs;
@@ -315,7 +325,7 @@
   }
   function libraryResultText(result) {
     const errors = Array.isArray(result.errors) ? result.errors.map(item => typeof item === 'string' ? item : item.message || item.error || '文件暂不可读取') : [];
-    return `新增 ${number(result.added)} 场 · ${number(result.unchanged)} 场无需重复解析${errors.length ? `。${errors.join('；')}` : '。已有筛选已保留。'}`;
+    return `发现新增 ${number(result.added)} 场 · ${number(result.unchanged)} 场已在库中。选择录像后才解析${errors.length ? `。${errors.join('；')}` : '；已有筛选已保留。'}`;
   }
   async function loadLibraryInfo(strict = false) {
     try {
@@ -324,12 +334,13 @@
       libraryScanning = info.scanning === true;
       $('library-directory').textContent = info.directory || '未配置 Demo 文件夹';
       $('library-directory').title = info.directory || '';
-      $('library-status').textContent = libraryScanning ? '正在扫描文件夹、解压 ZIP 并检查重复录像…' : info.result ? libraryResultText(info.result) : libraryEnabled ? '把 .dem 或 .zip 放入此文件夹；ZIP 会自动解压读取，新增或修改后点击刷新。' : info.message || '此服务未启用文件夹读取。';
+      $('library-status').textContent = libraryScanning ? '正在递归扫描子文件夹、读取 ZIP 并检查重复录像；扫描不会解析比赛…' : info.result ? libraryResultText(info.result) : libraryEnabled ? '自动扫描所有子文件夹中的 .dem 和 .zip；新增后点击刷新，再从录像库选择要分析的比赛。' : info.message || '此服务未启用文件夹读取。';
     } catch (error) { if (strict) throw error; $('library-status').textContent = '无法读取文件夹信息；仍可手动导入 Demo。'; }
-    $('refresh-library').disabled = !libraryEnabled || libraryRefreshing || libraryScanning || state.uploading;
+    $('refresh-library').disabled = !libraryEnabled || libraryRefreshing || libraryScanning || state.uploading || catalogAdding;
+    renderCatalog();
   }
   async function refreshLibrary() {
-    if (!libraryEnabled || libraryRefreshing || libraryScanning || state.uploading) return;
+    if (!libraryEnabled || libraryRefreshing || libraryScanning || state.uploading || catalogAdding) return;
     libraryRefreshing = true; $('refresh-library').disabled = true; $('library-status').textContent = '正在检查文件夹…';
     try {
       const result = await json(await fetch('/api/library/refresh', { method: 'POST' }));
@@ -343,6 +354,79 @@
     } catch (error) { $('library-status').textContent = `刷新失败：${error.message}。已有比赛仍可查看，可再次点击重试。`; }
     finally { libraryRefreshing = false; renderJobs(); scheduleLibraryPoll(); }
   }
+  function catalogSelectable(demo) { return demo.status === 'ready' || demo.available !== false; }
+  function visibleCatalog() {
+    const query = $('analysis-library-search').value.trim().toLocaleLowerCase();
+    return [...catalog.values()].filter(demo => !query || [demo.name, demo.map, ...(demo.sources || []).flatMap(source => [source.path, source.member])].join(' ').toLocaleLowerCase().includes(query));
+  }
+  function renderCatalog() {
+    const visible = visibleCatalog(), list = $('analysis-library-list'); list.replaceChildren();
+    const busy = catalogAdding || state.uploading;
+    $('open-analysis-library').disabled = busy;
+    $('empty-open-analysis-library').disabled = busy;
+    $('analysis-library-count').textContent = `显示 ${visible.length} / ${catalog.size} 场 · 已选 ${catalogSelection.size} 场`;
+    $('analysis-library-add').textContent = catalogAdding ? '正在加入…' : `加入分析（${catalogSelection.size}）`;
+    $('analysis-library-add').disabled = busy || !catalogSelection.size;
+    $('analysis-library-all').disabled = busy || !visible.some(catalogSelectable);
+    $('analysis-library-clear').disabled = busy || !catalogSelection.size;
+    $('analysis-library-refresh').disabled = busy || !libraryEnabled || libraryRefreshing || libraryScanning || catalogLoading;
+    for (const demo of visible) {
+      const row = node('label', null, 'analysis-library-row'), check = document.createElement('input'), words = node('span', null, 'analysis-library-words');
+      row.dataset.demoId = demo.id; check.type = 'checkbox'; check.dataset.demoId = demo.id; check.checked = catalogSelection.has(demo.id); check.disabled = busy || !catalogSelectable(demo);
+      check.setAttribute('aria-label', `选择 ${demo.name || demo.id} 加入分析`);
+      check.addEventListener('change', () => { if (check.checked) catalogSelection.add(demo.id); else catalogSelection.delete(demo.id); renderCatalog(); });
+      const title = node('strong', demo.name || demo.id); title.title = demo.name || demo.id;
+      const sources = (demo.sources || []).map(source => `${source.path}${source.member ? ` → ${source.member}` : ''}`), path = node('small', sources[0] || '本机已解析记录', 'analysis-library-path'); path.title = sources.join('\n');
+      const statuses = { discovered: '待选择解析', queued: '等待解析', parsing: '正在解析', error: '解析失败，可重试' };
+      const status = demo.status === 'ready' ? demo.analysis ? '已加入分析 · 可直接复用' : '已解析缓存 · 可直接加入' : statuses[demo.status] || demo.message || '等待处理';
+      const detail = node('small', `${demo.map || '地图待解析'} · ${status}${demo.sourceCount > 1 ? ` · ${demo.sourceCount} 个来源已去重` : ''}`, demo.status === 'error' ? 'status-error' : '');
+      words.append(title, path, detail);
+      if (demo.error) words.append(node('small', demo.error, 'status-error'));
+      if (demo.available === false) words.append(node('small', demo.status === 'ready' ? '源文件已移走，仍可使用解析缓存' : '源文件不可用，请恢复文件后刷新', 'micro'));
+      row.append(check, words); list.append(row);
+    }
+    if (!visible.length) list.append(node('p', catalogLoading ? '正在读取录像库…' : catalog.size ? '没有匹配的录像，试试文件名或子文件夹名称。' : '录像库为空。将 .dem 或 .zip 放入 Demo 文件夹（支持所有子文件夹），然后点击刷新。', 'muted'));
+  }
+  async function openCatalog(event) {
+    if (catalogAdding || state.uploading) return;
+    catalogOpener = event?.currentTarget || $('open-analysis-library');
+    $('analysis-library-error').hidden = true;
+    const dialog = $('analysis-library-dialog'); dialog.hidden = false; if (!dialog.open) dialog.showModal?.();
+    catalogLoading = true; renderCatalog(); $('analysis-library-search').focus?.();
+    try { await syncServerJobs(); }
+    catch (error) { $('analysis-library-error').textContent = `读取录像库失败：${error.message}`; $('analysis-library-error').hidden = false; }
+    finally { catalogLoading = false; renderCatalog(); }
+  }
+  function closeCatalog() {
+    const dialog = $('analysis-library-dialog'); dialog.close?.(); dialog.hidden = true; catalogOpener?.focus?.();
+  }
+  async function addCatalogDemos(ids = [...catalogSelection], options = {}) {
+    if (catalogAdding || state.uploading || !ids.length) return;
+    catalogAdding = true; $('analysis-library-error').hidden = true; renderJobs();
+    const errors = []; let added = 0;
+    try {
+      for (const id of new Set(ids)) {
+        try {
+          const result = await json(await fetch(`/api/library/demos/${encodeURIComponent(id)}/parse`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'analysis' }) }));
+          state.selectedDemos?.add(result.id); catalogSelection.delete(id); added++;
+        } catch (error) { errors.push(`${catalog.get(id)?.name || id}：${error.message}`); }
+      }
+      if (syncPromise) await syncPromise;
+      await syncServerJobs();
+      // A ready cache may already be loaded but excluded by an explicit subset.
+      renderJobs(); renderFilters(); requestAnalysis(); save();
+      if (options.focus && state.demos.has(ids[0])) await focusDemo(state.demos.get(ids[0]));
+      if (!errors.length && !options.keepOpen) closeCatalog();
+    } catch (error) { errors.push(`更新分析列表失败：${error.message}。已提交的任务仍会继续，请刷新重试。`); }
+    finally {
+      catalogAdding = false; renderJobs(); scheduleLibraryPoll();
+      if (errors.length) {
+        const text = `${added ? `已加入 ${added} 场。` : ''}${errors.join('；')}`;
+        $('analysis-library-error').textContent = text; $('analysis-library-error').hidden = false;
+        if ($('analysis-library-dialog').hidden) message(text);
+      }
+    }
+  }
   async function focusDemo(data) {
     restoredView = null;
     state.selectedDemos?.add(data.id); state.selectedTeams = state.selectedPlayers = null;
@@ -351,6 +435,12 @@
     await refreshMaps(data.map);
     if (previousMap === data.map) await loadMapImage();
     renderJobs(); renderFilters(); requestAnalysis(); save();
+    // A link is a one-time navigation intent, not a filter reset on every reload.
+    const url = new URL(location.href);
+    if (url.searchParams.get('demo') === data.id) {
+      url.searchParams.delete('demo');
+      window.history.replaceState(window.history.state, '', url);
+    }
   }
   async function pollJob(id, signal, focus = false) {
     for (;;) {
@@ -366,39 +456,43 @@
     }
   }
   async function importFiles(files) {
-    if (state.uploading) { message('正在导入这一批比赛，请完成或取消后再添加文件。'); return; }
+    if (state.uploading || catalogAdding) { message('正在加入这一批比赛，请完成后再添加文件。'); return; }
     const list = [...files]; if (!list.length) return;
     const invalid = list.find(f => !/\.dem$/i.test(f.name) || f.size === 0 || f.size > 2 * 1024 ** 3);
     if (invalid) { message(`${invalid.name} 不是可导入的 .dem 文件：请先解压，文件必须非空且不超过 2 GiB。`); return; }
     message(''); state.uploading = true; state.cancelled = false; state.queued = list; state.pendingCount = list.length; state.controller = new AbortController();
     clearTimeout(libraryTimer);
     $('upload-status').hidden = false; $('cancel-upload').disabled = false; $('analysis-files').disabled = true; renderJobs();
-    const failures = []; let focused = false;
+    const failures = []; let focused = false, hadShared = false;
     for (let i = 0; i < list.length && !state.cancelled; i++) {
-      const file = list[i]; state.currentJob = null;
+      const file = list[i]; state.currentJob = null; let shared = false;
       $('upload-message').textContent = `上传 ${i + 1}/${list.length} · ${file.name}`; $('upload-progress').value = 0;
       try {
         const form = new FormData(); form.append('demo', file);
         const job = await json(await fetch('/api/demos?mode=analysis', { method: 'POST', body: form, signal: state.controller.signal }));
+        shared = job.shared === true; hadShared ||= shared;
         state.currentJob = job.id; state.pendingCount--;
-        state.jobs.set(job.id, { id: job.id, name: file.name, status: 'queued', owned: true });
+        state.jobs.set(job.id, { ...state.jobs.get(job.id), id: job.id, name: file.name, status: job.status || 'queued', owned: true });
         if (state.selectedDemos) state.selectedDemos.add(job.id);
         renderJobs(); save();
         await pollJob(job.id, state.controller.signal, !focused); focused = true;
       } catch (error) {
         if (!state.cancelled) failures.push(`${file.name}：${error.message}`);
-        if (state.currentJob) {
+        if (state.currentJob && !shared) {
           const failedId = state.currentJob;
           try { await fetch(`/api/demos/${encodeURIComponent(failedId)}`, { method: 'DELETE' }); } catch { /* Restore can expose a server-side job if offline. */ }
           state.jobs.delete(failedId); state.demos.delete(failedId); state.selectedDemos?.delete(failedId);
-        } else state.pendingCount--;
+        } else if (!state.currentJob) state.pendingCount--;
         renderJobs();
       }
     }
     state.uploading = false; state.currentJob = null; state.pendingCount = 0; state.controller = null; state.queued = [];
+    if (hadShared) {
+      try { await syncServerJobs(); } catch { /* Keep shared jobs intact if the service is temporarily unavailable. */ }
+    }
     $('upload-status').hidden = true; $('analysis-files').disabled = false; $('analysis-files').value = ''; renderJobs(); save(); scheduleLibraryPoll();
     if (failures.length) message(`部分比赛未导入，可重新选择重试。${failures.join('；')}`);
-    else if (state.cancelled) message('已取消剩余导入；已经完成的比赛仍保留。', false);
+    else if (state.cancelled) message(hadShared ? '已停止等待并取消后续导入；共享录像的后台任务与已有分析仍保留。' : '已取消剩余导入；已经完成的比赛仍保留。', false);
   }
   async function sample() {
     if (state.uploading) return;
@@ -522,7 +616,16 @@
   function download(blob, filename) { const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(url), 30000); }
   $('analysis-files').addEventListener('change', event => importFiles(event.target.files));
   $('refresh-library').addEventListener('click', refreshLibrary);
-  $('cancel-upload').addEventListener('click', () => { state.cancelled = true; state.controller?.abort(); $('cancel-upload').disabled = true; $('upload-message').textContent = '正在取消当前任务…'; });
+  $('open-analysis-library').addEventListener('click', openCatalog);
+  $('empty-open-analysis-library').addEventListener('click', openCatalog);
+  $('analysis-library-close').addEventListener('click', closeCatalog);
+  $('analysis-library-dialog').addEventListener('cancel', event => { event.preventDefault(); closeCatalog(); });
+  $('analysis-library-search').addEventListener('input', renderCatalog);
+  $('analysis-library-refresh').addEventListener('click', refreshLibrary);
+  $('analysis-library-all').addEventListener('click', () => { for (const demo of visibleCatalog()) if (catalogSelectable(demo)) catalogSelection.add(demo.id); renderCatalog(); });
+  $('analysis-library-clear').addEventListener('click', () => { catalogSelection.clear(); renderCatalog(); });
+  $('analysis-library-add').addEventListener('click', () => addCatalogDemos());
+  $('cancel-upload').addEventListener('click', () => { state.cancelled = true; state.controller?.abort(); $('cancel-upload').disabled = true; $('upload-message').textContent = '正在停止等待…'; });
   $('sample-analysis').addEventListener('click', sample);
   $('analysis-map').addEventListener('change', async event => { restoredView = null; state.selectedTeams = null; state.selectedPlayers = null; await loadMap(event.target.value); renderFilters(); requestAnalysis(); });
   $('analysis-side').addEventListener('change', requestAnalysis);
@@ -614,7 +717,7 @@
       await Promise.all([syncServerJobs({ render: false, pruneSelection: true }), loadLibraryInfo()]);
       updateWorkerData(); await refreshMaps();
       const currentId = new URL(location.href).searchParams.get('demo');
-      if (currentId && !state.jobs.has(currentId)) await loadJob(currentId, { owned: false, focus: true });
+      if (currentId && !state.demos.has(currentId)) await addCatalogDemos([currentId], { focus: true });
       else if (currentId && state.demos.has(currentId)) await focusDemo(state.demos.get(currentId));
       initializing = false; renderJobs(); renderFilters(); requestAnalysis(); save(); scheduleLibraryPoll();
     } catch (error) { message(`无法恢复本机分析：${error.message}。仍可尝试导入新的 Demo。`); }

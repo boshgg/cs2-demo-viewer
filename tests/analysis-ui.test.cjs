@@ -21,7 +21,7 @@ function dataset(id, map = 'de_mirage', x = 256, y = 768) {
 }
 
 async function page(datasets = [dataset('one')], pageOptions = {}) {
-  const elements = new Map(), canvases = [], downloads = [], requests = [], timers = new Map();
+  const elements = new Map(), canvases = [], downloads = [], requests = [], timers = new Map(), parseBodies = [];
   const mapGates = new Map(), resizeObservers = [], timerDelays = new Map(), savedWrites = [];
   let nextTimer = 0, analysisCalls = 0, refreshError = '';
   class Element {
@@ -84,22 +84,48 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
   const uploads = new Map((pageOptions.uploads || []).map(demo => [demo.name, demo]));
   const libraryFiles = new Map((pageOptions.libraryDemos || []).map(demo => [demo.id, demo]));
   const libraryInfo = { enabled: true, directory: 'F:\\viewer\\demo', ...(pageOptions.library || {}) };
+  const scanned = new Set(source.keys());
+  const catalogDemos = () => [...new Map([...libraryFiles, ...source]).values()].map(d => ({
+    id: d.id, name: d.name, map: source.has(d.id) || d.jobStatus === 'ready' ? d.map : d.catalogMap || '', status: d.jobStatus || (source.has(d.id) ? 'ready' : 'discovered'),
+    revision: d.revision, error: d.parseError, analysis: source.has(d.id) && d.analysis !== false,
+    available: d.available !== false, sourceCount: d.sourceCount || 1,
+    sources: d.sources || [{ path: d.name, kind: 'dem', available: d.available !== false }],
+  }));
   const stored = new Map(pageOptions.saved ? [['cs2-analysis-v4', JSON.stringify(pageOptions.saved)]] : []);
+  const location = { href: pageOptions.href || 'http://127.0.0.1:8765/analysis.html' };
   const fetch = async (url, options = {}) => {
     requests.push([url, options.method || 'GET']);
     if (url === '/api/session-settings') return response(pageOptions.session || { sessionId: '', settings: null });
     if (url === '/api/library') return response({ count: libraryFiles.size, ...libraryInfo });
+    if (url === '/api/library/demos') return response({ demos: catalogDemos(), scanning: libraryInfo.scanning === true });
+    const parsing = /^\/api\/library\/demos\/([^/]+)\/parse$/.exec(url);
+    if (parsing && options.method === 'POST') {
+      const id = decodeURIComponent(parsing[1]), demo = source.get(id) || libraryFiles.get(id);
+      parseBodies.push([id, JSON.parse(options.body)]);
+      if (pageOptions.parseGate) await pageOptions.parseGate;
+      if (!demo || demo.requestError) return { ok: false, status: 409, json: async () => ({ error: demo?.requestError || '源文件不可用' }) };
+      const cached = catalogDemos().find(d => d.id === id).status === 'ready';
+      const status = cached ? 'ready' : demo.afterParseStatus || 'ready';
+      source.set(id, { ...demo, analysis: true, jobStatus: status });
+      return response({ id, status, cached, analysis: true, revision: demo.revision });
+    }
     if (url === '/api/library/refresh' && options.method === 'POST') {
       if (refreshError) return { ok: false, status: 500, json: async () => ({ error: refreshError }) };
       if (pageOptions.asyncScan) { libraryInfo.scanning = true; return response({ scanning: true, added: 0, unchanged: 0, queued: 0, errors: [] }); }
       let added = 0;
-      for (const [id, demo] of libraryFiles) if (!source.has(id)) { source.set(id, demo); added++; }
+      for (const id of libraryFiles.keys()) if (!scanned.has(id)) { scanned.add(id); added++; }
       return response({ added, unchanged: libraryFiles.size - added, queued: [...source.values()].filter(d => d.jobStatus === 'queued').length, directory: 'F:\\viewer\\demo', errors: pageOptions.libraryErrors || [] });
     }
-    if (url === '/api/analyses') return response([...source.values()].map(d => ({ id: d.id, name: d.name, map: d.map, status: d.jobStatus || 'ready', revision: d.revision, error: d.parseError })));
+    if (url === '/api/analyses') return response([...source.values()].filter(d => d.analysis !== false && d.jobStatus !== 'discovered').map(d => ({ id: d.id, name: d.name, map: d.map, status: d.jobStatus || 'ready', revision: d.revision, error: d.parseError })));
+    const removingAnalysis = /^\/api\/analyses\/([^/]+)$/.exec(url);
+    if (removingAnalysis && options.method === 'DELETE') {
+      const id = decodeURIComponent(removingAnalysis[1]);
+      if (source.has(id)) source.set(id, { ...source.get(id), analysis: false });
+      return response({});
+    }
     if (url === '/api/demos?mode=analysis' && options.method === 'POST') {
       const file = options.body.get('demo'), demo = uploads.get(file.name);
-      assert.ok(demo, `Unexpected uploaded fixture ${file.name}`); source.set(demo.id, demo); return response({ id: demo.id });
+      assert.ok(demo, `Unexpected uploaded fixture ${file.name}`); source.set(demo.id, { ...demo, analysis: true }); return response({ id: demo.id, shared: demo.shared === true });
     }
     const match = /^\/api\/demos\/([^/]+)(\/(?:analysis|status))?$/.exec(url);
     if (match) {
@@ -107,6 +133,7 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
       if (match[2] === '/analysis' && source.has(match[1])) return response(source.get(match[1]));
       if (match[2] === '/status' && source.has(match[1])) {
         const demo = source.get(match[1]);
+        if (demo.blockStatus) await new Promise((resolve, reject) => { if (options.signal.aborted) reject(new DOMException('Cancelled', 'AbortError')); else options.signal.addEventListener('abort', () => reject(new DOMException('Cancelled', 'AbortError')), { once: true }); });
         return response({ status: demo.parseError ? 'error' : 'ready', progress: 1, error: demo.parseError || '', map: demo.map });
       }
     }
@@ -122,12 +149,12 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
     static revokeObjectURL() {}
   }
   const sandbox = {
-    window: { ReplayAnalysis: { ...analysis, aggregate: (...args) => { analysisCalls++; return analysis.aggregate(...args); } }, ReplayHeatmap: heatmap }, document: { getElementById: get, createElement: create, addEventListener: noop },
+    window: { ReplayAnalysis: { ...analysis, aggregate: (...args) => { analysisCalls++; return analysis.aggregate(...args); } }, ReplayHeatmap: heatmap, history: { state: null, replaceState: (_state, _title, url) => { location.href = String(url); } } }, document: { getElementById: get, createElement: create, addEventListener: noop },
     Option: function (text, value) { const option = new Element('option'); option.textContent = text; option.value = value; return option; },
     Image: class { decode() { return Promise.resolve(); } },
     ImageData: class { constructor(data, width, height) { this.data = data; this.width = width; this.height = height; } },
     ResizeObserver: class { constructor(callback) { resizeObservers.push(callback); } observe() {} },
-    localStorage: { getItem: key => stored.get(key) ?? null, setItem: (key, value) => { stored.set(key, value); if (key === 'cs2-analysis-v4') savedWrites.push(JSON.parse(value)); } }, location: { href: pageOptions.href || 'http://127.0.0.1:8765/analysis.html' },
+    localStorage: { getItem: key => stored.get(key) ?? null, setItem: (key, value) => { stored.set(key, value); if (key === 'cs2-analysis-v4') savedWrites.push(JSON.parse(value)); } }, location,
     FormData: class { constructor() { this.values = new Map(); } append(key, value) { this.values.set(key, value); } get(key) { return this.values.get(key); } },
     AbortController, DOMException, devicePixelRatio: 2, URL: PageURL, Blob, fetch, console,
     setTimeout: (callback, delay = 0) => { const id = ++nextTimer; timers.set(id, callback); timerDelays.set(id, delay); if (!delay) queueMicrotask(() => { if (timers.has(id)) { timers.delete(id); timerDelays.delete(id); callback(); } }); return id; },
@@ -139,7 +166,7 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
   const main = get('analysis-canvas');
   const renderedHeat = () => main.context.draws.map(args => args[0]).find(image => image.imageData) || null;
   const hasVisibleHeat = () => renderedHeat()?.imageData.data.some((value, index) => index % 4 === 3 && value > 0) || false;
-  return { get, main, canvases, downloads, requests, renderedHeat, hasVisibleHeat,
+  return { get, main, canvases, downloads, requests, parseBodies, renderedHeat, hasVisibleHeat, href: () => location.href,
     saved: () => JSON.parse(stored.get('cs2-analysis-v4') || '{}'),
     savedWrites, analysisCalls: () => analysisCalls,
     setLibraryFiles(demos) { libraryFiles.clear(); for (const demo of demos) libraryFiles.set(demo.id, demo); },
@@ -164,7 +191,8 @@ test('removing the last demo then changing color scale cannot resurrect its heat
   await ui.change('heat-scale', 'linear');
   assert.equal(ui.hasVisibleHeat(), false);
   assert.equal(ui.get('export-image').disabled, true);
-  assert.ok(ui.requests.some(([url, method]) => url === '/api/demos/one' && method === 'DELETE'));
+  assert.ok(ui.requests.some(([url, method]) => url === '/api/analyses/one' && method === 'DELETE'));
+  assert.equal(ui.requests.some(([url, method]) => url === '/api/demos/one' && method === 'DELETE'), false);
 });
 
 test('changing maps clears the old raster while the next map is loading', async () => {
@@ -365,6 +393,15 @@ function demoCheckbox(ui, name) {
 }
 function visibleDemoNames(ui, id = 'demo-list') { return ui.get(id).querySelectorAll('input').map(input => input['aria-label'].replace(/^叠加 /, '')); }
 function savedDemoChecked(ui, id) { const selected = ui.saved().selectedDemos; return selected === null || selected.includes(id); }
+function catalogCheckbox(ui, id) {
+  const input = ui.get('analysis-library-list').querySelectorAll('input').find(input => input.dataset.demoId === id);
+  assert.ok(input, `Missing catalog checkbox ${id}`); return input;
+}
+async function chooseLibrary(ui, ids, add = true) {
+  await clickAndSettle(ui, 'open-analysis-library');
+  for (const id of ids) { const input = catalogCheckbox(ui, id); input.checked = true; await input.dispatch('change'); }
+  if (add) await clickAndSettle(ui, 'analysis-library-add');
+}
 async function focusDemoRow(ui, name) {
   const button = ui.get('demo-list').querySelectorAll('button').find(button => button['aria-label'] === `查看 ${name} 所在地图`);
   assert.ok(button, `Missing focus button ${name}`); await button.click(); await settle();
@@ -449,13 +486,13 @@ test('manual upload accepts a batch larger than ten demos', async () => {
   assert.equal(ui.requests.filter(([url, method]) => url === '/api/demos?mode=analysis' && method === 'POST').length, 12);
 });
 
-test('folder refresh adds demos without changing an explicit subset, map, roster or display filters', async () => {
+test('folder refresh only discovers demos and preserves the explicit subset, map, roster and display filters', async () => {
   const old = rosterDemo('old', 'de_nuke'), incoming = rosterDemo('incoming', 'de_ancient');
   const saved = { ids: ['old'], selectedDemos: ['old'], selectedTeams: ['alias:squad'], selectedPlayers: ['p1'], aliases: { alpha: 'Squad' }, map: 'de_nuke', side: '3', floor: 'lower', query: 'Alice', layers: ['deaths'], radius: 224, opacity: 85, scale: 'linear', utilityType: 'smoke', utilitySort: 'rare', landingDistance: 192, throwDistance: 96 };
   const ui = await page([old], { saved, libraryDemos: [old, incoming], mapInfo: { lowerMaxZ: 100, lowerRadar: '/maps/lower.png' } });
   const before = ui.saved();
   await clickAndSettle(ui, 'refresh-library');
-  assert.equal(ui.get('demo-count').textContent, '本图 1 / 共 2 场'); assert.equal(ui.get('analysis-map').value, 'de_nuke');
+  assert.equal(ui.get('demo-count').textContent, '本图 1 / 共 1 场'); assert.equal(ui.get('analysis-map').value, 'de_nuke');
   assert.equal(ui.get('analysis-floor').value, 'lower'); assert.equal(ui.get('analysis-side').value, '3');
   assert.deepEqual(selectedPlayerIds(ui), ['p1']); assert.equal(deaths(ui), 1);
   assert.equal(savedDemoChecked(ui, incoming.id), false); assert.deepEqual(visibleDemoNames(ui), [old.name]); assert.equal(demoCheckbox(ui, old.name).checked, true);
@@ -464,22 +501,30 @@ test('folder refresh adds demos without changing an explicit subset, map, roster
   const calls = ui.analysisCalls();
   await clickAndSettle(ui, 'refresh-library');
   assert.equal(ui.analysisCalls(), calls, 'unchanged refresh needs no aggregation');
-  assert.match(ui.get('library-status').textContent, /新增 0 场 · 2 场无需重复解析/);
-  for (const demo of [old, incoming]) assert.equal(ui.requests.filter(([url]) => url === `/api/demos/${demo.id}/analysis`).length, 1);
+  assert.match(ui.get('library-status').textContent, /新增 0 场 · 2 场已在库中/);
+  assert.equal(ui.requests.filter(([url]) => url === `/api/demos/${old.id}/analysis`).length, 1);
+  assert.equal(ui.requests.filter(([url]) => url === `/api/demos/${incoming.id}/analysis`).length, 0);
+  assert.equal(ui.parseBodies.length, 0);
 });
 
-test('folder refresh under the default all selection automatically includes new demos on the current map', async () => {
-  const old = dataset('old'), added = dataset('added');
-  const ui = await page([old], { libraryDemos: [old, added] });
+test('default all applies only to added analyses and selecting one catalog demo never parses its neighbors', async () => {
+  const old = dataset('old'), added = dataset('added'), untouched = dataset('untouched', 'de_nuke');
+  const ui = await page([old], { libraryDemos: [old, added, untouched] });
   await clickAndSettle(ui, 'refresh-library');
+  assert.equal(deaths(ui), 1); assert.equal(ui.parseBodies.length, 0);
+  await chooseLibrary(ui, ['added']);
   assert.equal(deaths(ui), 2); assert.equal(ui.saved().selectedDemos, null); assert.ok(demoCheckbox(ui, added.name).checked);
   assert.equal(ui.get('library-directory').textContent, 'F:\\viewer\\demo');
+  assert.deepEqual(ui.parseBodies, [['added', { mode: 'analysis' }]]);
+  assert.equal(ui.requests.filter(([url]) => url.includes('/untouched/')).length, 0);
+  assert.deepEqual(ui.get('analysis-map').children.map(item => item.value), ['de_mirage']);
 });
 
 test('queued folder demos update when parsing finishes and do not repeatedly load cached summaries', async () => {
-  const old = dataset('old'), queued = { ...dataset('pending'), jobStatus: 'queued', revision: 'first' };
+  const old = dataset('old'), queued = { ...dataset('pending'), afterParseStatus: 'queued', revision: 'first' };
   const ui = await page([old], { libraryDemos: [old, queued] });
   await clickAndSettle(ui, 'refresh-library');
+  await chooseLibrary(ui, ['pending']);
   assert.equal(deaths(ui), 1); assert.equal(demoCheckbox(ui, queued.name).disabled, true);
   assert.match(ui.get('library-progress').textContent, /1 场等待或正在解析/);
   ui.setJob({ ...queued, jobStatus: 'ready' }); await ui.pollLibrary();
@@ -497,7 +542,7 @@ test('refresh failure keeps cached analysis and filters usable and permits retry
   assert.equal(ui.get('refresh-library').disabled, false); assert.equal(deaths(ui), 1);
   assert.deepEqual(ui.saved().selectedDemos, ['old']); assert.equal(ui.get('demo-count').textContent, '本图 1 / 共 1 场');
   ui.failRefresh(''); await clickAndSettle(ui, 'refresh-library');
-  assert.equal(ui.get('demo-count').textContent, '本图 2 / 共 2 场'); assert.equal(deaths(ui), 1);
+  assert.equal(ui.get('demo-count').textContent, '本图 1 / 共 1 场'); assert.equal(deaths(ui), 1);
   assert.match(ui.get('library-status').textContent, /copying.dem 尚在写入/);
   assert.equal(ui.get('global-error').textContent, '');
 });
@@ -597,13 +642,15 @@ test('deleting the last match on a map renders the fallback map list without los
   assert.equal(ui.get('demo-count').textContent, '本图 1 / 共 1 场'); assert.deepEqual(ui.saved().ids, [other.id]); assert.equal(deaths(ui), 1);
 });
 
-test('background ZIP scanning is polled before any jobs exist and adds the finished map automatically', async () => {
+test('background ZIP scanning is polled before jobs exist but waits for a selection before parsing', async () => {
   const ui = await page([], { library: { scanning: true } });
   assert.equal(ui.get('refresh-library').disabled, true); assert.match(ui.get('library-status').textContent, /扫描.*ZIP/);
   const before = ui.requests.filter(([url]) => url === '/api/library').length;
   await ui.pollLibrary(); assert.equal(ui.requests.filter(([url]) => url === '/api/library').length, before + 1);
-  ui.setJob(dataset('from-archive', 'de_ancient')); ui.setLibraryInfo({ scanning: false, result: { added: 1, unchanged: 0, queued: 1, errors: [] } });
+  ui.setLibraryFiles([dataset('from-archive', 'de_ancient')]); ui.setLibraryInfo({ scanning: false, result: { added: 1, unchanged: 0, queued: 0, errors: [] } });
   await ui.pollLibrary();
+  assert.deepEqual(visibleDemoNames(ui), []); assert.equal(ui.parseBodies.length, 0); assert.equal(ui.get('analysis-map').value, '');
+  await chooseLibrary(ui, ['from-archive']);
   assert.equal(ui.get('refresh-library').disabled, false); assert.deepEqual(visibleDemoNames(ui), ['from-archive.dem']);
   assert.equal(ui.get('analysis-map').value, 'de_ancient'); assert.equal(deaths(ui), 1); assert.match(ui.get('library-status').textContent, /新增 1 场/);
 });
@@ -615,7 +662,7 @@ test('an async refresh with only duplicates or ZIP errors still finishes and sho
   assert.equal(ui.get('refresh-library').disabled, true); assert.match(ui.get('library-status').textContent, /扫描/);
   await ui.pollLibrary(); assert.equal(ui.get('refresh-library').disabled, true, 'no queued jobs does not end an active ZIP scan');
   ui.setLibraryInfo({ scanning: false, result: { added: 0, unchanged: 2, queued: 0, errors: ['broken.zip：压缩包损坏'] } }); await ui.pollLibrary();
-  assert.equal(ui.get('refresh-library').disabled, false); assert.match(ui.get('library-status').textContent, /新增 0 场 · 2 场无需重复解析/);
+  assert.equal(ui.get('refresh-library').disabled, false); assert.match(ui.get('library-status').textContent, /新增 0 场 · 2 场已在库中/);
   assert.match(ui.get('library-status').textContent, /broken.zip：压缩包损坏/); assert.deepEqual(ui.saved(), before);
   const calls = ui.requests.length; await ui.pollLibrary(); assert.equal(ui.requests.length, calls, 'idle completed scans stop polling');
 });
@@ -628,4 +675,173 @@ test('a failed job whose map has no ready dataset remains accessible outside the
   assert.ok(ui.get('unmapped-demo-list').querySelectorAll('small').some(node => node.textContent === 'de_ancient · 摘要写入失败'));
   await ui.get('unmapped-demo-list').querySelectorAll('button').find(button => button.className === 'demo-remove').click(); await settle();
   assert.deepEqual(ui.saved().ids, [known.id]); assert.equal(ui.get('unmapped-demos').hidden, true);
+});
+
+async function searchLibrary(ui, query) {
+  ui.get('analysis-library-search').value = query;
+  await ui.get('analysis-library-search').dispatch('input'); await settle();
+}
+
+test('library search matches nested ZIP paths, keeps hidden choices, and batches only selected unique recordings', async () => {
+  const first = { ...dataset('quarter'), sources: [{ path: '2026/赛事/quarter.zip', member: 'matches/first.dem', kind: 'zip', available: true }], sourceCount: 3 };
+  const second = { ...dataset('final', 'de_nuke'), sources: [{ path: '2026/总决赛/final.dem', kind: 'dem', available: true }] };
+  const unused = dataset('unused', 'de_ancient'), ui = await page([], { libraryDemos: [first, second, unused] });
+  assert.equal(ui.hasVisibleHeat(), false); assert.equal(ui.parseBodies.length, 0);
+  await clickAndSettle(ui, 'open-analysis-library');
+  assert.ok(ui.get('analysis-library-list').querySelectorAll('small').some(item => item.textContent.includes('3 个来源已去重')));
+  assert.ok(ui.get('analysis-library-list').querySelectorAll('small').some(item => item.textContent.includes('地图待解析')));
+  assert.equal(ui.get('analysis-map').value, '');
+  await searchLibrary(ui, '赛事/quarter.zip'); await clickAndSettle(ui, 'analysis-library-all');
+  await searchLibrary(ui, '总决赛'); await clickAndSettle(ui, 'analysis-library-all');
+  assert.match(ui.get('analysis-library-count').textContent, /显示 1 \/ 3 场 · 已选 2 场/);
+  await searchLibrary(ui, 'matches/first.dem'); assert.equal(catalogCheckbox(ui, first.id).checked, true);
+  await clickAndSettle(ui, 'analysis-library-add');
+  assert.deepEqual(ui.parseBodies.map(([id]) => id), ['quarter', 'final']);
+  assert.equal(ui.requests.filter(([url]) => url.includes('/unused/')).length, 0);
+  assert.equal(ui.get('analysis-library-dialog').hidden, true);
+  assert.equal(ui.get('demo-count').textContent, '本图 1 / 共 2 场'); assert.equal(deaths(ui), 1);
+  await ui.change('analysis-map', 'de_nuke'); assert.deepEqual(visibleDemoNames(ui), [second.name]);
+});
+
+test('ready playback caches are absent from analysis until chosen and are promoted without queuing a reparse', async () => {
+  const old = dataset('old'), cached = { ...dataset('played'), analysis: false, available: false };
+  const ui = await page([old, cached]);
+  assert.equal(deaths(ui), 1); assert.equal(ui.requests.filter(([url]) => url === '/api/demos/played/analysis').length, 0);
+  await chooseLibrary(ui, ['played'], false);
+  assert.equal(catalogCheckbox(ui, 'played').disabled, false, 'a missing source does not prevent using its ready cache');
+  assert.ok(ui.get('analysis-library-list').querySelectorAll('small').some(item => item.textContent.includes('可直接加入')));
+  await clickAndSettle(ui, 'analysis-library-add');
+  assert.equal(deaths(ui), 2); assert.deepEqual(ui.parseBodies, [['played', { mode: 'analysis' }]]);
+  assert.equal(ui.get('library-progress').textContent, '');
+  await clickAndSettle(ui, 'refresh-library');
+  assert.equal(deaths(ui), 2); assert.equal(ui.requests.filter(([url]) => url === '/api/demos/played/analysis').length, 1);
+});
+
+test('a playback-to-analysis URL explicitly promotes only the linked cache before loading its summary', async () => {
+  const linked = { ...dataset('linked', 'de_nuke'), analysis: false }, other = { ...dataset('other', 'de_ancient'), analysis: false };
+  const ui = await page([dataset('existing'), linked, other], { href: 'http://127.0.0.1:8766/analysis.html?demo=linked', saved: { map: 'de_mirage', selectedDemos: ['existing'] } });
+  assert.deepEqual(ui.parseBodies, [['linked', { mode: 'analysis' }]]);
+  assert.deepEqual(visibleDemoNames(ui), ['linked.dem']); assert.equal(ui.get('analysis-map').value, 'de_nuke');
+  const parseIndex = ui.requests.findIndex(([url]) => url === '/api/library/demos/linked/parse');
+  const summaryIndex = ui.requests.findIndex(([url]) => url === '/api/demos/linked/analysis');
+  assert.ok(parseIndex >= 0 && summaryIndex > parseIndex);
+  assert.equal(ui.requests.filter(([url]) => url === '/api/demos/other/analysis').length, 0);
+  await clickAndSettle(ui, 'refresh-library');
+  assert.deepEqual(visibleDemoNames(ui), ['linked.dem']); assert.equal(deaths(ui), 1);
+});
+
+test('adding a previously excluded ready analysis checks it without downloading another summary', async () => {
+  const ui = await page([dataset('first'), dataset('second')], { saved: { selectedDemos: ['first'] } });
+  assert.equal(deaths(ui), 1);
+  await chooseLibrary(ui, ['second']);
+  assert.equal(deaths(ui), 2); assert.deepEqual(ui.saved().selectedDemos, ['first', 'second']);
+  assert.equal(ui.requests.filter(([url]) => url === '/api/demos/second/analysis').length, 1);
+});
+
+test('a repeated add click while submission is pending cannot enqueue the same recording twice', async () => {
+  let release; const parseGate = new Promise(resolve => { release = resolve; });
+  const ui = await page([], { libraryDemos: [dataset('chosen')], parseGate });
+  await chooseLibrary(ui, ['chosen'], false);
+  const adding = ui.get('analysis-library-add').click(); await settle();
+  assert.equal(ui.get('analysis-library-add').disabled, true);
+  await ui.get('analysis-library-add').click(); await settle();
+  assert.equal(ui.parseBodies.length, 1);
+  release(); await adding; await settle();
+  assert.equal(deaths(ui), 1); assert.equal(ui.parseBodies.length, 1);
+  await chooseLibrary(ui, ['chosen']);
+  assert.equal(deaths(ui), 1, 'choosing an existing analysis again does not duplicate its heatmap');
+  assert.equal(ui.requests.filter(([url]) => url === '/api/demos/chosen/analysis').length, 1);
+});
+
+test('one failed catalog selection keeps only that choice for retry while the successful analysis remains usable', async () => {
+  const first = dataset('good'), broken = { ...dataset('broken'), requestError: '源文件正在变动，请刷新' };
+  const ui = await page([], { libraryDemos: [first, broken] });
+  await chooseLibrary(ui, ['good', 'broken']);
+  assert.equal(deaths(ui), 1); assert.equal(ui.get('analysis-library-dialog').hidden, false);
+  assert.equal(catalogCheckbox(ui, 'good').checked, false); assert.equal(catalogCheckbox(ui, 'broken').checked, true);
+  assert.match(ui.get('analysis-library-error').textContent, /已加入 1 场.*源文件正在变动/);
+  ui.setLibraryFiles([first, { ...broken, requestError: '' }]);
+  await clickAndSettle(ui, 'analysis-library-refresh'); await clickAndSettle(ui, 'analysis-library-add');
+  assert.equal(deaths(ui), 2); assert.deepEqual(ui.parseBodies.map(([id]) => id), ['good', 'broken', 'broken']);
+  assert.equal(ui.get('analysis-library-dialog').hidden, true);
+});
+
+test('missing unparsed sources cannot be selected and clearing library choices never clears analysis filters', async () => {
+  const ui = await page([dataset('old')], { libraryDemos: [{ ...dataset('missing'), available: false }], saved: { selectedDemos: ['old'], side: '3' } });
+  const before = ui.saved(); await clickAndSettle(ui, 'open-analysis-library');
+  assert.equal(catalogCheckbox(ui, 'missing').disabled, true);
+  await clickAndSettle(ui, 'analysis-library-all');
+  assert.equal(catalogCheckbox(ui, 'missing').checked, false); assert.equal(catalogCheckbox(ui, 'old').checked, true);
+  await clickAndSettle(ui, 'analysis-library-clear');
+  assert.equal(ui.get('analysis-library-add').disabled, true); assert.deepEqual(ui.saved(), before);
+  await clickAndSettle(ui, 'analysis-library-close'); assert.equal(ui.parseBodies.length, 0);
+});
+
+test('a modified source drops its stale heatmap but retains map, floor, grouping and selection until explicitly reparsed', async () => {
+  const old = { ...rosterDemo('edited', 'de_nuke'), revision: 'v1' };
+  const saved = { map: 'de_nuke', floor: 'lower', selectedDemos: ['edited'], selectedPlayers: ['p1'], selectedTeams: ['alias:squad'], aliases: { alpha: 'Squad' }, query: 'Alice' };
+  const options = { saved, mapInfo: { lowerMaxZ: 100, lowerRadar: '/maps/lower.png' } };
+  const ui = await page([old], options);
+  ui.setJob({ ...old, revision: 'v2', jobStatus: 'discovered' });
+  await clickAndSettle(ui, 'refresh-library');
+  assert.equal(ui.hasVisibleHeat(), false); assert.equal(ui.parseBodies.length, 0);
+  for (const [key, value] of Object.entries(saved)) assert.deepEqual(ui.saved()[key], value, key);
+  const requestCount = ui.requests.length; await ui.pollLibrary(); assert.equal(ui.requests.length, requestCount, 'a discovered source does not keep parser polling alive');
+  await chooseLibrary(ui, ['edited']);
+  assert.equal(ui.hasVisibleHeat(), true); assert.equal(ui.get('analysis-floor').value, 'lower');
+  assert.deepEqual(ui.saved().selectedPlayers, ['p1']); assert.deepEqual(ui.saved().aliases, { alpha: 'Squad' });
+  assert.equal(ui.requests.filter(([url]) => url === '/api/demos/edited/analysis').length, 2);
+  const restored = await page([{ ...old, revision: 'v2', jobStatus: 'discovered' }], options);
+  assert.deepEqual(restored.saved().selectedDemos, ['edited'], 'startup pruning must retain a known source absent from /api/analyses');
+  assert.equal(restored.hasVisibleHeat(), false); assert.equal(restored.parseBodies.length, 0);
+});
+
+test('removing an analysis keeps its catalog cache available and can add it back without reparsing', async () => {
+  const ui = await page([dataset('shared')]);
+  await ui.get('demo-list').querySelectorAll('button').find(button => button.className === 'demo-remove').click(); await settle();
+  assert.equal(ui.hasVisibleHeat(), false);
+  await clickAndSettle(ui, 'refresh-library');
+  assert.deepEqual(visibleDemoNames(ui), []);
+  await clickAndSettle(ui, 'open-analysis-library');
+  assert.equal(catalogCheckbox(ui, 'shared').disabled, false);
+  assert.ok(ui.get('analysis-library-list').querySelectorAll('small').some(item => item.textContent.includes('已解析缓存 · 可直接加入')));
+  assert.equal(ui.requests.some(([url, method]) => url === '/api/demos/shared' && method === 'DELETE'), false);
+  await chooseLibrary(ui, ['shared']);
+  assert.equal(deaths(ui), 1); assert.equal(ui.get('library-progress').textContent, '');
+});
+
+test('consuming a playback link preserves other URL parameters and reload retains subsequently selected filters', async () => {
+  const demo = rosterDemo('played', 'de_nuke'), mapInfo = { lowerMaxZ: 100, lowerRadar: '/maps/lower.png' };
+  const ui = await page([demo], { href: 'http://127.0.0.1:8766/analysis.html?keep=yes&demo=played&t=42#heatmap', mapInfo });
+  assert.equal(ui.href(), 'http://127.0.0.1:8766/analysis.html?keep=yes&t=42#heatmap');
+  await clickAndSettle(ui, 'teams-none'); await clickAndSettle(ui, 'players-none');
+  await ui.change('analysis-floor', 'lower'); await searchPlayers(ui, 'Alice');
+  const saved = ui.saved(), reloaded = await page([demo], { saved, href: ui.href(), mapInfo });
+  assert.deepEqual(reloaded.saved().selectedTeams, []); assert.deepEqual(reloaded.saved().selectedPlayers, []);
+  assert.equal(reloaded.saved().floor, 'lower'); assert.equal(reloaded.saved().query, 'Alice');
+  assert.equal(reloaded.href(), ui.href()); assert.equal(reloaded.parseBodies.length, 0);
+});
+
+test('stopping a shared upload wait leaves the library job and its analysis membership intact', async () => {
+  const demo = { ...dataset('shared'), shared: true, jobStatus: 'queued', blockStatus: true };
+  const ui = await page([], { uploads: [demo] });
+  const importing = ui.upload(demo.name); await settle();
+  assert.equal(ui.get('upload-status').hidden, false);
+  await clickAndSettle(ui, 'cancel-upload'); await importing;
+  assert.equal(ui.requests.some(([, method]) => method === 'DELETE'), false);
+  assert.deepEqual(ui.saved().ids, ['shared']); assert.equal(ui.get('upload-status').hidden, true);
+  assert.match(ui.get('global-error').textContent, /共享录像的后台任务与已有分析仍保留/);
+  ui.setJob({ ...demo, jobStatus: 'ready', blockStatus: false }); await ui.pollLibrary();
+  assert.equal(deaths(ui), 1); assert.deepEqual(visibleDemoNames(ui), [demo.name]);
+});
+
+test('a shared upload parser error retains the retryable catalog record without deleting a shared cache', async () => {
+  const demo = { ...dataset('broken-shared'), shared: true, jobStatus: 'error', parseError: '录像读取失败' };
+  const ui = await page([], { uploads: [demo] });
+  await ui.upload(demo.name);
+  assert.equal(ui.requests.some(([, method]) => method === 'DELETE'), false);
+  assert.deepEqual(ui.saved().ids, ['broken-shared']);
+  assert.match(ui.get('global-error').textContent, /录像读取失败/);
+  await clickAndSettle(ui, 'open-analysis-library');
+  assert.equal(catalogCheckbox(ui, 'broken-shared').disabled, false);
 });

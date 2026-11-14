@@ -103,6 +103,36 @@ func TestParseDemoRealMirageFixture(t *testing.T) {
 	if kills != 73 {
 		t.Errorf("kill count=%d, want 73 for the complete fixture", kills)
 	}
+	if data.StatisticsVersion != 1 {
+		t.Fatal("new parses must identify their observed statistics fields")
+	}
+	economySnapshots, observedDeathWeapons := 0, 0
+	for _, round := range data.Rounds {
+		if snapshot := round.Economy; snapshot != nil {
+			economySnapshots++
+			if snapshot.Source != "freeze_end" || snapshot.Time != round.FreezeEnd || snapshot.Time < round.Start || snapshot.Time > round.End {
+				t.Fatalf("economy snapshot is outside the actual freeze boundary: round=%+v snapshot=%+v", round, snapshot)
+			}
+			if snapshot.Complete && len(snapshot.Players) != 10 {
+				t.Fatal("complete economy snapshot lost participants")
+			}
+		}
+	}
+	for _, event := range data.Events {
+		if event.Type != "kill" || event.VictimWeapon == "" {
+			continue
+		}
+		observedDeathWeapons++
+		if event.VictimWeaponSource != "death_event" && event.VictimWeaponSource != "previous_tick" {
+			t.Fatalf("unexpected death weapon observation: %+v", event)
+		}
+		if event.VictimWeaponTime > event.T || event.T-event.VictimWeaponTime > .26 {
+			t.Fatalf("death weapon observation is stale or from the future: %+v", event)
+		}
+	}
+	if economySnapshots < 8 || observedDeathWeapons < 60 {
+		t.Fatalf("missing actual statistics observations: economy rounds=%d, death weapons=%d", economySnapshots, observedDeathWeapons)
+	}
 	// Steam IDs exceed JavaScript's safe integer range and must survive JSON as strings.
 	encoded, err := json.Marshal(data.Players)
 	if err != nil {

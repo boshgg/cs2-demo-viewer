@@ -83,6 +83,8 @@
     const previousJob = state.activeJob;
     state.activeJob = null;
     void discardJob(previousJob);
+    $('cancel-import').textContent = '取消导入';
+    $('cancel-import').title = '';
     setPlaying(false);
     clearError();
     return { generation, signal: state.controller.signal };
@@ -107,8 +109,14 @@
       form.append('demo', file);
       const result = await json(await fetch('/api/demos', { method: 'POST', body: form, signal }));
       if (!result.id) throw new Error('解析器没有返回任务编号，请重试。');
-      if (generation !== state.generation) { void discardJob(result.id); return; }
-      state.activeJob = result.id;
+      // Identical uploads can reuse a catalog job owned by other pages. Only
+      // a newly created upload belongs to this request's cancellation cleanup.
+      if (generation !== state.generation) { if (!result.shared) void discardJob(result.id); return; }
+      state.activeJob = result.shared ? null : result.id;
+      if (result.shared) {
+        $('cancel-import').textContent = '停止等待';
+        $('cancel-import').title = '停止等待后，本地录像库会继续在后台解析，可稍后再次打开。';
+      }
       $('loading-title').textContent = '正在解析比赛';
       setLoading(true, '提取玩家位置与回合数据…');
       while (generation === state.generation) {
@@ -154,13 +162,45 @@
       error(`示例载入失败：${err.message}`);
     }
   }
+  async function openLibraryDemo(demo, autoplay = true) {
+    const { generation, signal } = beginRequest();
+    $('loading-title').textContent = demo.status === 'ready' ? '正在载入本地回放' : '正在准备所选录像';
+    $('cancel-import').textContent = '停止等待';
+    $('cancel-import').title = '停止等待后，本地录像库会继续在后台解析，可稍后再次打开。';
+    setLoading(true, `${demo.name || '所选 Demo'} · 其他未选择的录像不会解析`);
+    // Shared catalog jobs are never assigned to activeJob: switching or stopping
+    // a wait must not DELETE a library record used by analysis or another page.
+    try {
+      const result = await window.ReplayLibrary.loadReplay(demo.id, {
+        signal, isCurrent: () => generation === state.generation,
+        onProgress: status => { if (generation === state.generation) setLoading(true, status.message || (status.status === 'queued' ? '所选录像正在等待解析…' : '正在提取所选录像的玩家位置与回合…'), Number(status.progress) || 0); },
+      });
+      if (generation !== state.generation) return;
+      await loadDemo(result.data, generation, signal);
+      if (generation !== state.generation) return;
+      setDemoQuery(result.id);
+      if (autoplay) { setPlaying(true); updateUI(true); }
+    } catch (err) {
+      if (generation !== state.generation) return;
+      state.controller = null;
+      setLoading(false);
+      error(`本地录像载入失败：${err.message || '请刷新录像库后重试。'}`);
+    }
+  }
   async function restoreDemo(id) {
     const { generation, signal } = beginRequest();
     $('loading-title').textContent = '正在恢复比赛';
     setLoading(true, '从本机缓存载入上次导入的 Demo…');
     try {
       const response = await fetch(`/api/demos/${encodeURIComponent(id)}`, { signal });
-      if (response.status === 404 || response.status === 410) throw new Error('本机比赛缓存已过期或已被清理，请重新导入 .dem 文件。');
+      if (generation !== state.generation) return;
+      if (response.status === 409) {
+        const requestedTime = new URL(window.location.href).searchParams.get('t');
+        await openLibraryDemo({ id }, false);
+        if (generation + 1 === state.generation && state.data?.id === id && requestedTime !== null && Number.isFinite(Number(requestedTime))) seek(Number(requestedTime));
+        return;
+      }
+      if (response.status === 404 || response.status === 410) throw new Error('本机比赛缓存不可用，请打开本地录像库刷新并重新选择。');
       const data = await json(response);
       if (generation !== state.generation) return;
       await loadDemo(data, generation, signal);
@@ -182,6 +222,8 @@
     state.data = data;
     const analysisLink = document.querySelector('a[href^="/analysis.html"]');
     if (analysisLink) analysisLink.href = data.synthetic ? '/analysis.html' : `/analysis.html?demo=${encodeURIComponent(data.id)}`;
+    const statisticsLink = $('statistics-link');
+    if (statisticsLink) statisticsLink.href = data.synthetic ? '/statistics.html' : `/statistics.html?demo=${encodeURIComponent(data.id)}`;
     state.t = 0;
     state.frameIndex = 0;
     state.speed = 1;
@@ -395,7 +437,7 @@
   $('utility-filter')?.addEventListener('change', () => updateUI(true));
   window.addEventListener('replay-icons-ready', () => {updateUI(true);draw();});
   window.addEventListener('keydown', (event) => {
-    if (!state.data || state.loading || event.ctrlKey || event.metaKey || event.altKey || event.target.closest('input, select, textarea, button, a, [contenteditable="true"]')) return;
+    if (!state.data || state.loading || $('replay-library').open || event.ctrlKey || event.metaKey || event.altKey || event.target.closest('input, select, textarea, button, a, [contenteditable="true"]')) return;
     if (event.code === 'Space') {event.preventDefault();setPlaying(!state.playing);updateUI(true);}
     else if (event.code === 'ArrowLeft') {event.preventDefault();seek(state.t - 5);}
     else if (event.code === 'ArrowRight') {event.preventDefault();seek(state.t + 5);}
@@ -424,6 +466,7 @@
   renderEmptyRosters();
   new ResizeObserver(resize).observe($('map-stage'));
   requestAnimationFrame(loop);
+  window.ReplayLibrary.create({ onSelect: demo => { void openLibraryDemo(demo); }, onOpen: () => { setPlaying(false); updateUI(true); } });
   const savedDemo = new URL(window.location.href).searchParams.get('demo');
   if (savedDemo) void restoreDemo(savedDemo);
 })();
