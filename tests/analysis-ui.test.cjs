@@ -420,6 +420,11 @@ function demoCheckbox(ui, name) {
   assert.ok(input, `Missing demo checkbox ${name}`); return input;
 }
 function visibleDemoNames(ui, id = 'demo-list') { return ui.get(id).querySelectorAll('input').map(input => input['aria-label'].replace(/^叠加 /, '')); }
+function folderButton(ui, list, key, action) {
+  const button = ui.get(list).querySelectorAll('button').find(item => item.dataset.folderKey === key && item.dataset.folderAction === action);
+  assert.ok(button, `Missing ${list} folder ${key} ${action} action`); return button;
+}
+async function selectFolder(ui, list, key, action) { await folderButton(ui, list, key, action).click(); await settle(); }
 function savedDemoChecked(ui, id) { const selected = ui.saved().selectedDemos; return selected === null || selected.includes(id); }
 function catalogCheckbox(ui, id) {
   const input = ui.get('analysis-library-list').querySelectorAll('input').find(input => input.dataset.demoId === id);
@@ -776,6 +781,91 @@ test('source bulk selection acts once per visible ID and leaves hidden map, fold
   ui.get('demo-search').value = 'one.dem'; await ui.get('demo-search').dispatch('input'); await settle();
   await clickAndSettle(ui, 'demos-none'); assert.deepEqual(ui.saved().selectedDemos.sort(), ['hidden', 'shared']);
   assert.equal(deaths(ui), 1); assert.equal(ui.parseBodies.length, 0);
+});
+
+test('source folder actions include search-hidden and other-map members exactly once while preserving other folders and filters', async () => {
+  const shared = folderDemo('shared', ['A/shared.dem', 'A/copy.dem', 'B/shared.dem']);
+  const hidden = folderDemo('search-hidden', ['A/hidden.dem']), otherMap = folderDemo('other-map', ['A/other.dem'], 'de_nuke');
+  const outside = folderDemo('outside', ['B/outside.dem']);
+  const pending = { ...folderDemo('pending', ['A/pending.dem']), jobStatus: 'error', parseError: 'No loaded summary' };
+  const datasets = [shared, hidden, otherMap, outside, pending];
+  const ui = await page(datasets, { saved: { map: 'de_mirage', selectedDemos: ['outside'], selectedTeams: ['team-a'], selectedPlayers: ['76561198000000001'], side: '3', aliases: { kept: 'My group' } } });
+  await ui.change('demo-view-mode', 'folders'); await ui.change('demo-folder', 'path:A');
+  ui.get('demo-search').value = 'shared'; await ui.get('demo-search').dispatch('input'); await settle();
+  assert.deepEqual(visibleDemoNames(ui), ['shared.dem']);
+  assert.match(folderButton(ui, 'demo-list', 'path:A', 'all').title, /本文件夹共 4 场.*当前显示 1 场.*地图或搜索隐藏项/);
+  const before = ui.saved();
+  await selectFolder(ui, 'demo-list', 'path:A', 'all');
+  assert.deepEqual(ui.saved().selectedDemos.sort(), ['other-map', 'outside', 'search-hidden', 'shared']);
+  assert.equal(savedDemoChecked(ui, 'pending'), false, 'source actions do not add jobs without a loaded selectable summary');
+  for (const key of Object.keys(before).filter(key => key !== 'selectedDemos')) assert.deepEqual(ui.saved()[key], before[key], `folder action preserved ${key}`);
+  await selectFolder(ui, 'demo-list', 'path:A', 'invert'); assert.deepEqual(ui.saved().selectedDemos, ['outside']);
+  await selectFolder(ui, 'demo-list', 'path:A', 'invert'); assert.deepEqual(ui.saved().selectedDemos.sort(), ['other-map', 'outside', 'search-hidden', 'shared']);
+  await selectFolder(ui, 'demo-list', 'path:A', 'none'); assert.deepEqual(ui.saved().selectedDemos, ['outside']);
+  const restored = await page(datasets, { saved: ui.saved() });
+  assert.deepEqual(restored.saved().selectedDemos, ['outside']);
+  assert.deepEqual(restored.saved().sourceView, before.sourceView);
+  assert.equal(restored.get('analysis-map').value, 'de_mirage'); assert.equal(restored.parseBodies.length, 0);
+  assert.equal(ui.parseBodies.length, 0, 'folder selections never parse');
+});
+
+test('library folder header actions target the whole folder despite map/search filters and never add duplicated IDs twice', async () => {
+  const shared = { ...folderDemo('shared', ['A/shared.dem', 'A/alias.dem', 'B/shared.dem']), catalogMap: 'de_mirage' };
+  const hidden = { ...folderDemo('hidden', ['A/hidden.dem']), catalogMap: 'de_mirage' };
+  const otherMap = { ...folderDemo('other-map', ['A/other.dem'], 'de_nuke'), catalogMap: 'de_nuke' };
+  const outside = { ...folderDemo('outside', ['B/outside.dem']), catalogMap: 'de_mirage' };
+  const ui = await page([], { libraryDemos: [shared, hidden, otherMap, outside] });
+  await chooseLibrary(ui, ['outside'], false);
+  await ui.change('analysis-library-view-mode', 'folders'); await ui.change('analysis-library-map', 'de_mirage');
+  await ui.change('analysis-library-folder', 'path:A'); await searchLibrary(ui, 'shared');
+  assert.equal(ui.get('analysis-library-list').querySelectorAll('input').length, 1);
+  assert.match(folderButton(ui, 'analysis-library-list', 'path:A', 'all').title, /本文件夹共 3 场.*当前显示 1 场/);
+  const before = ui.saved();
+  await selectFolder(ui, 'analysis-library-list', 'path:A', 'all'); assert.match(ui.get('analysis-library-count').textContent, /已选 4 场/);
+  await selectFolder(ui, 'analysis-library-list', 'path:A', 'invert'); assert.match(ui.get('analysis-library-count').textContent, /已选 1 场/);
+  await selectFolder(ui, 'analysis-library-list', 'path:A', 'invert'); assert.match(ui.get('analysis-library-count').textContent, /已选 4 场/);
+  await selectFolder(ui, 'analysis-library-list', 'path:A', 'none'); assert.match(ui.get('analysis-library-count').textContent, /已选 1 场/);
+  await selectFolder(ui, 'analysis-library-list', 'path:A', 'all');
+  assert.deepEqual(ui.saved(), before, 'pending catalog choices do not alter analysis or view preferences'); assert.equal(ui.parseBodies.length, 0);
+  await searchLibrary(ui, ''); await ui.change('analysis-library-map', 'all'); await ui.change('analysis-library-folder', 'all');
+  assert.equal(ui.get('analysis-library-list').querySelectorAll('input').filter(input => input.dataset.demoId === 'shared').length, 2);
+  assert.ok(ui.get('analysis-library-list').querySelectorAll('input').filter(input => input.dataset.demoId === 'shared').every(input => input.checked));
+  assert.equal(catalogCheckbox(ui, 'outside').checked, true);
+  await clickAndSettle(ui, 'analysis-library-add');
+  assert.deepEqual(ui.parseBodies.map(([id]) => id).sort(), ['hidden', 'other-map', 'outside', 'shared']);
+});
+
+test('folder clear and inversion can remove unavailable previous choices without adding unavailable unselected recordings', async () => {
+  const flaky = folderDemo('flaky', ['A/flaky.dem']), outside = folderDemo('outside', ['B/outside.dem']);
+  const unavailable = { ...folderDemo('unavailable', [{ path: 'gone/new.dem', available: false }]), available: false };
+  const cached = { ...folderDemo('cached', [{ path: 'gone/cached.dem', available: false }]), available: false, jobStatus: 'ready', analysis: false };
+  const ui = await page([], { libraryDemos: [flaky, outside, unavailable, cached] });
+  await chooseLibrary(ui, ['flaky', 'outside'], false);
+  ui.setLibraryFiles([{ ...flaky, available: false, sources: [{ path: 'A/flaky.dem', available: false }] }, outside, unavailable, cached]);
+  await clickAndSettle(ui, 'analysis-library-refresh'); await ui.change('analysis-library-view-mode', 'folders'); await ui.change('analysis-library-folder', 'unavailable');
+  await selectFolder(ui, 'analysis-library-list', 'unavailable', 'all');
+  assert.equal(catalogCheckbox(ui, 'flaky').checked, true); assert.equal(catalogCheckbox(ui, 'cached').checked, true); assert.equal(catalogCheckbox(ui, 'unavailable').checked, false);
+  await selectFolder(ui, 'analysis-library-list', 'unavailable', 'invert');
+  assert.equal(catalogCheckbox(ui, 'flaky').checked, false); assert.equal(catalogCheckbox(ui, 'cached').checked, false); assert.equal(catalogCheckbox(ui, 'unavailable').checked, false);
+  await selectFolder(ui, 'analysis-library-list', 'unavailable', 'invert');
+  assert.equal(catalogCheckbox(ui, 'flaky').checked, false); assert.equal(catalogCheckbox(ui, 'cached').checked, true);
+  await selectFolder(ui, 'analysis-library-list', 'unavailable', 'none');
+  assert.match(ui.get('analysis-library-count').textContent, /已选 1 场/);
+  await ui.change('analysis-library-folder', 'path:B'); assert.equal(catalogCheckbox(ui, 'outside').checked, true);
+  assert.equal(ui.parseBodies.length, 0);
+});
+
+test('folder action buttons and handlers stay inert while a catalog add is in flight', async () => {
+  let release; const parseGate = new Promise(resolve => { release = resolve; });
+  const ui = await page([folderDemo('old', ['A/old.dem'])], { libraryDemos: [folderDemo('next', ['B/next.dem'])], saved: { selectedDemos: [] }, parseGate });
+  await ui.change('demo-view-mode', 'folders'); await chooseLibrary(ui, ['next'], false); await ui.change('analysis-library-view-mode', 'folders');
+  const adding = ui.get('analysis-library-add').click(); await settle();
+  for (const list of ['demo-list', 'analysis-library-list']) for (const action of ['all', 'none', 'invert']) {
+    const button = folderButton(ui, list, 'path:A', action); assert.equal(button.disabled, true); await button.click();
+  }
+  await settle(); assert.deepEqual(ui.saved().selectedDemos, []); assert.equal(catalogCheckbox(ui, 'old').checked, false); assert.equal(ui.parseBodies.length, 1);
+  release(); await adding; await settle();
+  assert.deepEqual(ui.saved().selectedDemos, ['next']); assert.deepEqual(ui.parseBodies.map(([id]) => id), ['next']);
 });
 
 test('library map, search and folder views intersect while selection and per-ID add requests remain unique', async () => {

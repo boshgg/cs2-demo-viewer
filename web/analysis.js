@@ -109,13 +109,43 @@
     if (view.folder !== 'all' && !options.some(option => option.key === view.folder)) select.append(new Option(`${library.folderLabel(view.folder)} · 当前范围暂无录像`, view.folder));
     select.value = view.folder; $(`${prefix}-folder-field`).hidden = view.mode !== 'folders'; $(`${prefix}-view-mode`).value = view.mode;
   }
-  function appendFolderGroups(list, demos, view, appendRow) {
+  function folderMembers(scope, key) {
+    const demos = scope === 'catalog' ? [...catalog.values()] : [...state.jobs.values()].map(sourceDemo);
+    return [...new Map(demos.filter(demo => library.inFolder(demo, key)).map(demo => [demo.id, demo])).values()];
+  }
+  function folderSelectable(scope, demo) { return scope === 'catalog' ? catalogSelectable(demo) : state.demos.has(demo.id); }
+  function folderSelectionBusy(scope) { return state.uploading || catalogAdding || scope === 'catalog' && catalogLoading; }
+  function folderSelected(scope, id) { return scope === 'catalog' ? catalogSelection.has(id) : !state.selectedDemos || state.selectedDemos.has(id); }
+  function changeFolderSelection(scope, key, action) {
+    if (folderSelectionBusy(scope) || !['all', 'none', 'invert'].includes(action)) return;
+    const members = folderMembers(scope, key);
+    if (scope !== 'catalog' && !state.selectedDemos) state.selectedDemos = new Set(state.jobs.keys());
+    const selection = scope === 'catalog' ? catalogSelection : state.selectedDemos;
+    for (const demo of members) {
+      if (action === 'none' || action === 'invert' && selection.has(demo.id)) selection.delete(demo.id);
+      else if (folderSelectable(scope, demo)) selection.add(demo.id);
+    }
+    if (scope === 'catalog') renderCatalog();
+    else { renderJobs(); renderFilters(); requestAnalysis(); }
+  }
+  function appendFolderGroups(list, demos, view, appendRow, scope) {
     for (const group of library.groupByFolder(demos, view.mode, view.folder)) {
       let target = list;
       if (view.mode === 'folders') {
         target = node('section', null, 'analysis-folder-group'); target.dataset.folderKey = group.key;
-        const heading = node('h3', `${group.label} · ${number(new Set(group.demos.map(demo => demo.id)).size)} 场`, 'analysis-folder-heading'); heading.title = group.label;
-        target.append(heading); list.append(target);
+        const members = folderMembers(scope, group.key), count = members.length, shown = new Set(group.demos.map(demo => demo.id)).size;
+        const header = node('header', null, 'analysis-folder-header'), heading = node('h3', group.label, 'analysis-folder-heading'); heading.title = group.label;
+        const explanation = `本文件夹共 ${number(count)} 场 · 当前显示 ${number(shown)} 场；操作包含地图或搜索隐藏项，只添加可选录像。`;
+        const note = node('p', explanation, 'analysis-folder-scope');
+        const actions = node('div', null, 'analysis-folder-actions');
+        for (const [action, label] of [['all', '全选'], ['none', '清空'], ['invert', '反选']]) {
+          const button = node('button', label, 'text-button'); button.type = 'button'; button.dataset.folderAction = action; button.dataset.folderKey = group.key;
+          button.title = `${label}本文件夹。${explanation}其他文件夹独有录像保持勾选状态。`;
+          button.setAttribute('aria-label', `${label}文件夹 ${group.label} 中的录像（包括地图或搜索隐藏项）`);
+          button.disabled = folderSelectionBusy(scope) || !members.some(demo => action === 'none' ? folderSelected(scope, demo.id) : folderSelectable(scope, demo) || action === 'invert' && folderSelected(scope, demo.id));
+          button.addEventListener('click', () => changeFolderSelection(scope, group.key, action)); actions.append(button);
+        }
+        header.append(heading, note, actions); target.append(header); list.append(target);
       }
       for (const demo of group.demos) appendRow(demo, target, group.key);
     }
@@ -164,7 +194,7 @@
       focus.addEventListener('click', () => { const data = state.demos.get(job.id); if (data) void focusDemo(data); }); row.append(focus);
       const remove = node('button', '×', 'demo-remove'); remove.title = '从分析移除，保留录像库与回放缓存'; remove.setAttribute('aria-label', `移除 ${job.name || '比赛'}`); remove.disabled = state.uploading && state.currentJob === job.id; remove.addEventListener('click', () => removeJob(job.id)); row.append(remove); target.append(row);
     };
-    appendFolderGroups(list, current, sourceView, appendRow); appendFolderGroups(pendingList, unmapped, sourceView, appendRow);
+    appendFolderGroups(list, current, sourceView, appendRow, 'source'); appendFolderGroups(pendingList, unmapped, sourceView, appendRow, 'source');
     for (const action of ['all', 'none', 'invert']) $(`demos-${action}`).disabled = ![...current, ...unmapped].some(job => state.demos.has(job.id));
     if (!current.length) list.append(node('p', activeMap ? '当前地图、文件夹或搜索没有匹配比赛；已有勾选仍保留。' : jobs.length ? '等待识别地图，或在下方选择已有地图。' : '从本地录像库选择比赛，加入后才开始分析。', 'muted'));
     $('sample-analysis').disabled = state.uploading || catalogAdding;
@@ -503,7 +533,7 @@
       if (demo.error) words.append(node('small', demo.error, 'status-error'));
       if (demo.available === false) words.append(node('small', demo.status === 'ready' ? '源文件已移走，仍可使用解析缓存' : '源文件不可用，请恢复文件后刷新', 'micro'));
       row.append(check, words); target.append(row);
-    });
+    }, 'catalog');
     if (!visible.length) list.append(node('p', catalogLoading ? '正在读取录像库…' : catalog.size ? '当前地图、文件夹或搜索没有匹配录像；已选录像仍保留。' : '录像库为空。将 .dem 或 .zip 放入 Demo 文件夹（支持所有子文件夹），然后点击刷新。', 'muted'));
   }
   async function openCatalog(event) {

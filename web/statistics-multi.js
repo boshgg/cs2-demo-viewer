@@ -27,6 +27,16 @@
     const inMap = demo => state.map === 'all' || !mapOf(demo) || mapOf(demo) === state.map;
     const scopedCatalog = () => state.catalog.filter(demo => state.demos.has(demo.id) && inMap(demo));
     const visibleCatalog = () => state.catalog.filter(demo => inMap(demo) && library.matches({ ...demo, map: mapOf(demo) }, $('multi-library-search').value) && (state.libraryView !== 'folders' || library.inFolder(demo, state.libraryFolder)));
+    const folderMembers = key => [...new Map(state.catalog.filter(demo => library.inFolder(demo, key)).map(demo => [demo.id, demo])).values()];
+    const folderBusy = () => state.loading || state.refreshing || state.scanning;
+    function selectFolder(key, action) {
+      if (folderBusy() || !['all', 'none', 'invert'].includes(action)) return;
+      for (const demo of folderMembers(key)) {
+        if (action === 'none' || action === 'invert' && state.demos.has(demo.id)) state.demos.delete(demo.id);
+        else if (available(demo)) state.demos.add(demo.id);
+      }
+      state.page = 0; save(); renderLibrary(); recompute();
+    }
     function save() { try { storage?.setItem(storageKey, JSON.stringify({ demoIds: [...state.demos], playerIds: state.players && [...state.players], map: state.map, side: state.side, libraryView: state.libraryView, libraryFolder: state.libraryFolder, libraryQuery: $('multi-library-search').value, playerQuery: $('multi-player-search').value, analyzedIds: [...new Set([...state.previous, ...state.reports.keys()])] })); } catch { /* Storage can be disabled. */ } }
     function setError(message) { $('multi-error').hidden = !message; $('multi-error').textContent = message || ''; }
     function td(row, text, className) { const cell = node('td', text, className); row.append(cell); return cell; }
@@ -52,7 +62,20 @@
       const visible = visibleCatalog(); $('multi-demo-count').textContent = `已选 ${state.demos.size} · 显示 ${visible.length} / ${state.catalog.length}`;
       for (const group of library.groupByFolder(visible, state.libraryView, state.libraryView === 'folders' ? state.libraryFolder : 'all')) {
         let target = list;
-        if (state.libraryView === 'folders') { target = node('section', null, 'statistics-folder-group'); target.dataset.folderKey = group.key; target.append(node('h3', `${group.label} · ${group.demos.length} 场`)); list.append(target); }
+        if (state.libraryView === 'folders') {
+          const members = folderMembers(group.key), hiddenCount = Math.max(0, members.length - group.demos.length);
+          target = node('section', null, 'statistics-folder-group'); target.dataset.folderKey = group.key;
+          const header = node('div', null, 'multi-folder-header'); header.append(node('h3', `${group.label} · ${members.length} 场`));
+          header.append(node('small', `当前显示 ${group.demos.length} 场；本组操作含隐藏的 ${hiddenCount} 场。`));
+          const actions = node('div', null, 'multi-folder-actions'); actions.setAttribute('role', 'group'); actions.setAttribute('aria-label', `${group.label} 文件夹选择`);
+          for (const [action, label] of [['all', '全选'], ['none', '清空'], ['invert', '反选']]) {
+            const button = node('button', label, 'text-button'); button.type = 'button'; button.dataset.folderAction = action; button.dataset.folderKey = group.key; button.disabled = folderBusy();
+            button.title = `${label}“${group.label}”内全部 ${members.length} 场，包括被搜索或地图隐藏的 ${hiddenCount} 场。其他文件夹独有录像保持原选择；多来源同一录像联动。无法读取且未选的录像不会新增勾选。只改变勾选，点击分析后才读取。`;
+            button.setAttribute('aria-label', `${label} ${group.label} 文件夹全部 ${members.length} 场（含隐藏 ${hiddenCount} 场）`);
+            button.addEventListener('click', () => selectFolder(group.key, action)); actions.append(button);
+          }
+          header.append(actions); target.append(header); list.append(target);
+        }
         for (const demo of group.demos) {
           const label = node('label', null, 'multi-demo-item'), check = node('input'); check.type = 'checkbox'; check.dataset.demoId = demo.id; check.checked = state.demos.has(demo.id); check.disabled = state.loading || !available(demo) && !check.checked; check.setAttribute('aria-label', `选择 ${demo.name || demo.id}`);
           check.addEventListener('change', () => { if (check.checked) state.demos.add(demo.id); else state.demos.delete(demo.id); state.page = 0; save(); renderLibrary(); recompute(); });

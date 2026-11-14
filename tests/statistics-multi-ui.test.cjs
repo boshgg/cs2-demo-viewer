@@ -214,3 +214,60 @@ test('multi folder preferences and hidden selected IDs restore without restricti
   const missing = await page({ catalog, saved: { ...saved, libraryFolder: 'path:temporarily-moved' } }); assert.deepEqual(visibleMultiIds(missing), []); assert.equal(missing.get('multi-library-folder').value, 'path:temporarily-moved'); assert.deepEqual(missing.saved().demoIds, saved.demoIds); assert.equal(missing.get('multi-total-score').textContent, '+96');
   const fresh = await page({ catalog: catalog.map(item => ({ ...item, status: 'discovered' })), saved: { ...saved, analyzedIds: [] } }); assert.equal(reportRequests(fresh).length, 0); assert.equal(fresh.parsed.length, 0); assert.equal(fresh.saved().libraryFolder, 'path:备份');
 });
+
+function folderAction(ui, key, action) {
+  const button = ui.get('multi-demo-list').querySelectorAll('button').find(button => button.dataset.folderKey === key && button.dataset.folderAction === action);
+  assert.ok(button, `Missing ${key} ${action}`); return button;
+}
+async function useFolderAction(ui, key, action) { await folderAction(ui, key, action).click(); await settle(); }
+function folderBulkFixtures() {
+  const data = [...fixtures(), fixture('e')], catalog = multiFolderCatalog();
+  catalog.find(demo => demo.id === 'c').sources = [{ path: '赛事/决赛/c.dem', kind: 'dem', available: true }];
+  catalog.push({ id: 'e', name: 'e.dem', map: 'de_anubis', revision: 'e-v1', status: 'ready', available: true, sources: [{ path: '备份/e.dem', kind: 'dem', available: true }] });
+  return { datasets: data, catalog };
+}
+
+test('folder actions include search and map hidden members while preserving selected and unselected IDs unique to other folders', async () => {
+  const ui = await page({ ...folderBulkFixtures(), saved: { demoIds: ['d'], map: 'de_anubis', libraryView: 'folders', libraryQuery: 'a.dem', playerIds: [p1], side: '3' } });
+  const key = 'path:赛事/决赛', requests = ui.requests.length;
+  assert.deepEqual(visibleMultiIds(ui), ['a', 'a']);
+  assert.match(folderAction(ui, key, 'all').title, /全部 3 场.*隐藏的 2 场/);
+  await useFolderAction(ui, key, 'all'); assert.deepEqual(ui.saved().demoIds.slice().sort(), ['a', 'b', 'c', 'd']);
+  assert.ok(ui.get('multi-demo-list').querySelectorAll('input').filter(input => input.dataset.demoId === 'a').every(input => input.checked), 'shared demo checkboxes stay in sync in both folders');
+  await useFolderAction(ui, key, 'invert'); assert.deepEqual(ui.saved().demoIds, ['d']);
+  await useFolderAction(ui, key, 'invert'); assert.deepEqual(ui.saved().demoIds.slice().sort(), ['a', 'b', 'c', 'd']);
+  await useFolderAction(ui, key, 'none'); assert.deepEqual(ui.saved().demoIds, ['d']);
+  assert.equal(ui.saved().demoIds.includes('e'), false, 'unselected ID unique to another folder stays unselected');
+  assert.equal(ui.get('multi-map').value, 'de_anubis'); assert.equal(ui.get('multi-side').value, '3'); assert.deepEqual(ui.saved().playerIds, [p1]);
+  assert.equal(ui.requests.length, requests); assert.equal(ui.parsed.length, 0); assert.equal(reportRequests(ui).length, 0);
+});
+
+test('visible-list bulk remains limited to visible demos while folder actions invert shared IDs once and persist hidden choices', async () => {
+  const options = folderBulkFixtures(), ui = await page({ ...options, saved: { demoIds: ['d'], libraryView: 'folders', libraryQuery: 'a.dem', map: 'de_anubis' } });
+  await ui.click('multi-demos-all'); assert.deepEqual(ui.saved().demoIds.slice().sort(), ['a', 'd']);
+  await useFolderAction(ui, 'path:赛事/决赛', 'invert'); assert.deepEqual(ui.saved().demoIds.slice().sort(), ['b', 'c', 'd'], 'shared a is inverted once even though visible in two groups');
+  await useFolderAction(ui, 'path:备份', 'all'); assert.deepEqual(ui.saved().demoIds.slice().sort(), ['a', 'b', 'c', 'd', 'e']);
+  const saved = ui.saved(), restored = await page({ ...options, saved }); assert.deepEqual(restored.saved(), saved); assert.equal(restored.parsed.length, 0); assert.equal(reportRequests(restored).length, 0);
+  await restored.click('multi-analyze'); assert.deepEqual(reportRequests(restored).map(([url]) => url).sort(), ['/api/demos/a/statistics', '/api/demos/b/statistics', '/api/demos/e/statistics']);
+  assert.equal(restored.saved().demoIds.includes('c'), true, 'the hidden-map selection survives analysis but is not parsed for the current map');
+});
+
+test('folder actions skip unreadable unselected jobs, allow clearing unreadable selected jobs and retain ready cache eligibility', async () => {
+  const catalog = multiFolderCatalog();
+  catalog.push({ id: 'u', name: 'u.dem', status: 'discovered', available: false, sources: [{ path: 'lost/u.dem', available: false }] }, { id: 'f', name: 'f.dem', status: 'error', available: false, sources: [{ path: 'lost/f.dem', available: false }] });
+  const ui = await page({ catalog, saved: { demoIds: ['f'], libraryView: 'folders', libraryFolder: 'unavailable' } });
+  await useFolderAction(ui, 'unavailable', 'all'); assert.deepEqual(ui.saved().demoIds.slice().sort(), ['d', 'f'], 'ready d has usable cache, unavailable u is not newly selected');
+  await useFolderAction(ui, 'unavailable', 'invert'); assert.deepEqual(ui.saved().demoIds, []);
+  await useFolderAction(ui, 'unavailable', 'invert'); assert.deepEqual(ui.saved().demoIds, ['d']);
+  await useFolderAction(ui, 'unavailable', 'none'); assert.deepEqual(ui.saved().demoIds, []); assert.equal(ui.parsed.length, 0); assert.equal(reportRequests(ui).length, 0);
+});
+
+test('busy folder buttons are disabled and guarded against dispatched events until loading and scanning finish', async () => {
+  const ui = await page({ catalog: multiFolderCatalog(), saved: { demoIds: ['a', 'b'], libraryView: 'folders' } });
+  const release = ui.block('/api/demos/a/statistics'), loading = ui.get('multi-analyze').click(); await settle();
+  const before = ui.saved().demoIds.slice(), key = 'path:赛事/决赛';
+  for (const action of ['all', 'none', 'invert']) { const button = folderAction(ui, key, action); assert.equal(button.disabled, true); await button.dispatch('click'); }
+  assert.deepEqual(ui.saved().demoIds, before); release(); await loading; await settle(); assert.equal(folderAction(ui, key, 'none').disabled, false);
+  ui.setScanning(true); await ui.click('multi-refresh-library'); const button = folderAction(ui, key, 'none'); assert.equal(button.disabled, true); await button.dispatch('click'); assert.deepEqual(ui.saved().demoIds, before);
+  ui.setScanning(false); await ui.poll(); assert.equal(folderAction(ui, key, 'none').disabled, false); await useFolderAction(ui, key, 'none'); assert.deepEqual(ui.saved().demoIds, []);
+});
