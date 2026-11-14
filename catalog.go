@@ -32,13 +32,6 @@ func (a *app) removeAnalysis(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// EvalSymlinks also resolves Windows junctions, which need not have the same
-// directory-entry mode bits as a normal symlink. Reject any redirected path.
-func unlinkedPath(file string) bool {
-	resolved, err := filepath.EvalSymlinks(file)
-	return err == nil && strings.EqualFold(filepath.Clean(file), filepath.Clean(resolved))
-}
-
 func safeSourcePath(base, file string) bool {
 	if file == "" || !containedFile(base, file) || !unlinkedPath(file) {
 		return false
@@ -49,6 +42,7 @@ func safeSourcePath(base, file string) bool {
 
 func (a *app) collectLibraryFiles(result *libraryScan) ([]localLibraryFile, error) {
 	var files []localLibraryFile
+	privateData, _ := os.Stat(a.root)
 	err := filepath.WalkDir(a.demoDir, func(file string, entry fs.DirEntry, walkErr error) error {
 		if a.ctx.Err() != nil {
 			return a.ctx.Err()
@@ -73,6 +67,13 @@ func (a *app) collectLibraryFiles(result *libraryScan) ([]localLibraryFile, erro
 			return nil
 		}
 		if entry.IsDir() {
+			// The demo root may use a Windows 8.3 alias while a.root uses
+			// its long name. Directory identity still excludes our cache.
+			if privateData != nil {
+				if info, err := entry.Info(); err == nil && os.SameFile(privateData, info) {
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(file))
