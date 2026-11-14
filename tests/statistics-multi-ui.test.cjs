@@ -179,3 +179,38 @@ test('a catalog response made before report commit is refreshed instead of erasi
   releaseCatalog(); await updating; await settle(); assert.equal(ui.get('multi-total-score').textContent, '+46'); assert.equal(ui.get('multi-incomplete').hidden, true); assert.equal(ui.get('multi-results').hidden, false);
   assert.equal(reportRequests(ui).length, 2);
 });
+
+function multiFolderCatalog() {
+  return fixtures().map(demo => ({ id: demo.id, name: demo.name, map: demo.map, revision: demo.revision, status: 'ready', available: demo.id !== 'd', sources: demo.id === 'a' ? [{ path: '赛事/决赛/a.dem', kind: 'dem', available: true }, { path: '备份/a.zip', member: '内部/a.dem', kind: 'zip', available: true }] : demo.id === 'b' ? [{ path: '赛事/决赛/b.dem', kind: 'dem', available: true }] : demo.id === 'c' ? [{ path: 'c.zip', member: '比赛/c.dem', kind: 'zip', available: true }] : [{ path: '已移动/d.dem', kind: 'dem', available: false }] }));
+}
+function visibleMultiIds(ui) { return ui.get('multi-demo-list').querySelectorAll('input').map(input => input.dataset.demoId); }
+
+test('multi folder grouping repeats display rows but synchronizes one selection and applies invert once per visible ID', async () => {
+  const ui = await page({ catalog: multiFolderCatalog() }); await ui.change('multi-library-view', 'folders');
+  assert.equal(visibleMultiIds(ui).filter(id => id === 'a').length, 2); assert.match(ui.get('multi-demo-count').textContent, /显示 4 \/ 4/);
+  await ui.checkDemo('a'); assert.ok(ui.get('multi-demo-list').querySelectorAll('input').filter(input => input.dataset.demoId === 'a').every(input => input.checked)); assert.deepEqual(ui.saved().demoIds, ['a']);
+  await ui.click('multi-demos-invert'); assert.deepEqual(ui.saved().demoIds.slice().sort(), ['b', 'c', 'd']);
+  await ui.click('multi-demos-invert'); assert.deepEqual(ui.saved().demoIds, ['a']);
+  await ui.click('multi-demos-all'); await ui.click('multi-analyze'); assert.equal(reportRequests(ui).length, 4); assert.equal(ui.get('multi-total-score').textContent, '+92'); assert.equal(ui.get('multi-pistol-mismatch').textContent, '4');
+});
+
+test('multi folder and search are list-only intersections while map still defines statistics and hidden selections survive bulk actions', async () => {
+  const ui = await page({ catalog: multiFolderCatalog() }); await ui.click('multi-demos-all'); await ui.click('multi-analyze');
+  const chosen = ui.saved().demoIds.slice(), score = ui.get('multi-total-score').textContent, ids = candidates(ui);
+  await ui.change('multi-library-view', 'folders'); await ui.change('multi-library-folder', 'path:赛事/决赛');
+  assert.deepEqual(visibleMultiIds(ui), ['a', 'b']); assert.deepEqual(ui.saved().demoIds, chosen); assert.deepEqual(candidates(ui), ids); assert.equal(ui.get('multi-total-score').textContent, score);
+  await ui.search('multi-library-search', 'a.dem'); assert.deepEqual(visibleMultiIds(ui), ['a']); await ui.click('multi-demos-none'); assert.deepEqual(ui.saved().demoIds.slice().sort(), ['b', 'c', 'd']);
+  await ui.click('multi-demos-invert'); assert.deepEqual(ui.saved().demoIds.slice().sort(), ['a', 'b', 'c', 'd']);
+  await ui.search('multi-library-search', ''); await ui.change('multi-map', 'de_ancient'); assert.deepEqual(visibleMultiIds(ui), []); assert.equal(ui.get('multi-total-score').textContent, '+46');
+  await ui.change('multi-library-folder', 'root'); assert.deepEqual(visibleMultiIds(ui), ['c']); assert.equal(ui.get('multi-total-score').textContent, '+46');
+  await ui.change('multi-library-folder', 'unavailable'); assert.deepEqual(visibleMultiIds(ui), ['d']); assert.equal(ui.get('multi-total-score').textContent, '+46');
+  await ui.change('multi-library-view', 'all'); assert.deepEqual(visibleMultiIds(ui), ['c', 'd']); assert.equal(ui.get('multi-library-folder-field').hidden, true); assert.equal(reportRequests(ui).length, 4);
+});
+
+test('multi folder preferences and hidden selected IDs restore without restricting eligibility or auto-parsing unavailable inputs', async () => {
+  const catalog = multiFolderCatalog(), ui = await page({ catalog }); await ui.click('multi-demos-all'); await ui.click('multi-analyze'); await ui.click('multi-players-none'); await ui.checkPlayer(p1);
+  await ui.change('multi-library-view', 'folders'); await ui.change('multi-library-folder', 'path:备份'); const saved = ui.saved();
+  const restored = await page({ catalog, saved }); assert.deepEqual(restored.saved(), saved); assert.deepEqual(visibleMultiIds(restored), ['a']); assert.deepEqual(checkedPlayers(restored), [p1]); assert.equal(restored.get('multi-total-score').textContent, '+96'); assert.equal(restored.parsed.length, 0);
+  const missing = await page({ catalog, saved: { ...saved, libraryFolder: 'path:temporarily-moved' } }); assert.deepEqual(visibleMultiIds(missing), []); assert.equal(missing.get('multi-library-folder').value, 'path:temporarily-moved'); assert.deepEqual(missing.saved().demoIds, saved.demoIds); assert.equal(missing.get('multi-total-score').textContent, '+96');
+  const fresh = await page({ catalog: catalog.map(item => ({ ...item, status: 'discovered' })), saved: { ...saved, analyzedIds: [] } }); assert.equal(reportRequests(fresh).length, 0); assert.equal(fresh.parsed.length, 0); assert.equal(fresh.saved().libraryFolder, 'path:备份');
+});

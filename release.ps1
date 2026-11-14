@@ -1,4 +1,4 @@
-param([string]$Version = '4.0.9')
+param([string]$Version = '4.0.10')
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Use a numeric semantic version, for example 4.0.0.' }
@@ -55,10 +55,11 @@ CS2 Replay v$Version - Windows x64 便携版
 6. 扫描只更新录像列表并校验去重，不自动解析全部比赛。重复刷新、不同子目录、ZIP与原DEM中的相同内容不会重复统计；原始文件保留。
 7. 旧缓存可在地图分析页点击「重新解析已导入」，或在数据分析页重新解析当前比赛 / 全部已解析录像。原文件或 ZIP 仍在 demo 目录时无需删除再导入；队伍分组和筛选保留，新结果完成后才替换旧缓存，失败可继续使用旧数据。
 8. 道具统计可按正式开局后的出手时间筛选：0–5 秒、超过 5–20 秒、超过 20–50 秒、50 秒以后；缺失时间单独标记未知。落点、投法、数量及导出 CSV 同步更新，已有回放缓存会自动补充时间字段。
+9. 在 demo 下自建文件夹整理录像后刷新；回放、地图分析和数据分析均可切换「显示全部 / 按文件夹分类」，并选择一个文件夹。分类只改变列表显示，不清除已选比赛；多个目录中的同一份录像不会重复统计。ZIP 按 ZIP 文件所在目录分类。
 
 已包含可执行程序，不需要安装 Go、Node.js 或 CS2。地图与图标内嵌，可离线使用。
 保持启动终端开启，在终端按 Ctrl+C 停止。解析记录保存在本目录 data 文件夹，重启会自动恢复，无需逐个重新导入；原始 demo 文件不会删除。
-原目录升级时替换 bin 程序和说明文件，保留 demo 与 data 文件夹；目录名可以继续使用旧版本名。
+原目录升级时替换 bin 程序和说明文件，保留 demo 与 data 文件夹。旧版升级后先在原目录启动一次，等待文件夹扫描完成并关闭程序；之后可重命名整个安装目录，缓存与原件的关联会保留。
 若端口冲突，在本目录运行 bin\cs2-viewer.exe -port 8766 -open。
 统计口径、地图版本限制和素材归属请参阅 README.md、MAP_SOURCES.md、ICON_SOURCES.md 及 licenses。
 

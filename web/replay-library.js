@@ -45,30 +45,98 @@
     return { id: selected.id, data };
   }
   function sourcePaths(demo) {
-    return (Array.isArray(demo.sources) ? demo.sources : []).map(source => `${source.path || ''}${source.member ? ` › ${source.member}` : ''}`).filter(Boolean);
+    return (Array.isArray(demo?.sources) ? demo.sources : []).map(source => `${source?.path || ''}${source?.member ? ` › ${source.member}` : ''}`).filter(Boolean);
   }
   function matches(demo, query) {
     const words = String(query || '').trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
     const text = [demo.name, demo.map, ...sourcePaths(demo)].join(' ').toLocaleLowerCase();
     return words.every(word => text.includes(word));
   }
+  function sourceFolder(source) {
+    if (!source || source.available === false || typeof source.path !== 'string') return null;
+    const path = source.path.replace(/\\/g, '/');
+    // Catalog paths are relative to demo/. A missing/invalid physical path must
+    // not be classified using a ZIP member name or a cached display name.
+    if (!path.trim() || path.startsWith('/') || /^[a-z]:/i.test(path) || path.endsWith('/')) return null;
+    const parts = [];
+    for (const part of path.split('/')) {
+      if (!part || part === '.') continue;
+      if (part === '..') { if (!parts.length) return null; parts.pop(); }
+      else parts.push(part);
+    }
+    if (!parts.length) return null;
+    parts.pop();
+    return parts.length ? `path:${parts.join('/')}` : 'root';
+  }
+  function folderLabel(key) {
+    if (key === 'root') return 'demo 根目录';
+    if (key === 'unavailable') return '仅缓存或源文件不可用';
+    if (typeof key === 'string' && key.startsWith('path:')) return key.slice(5);
+    return key === 'all' ? '全部文件夹' : '未知文件夹';
+  }
+  function compareFolders(a, b) {
+    const rank = key => key === 'root' ? 0 : key === 'unavailable' ? 2 : 1;
+    return rank(a) - rank(b) || folderLabel(a).localeCompare(folderLabel(b), 'zh-CN') || a.localeCompare(b);
+  }
+  function folderKeys(demo) {
+    const keys = [...new Set((Array.isArray(demo?.sources) ? demo.sources : []).map(sourceFolder).filter(Boolean))];
+    return keys.length ? keys.sort(compareFolders) : ['unavailable'];
+  }
+  function inFolder(demo, key = 'all') { return key === 'all' || folderKeys(demo).includes(key); }
+  function uniqueDemos(demos) {
+    const unique = new Map();
+    for (const demo of Array.isArray(demos) ? demos : []) if (demo && typeof demo.id === 'string' && demo.id) unique.set(demo.id, demo);
+    return [...unique.values()];
+  }
+  function folderGroups(demos) {
+    const groups = new Map();
+    for (const demo of Array.isArray(demos) ? demos : []) {
+      if (!demo || typeof demo.id !== 'string' || !demo.id) continue;
+      for (const key of folderKeys(demo)) {
+        if (!groups.has(key)) groups.set(key, new Map());
+        groups.get(key).set(demo.id, demo);
+      }
+    }
+    return [...groups].sort(([a], [b]) => compareFolders(a, b)).map(([key, values]) => ({ key, label: folderLabel(key), demos: [...values.values()] }));
+  }
+  function folderOptions(demos) { return folderGroups(demos).map(group => ({ key: group.key, label: group.label, count: group.demos.length })); }
+  function groupByFolder(demos, mode = 'all', folder = 'all') {
+    if (mode !== 'folders') return [{ key: 'all', label: '', demos: uniqueDemos(demos) }];
+    return folderGroups(demos).filter(group => folder === 'all' || group.key === folder);
+  }
+  const viewStorageKey = 'cs2-replay-library-view-v1';
   const statusLabels = { discovered: '未解析', queued: '等待解析', parsing: '正在解析', ready: '已有缓存', error: '解析失败' };
-  function create({ document: doc = document, fetch: fetcher = fetch, onSelect, onOpen, setTimeout: schedule = setTimeout, clearTimeout: unschedule = clearTimeout } = {}) {
+  function create({ document: doc = document, fetch: fetcher = fetch, storage, onSelect, onOpen, setTimeout: schedule = setTimeout, clearTimeout: unschedule = clearTimeout } = {}) {
     const $ = id => doc.getElementById(id), dialog = $('replay-library'), list = $('replay-library-list');
     let demos = [], scanning = false, open = false, loading = false, refreshing = false, timer = null, request = 0, previousFocus = null;
+    let preferences = {}; try { storage ??= globalThis.localStorage; preferences = JSON.parse(storage?.getItem(viewStorageKey) || '{}') || {}; } catch { /* Private/disabled storage does not prevent local playback. */ }
+    let mode = preferences.mode === 'folders' ? 'folders' : 'all', folder = typeof preferences.folder === 'string' && /^(root|unavailable|path:.+)$/.test(preferences.folder) ? preferences.folder : 'all';
+    const saveView = () => { try { storage?.setItem(viewStorageKey, JSON.stringify({ mode, folder })); } catch { /* Optional view preference. */ } };
     const make = (tag, text, className) => { const el = doc.createElement(tag); if (text != null) el.textContent = text; if (className) el.className = className; return el; };
     function render() {
-      const shown = demos.filter(demo => matches(demo, $('replay-library-search').value));
-      $('replay-library-count').textContent = `${shown.length} / ${demos.length} 场`;
+      $('replay-library-mode').value = mode;
+      $('replay-library-folder-field').hidden = mode !== 'folders';
+      $('replay-library-folder-note').hidden = mode !== 'folders';
+      const folders = $('replay-library-folder'), options = folderOptions(demos); folders.replaceChildren();
+      const addOption = (value, label) => { const option = make('option', label); option.value = value; folders.append(option); };
+      addOption('all', '全部文件夹'); for (const option of options) addOption(option.key, `${option.label} · ${option.count} 场`);
+      if (folder !== 'all' && !options.some(option => option.key === folder)) addOption(folder, `${folderLabel(folder)} · 暂无录像`);
+      folders.value = folder;
+      const shown = demos.filter(demo => matches(demo, $('replay-library-search').value) && (mode !== 'folders' || inFolder(demo, folder)));
+      $('replay-library-count').textContent = `${uniqueDemos(shown).length} / ${uniqueDemos(demos).length} 场`;
       $('replay-library-refresh').disabled = loading || refreshing || scanning;
       list.replaceChildren();
-      for (const demo of shown) {
+      for (const group of groupByFolder(shown, mode, folder)) {
+        let container = list;
+        if (mode === 'folders') { container = make('section', null, 'replay-library-folder-group'); container.dataset.folder = group.key; container.append(make('h3', `${group.label} · ${group.demos.length} 场`, 'replay-library-folder-heading')); list.append(container); }
+        for (const demo of group.demos) {
         const row = make('article', null, 'replay-library-row'), details = make('div', null, 'replay-library-details');
         row.dataset.demoId = demo.id;
         const heading = make('div', null, 'replay-library-row-heading'), title = make('strong', demo.name || '未命名录像'); title.title = demo.name || '';
         const status = make('span', statusLabels[demo.status] || '等待确认', `replay-library-status status-${demo.status || 'unknown'}`);
         heading.append(title, status); details.append(heading);
-        const paths = sourcePaths(demo), path = make('p', paths[0] || '已保存的本机回放', 'replay-library-source'); path.title = paths.join('\n'); details.append(path);
+        const paths = sourcePaths(demo), groupedPaths = group.key === 'all' ? paths : sourcePaths({ sources: (Array.isArray(demo.sources) ? demo.sources : []).filter(source => folderKeys({ sources: [source] }).includes(group.key)) });
+        const path = make('p', groupedPaths[0] || paths[0] || '已保存的本机回放', 'replay-library-source'); path.title = paths.join('\n'); details.append(path);
         const sourceCount = Number(demo.sourceCount) || paths.length;
         details.append(make('small', `${demo.map || '解析后识别地图'}${sourceCount > 1 ? ` · ${sourceCount} 个来源，已去重` : ''}`));
         if (demo.status === 'error' && demo.error) details.append(make('p', demo.error, 'replay-library-row-error'));
@@ -77,9 +145,10 @@
         const action = make('button', unavailable ? '源文件不可用' : demo.status === 'ready' ? '播放' : demo.status === 'error' ? '重试播放' : demo.status === 'queued' || demo.status === 'parsing' ? '查看进度' : '解析并播放', 'button secondary compact replay-library-play');
         action.type = 'button'; action.disabled = unavailable; action.setAttribute('aria-label', `播放 ${demo.name || '录像'}`);
         action.addEventListener('click', () => { close(); onSelect?.(demo); });
-        row.append(details, action); list.append(row);
+        row.append(details, action); container.append(row);
+        }
       }
-      if (!shown.length) list.append(make('p', demos.length ? '没有匹配的录像，请修改搜索条件。' : scanning ? '正在发现录像，请稍候…' : '把 .dem 或 .zip 放入 demo 文件夹或其子文件夹，再点击刷新。', 'replay-library-empty'));
+      if (!shown.length) list.append(make('p', demos.length ? '当前文件夹或搜索没有匹配的录像，可切换文件夹或显示全部。' : scanning ? '正在发现录像，请稍候…' : '把 .dem 或 .zip 放入 demo 文件夹或其子文件夹，再点击刷新。', 'replay-library-empty'));
     }
     function poll() {
       unschedule(timer); timer = null;
@@ -126,10 +195,12 @@
     $('empty-replay-library').addEventListener('click', show);
     $('replay-library-close').addEventListener('click', close);
     $('replay-library-search').addEventListener('input', render);
+    $('replay-library-mode').addEventListener('change', () => { mode = $('replay-library-mode').value === 'folders' ? 'folders' : 'all'; saveView(); render(); });
+    $('replay-library-folder').addEventListener('change', () => { folder = $('replay-library-folder').value || 'all'; saveView(); render(); });
     $('replay-library-refresh').addEventListener('click', () => { void refresh(); });
     dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
     dialog.addEventListener('click', event => { if (event.target === dialog) close(); });
     return { show, close, refresh, reload, isOpen: () => open };
   }
-  return { create, loadReplay, matches, sourcePaths };
+  return { create, loadReplay, matches, sourcePaths, folderKeys, folderLabel, folderOptions, inFolder, groupByFolder, viewStorageKey };
 });

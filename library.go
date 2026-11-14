@@ -181,14 +181,41 @@ func (a *app) libraryManifestLocked(replacement *job) libraryManifest {
 		}
 		j.mu.Lock()
 		m.Jobs = append(m.Jobs, libraryRecord{ID: j.ID, Revision: j.Revision, Name: j.Name, Map: j.Map, Analysis: j.Analysis, Status: j.Status, Error: j.Error, Source: j.source, OwnedSource: j.ownedSource, SourceSize: j.sourceSize, SourceModTime: j.sourceModTime, ContentSHA256: j.contentSHA256, Catalog: j.catalog, Reparse: copyReparseState(j.Reparse), Created: j.created})
+		base := a.demoDir
+		if j.ownedSource {
+			base = a.root
+		}
+		m.Jobs[len(m.Jobs)-1].Source = portableLibraryPath(base, j.source)
 		j.mu.Unlock()
 	}
 	for _, source := range a.sources {
+		source.Source = portableLibraryPath(a.demoDir, source.Source)
 		m.Sources = append(m.Sources, source)
 	}
 	sort.Slice(m.Jobs, func(i, j int) bool { return m.Jobs[i].Created.Before(m.Jobs[j].Created) })
 	sort.Slice(m.Sources, func(i, j int) bool { return sourceKey(m.Sources[i]) < sourceKey(m.Sources[j]) })
 	return m
+}
+
+// Persist paths relative to their configured root so the complete installation
+// can be renamed without invalidating its source bindings. Runtime paths remain
+// absolute; legacy manifests with absolute paths still load in their old root.
+func portableLibraryPath(base, source string) string {
+	if source == "" || !containedFile(base, source) {
+		return source
+	}
+	rel, err := filepath.Rel(base, source)
+	if err != nil {
+		return source
+	}
+	return filepath.ToSlash(rel)
+}
+
+func resolveLibraryPath(base, source string) string {
+	if source == "" || filepath.IsAbs(source) {
+		return source
+	}
+	return filepath.Join(base, filepath.FromSlash(source))
 }
 
 // Serialize all manifest writes with persistMu, including transactional reparses.
@@ -231,7 +258,8 @@ func (a *app) loadLibrary() error {
 		return fmt.Errorf("unsupported library manifest")
 	}
 	seen := map[string]bool{}
-	for _, entry := range m.Jobs {
+	for i := range m.Jobs {
+		entry := &m.Jobs[i]
 		if !validSessionID(entry.ID) || !validLibraryRevision(entry.ID, entry.Revision) || seen[entry.ID] || entry.Name == "" || (entry.ContentSHA256 != "" && !validSessionHash(entry.ContentSHA256)) {
 			return fmt.Errorf("invalid library identity")
 		}
@@ -241,12 +269,14 @@ func (a *app) loadLibrary() error {
 			if entry.OwnedSource {
 				base = a.root
 			}
+			entry.Source = resolveLibraryPath(base, entry.Source)
 			if !containedFile(base, entry.Source) {
 				return fmt.Errorf("library source outside its configured directory")
 			}
 		}
 	}
 	for _, source := range m.Sources {
+		source.Source = resolveLibraryPath(a.demoDir, source.Source)
 		if !validLibrarySource(a.demoDir, source) || !seen[source.JobID] {
 			return fmt.Errorf("invalid library source binding")
 		}

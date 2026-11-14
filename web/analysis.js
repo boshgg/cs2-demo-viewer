@@ -1,11 +1,12 @@
 (() => {
   'use strict';
-  const $ = id => document.getElementById(id), core = window.ReplayAnalysis, heat = window.ReplayHeatmap;
+  const $ = id => document.getElementById(id), core = window.ReplayAnalysis, heat = window.ReplayHeatmap, library = window.ReplayLibrary;
   const state = { jobs: new Map(), demos: new Map(), selectedDemos: null, selectedTeams: null, selectedPlayers: null, aliases: {}, map: '', mapInfo: null, image: null, result: null, worker: null, request: 0, mapRequest: 0, uploading: false, cancelled: false, controller: null, currentJob: null, queued: [], pendingCount: 0, selectedGroup: null, selectedThrow: null, zoom: 1, panX: 0, panY: 0, layers: new Map(), fallbackBounds: { minX: -3000, maxX: 3000, minY: -3000, maxY: 3000 } };
   const storageKey = 'cs2-analysis-v4';
   let initializing = true, migratedSessionId = '', libraryEnabled = false, libraryRefreshing = false, libraryScanning = false, syncPromise = null, libraryTimer, restoredView = null;
   const loadingJobs = new Map();
   const catalog = new Map(), catalogSelection = new Set();
+  const sourceView = { mode: 'all', folder: 'all', query: '' }, libraryView = { mode: 'all', folder: 'all', query: '', map: 'all' };
   let catalogAdding = false, catalogLoading = false, catalogOpener = null;
   let reparseSubmitting = false, reparseRequestError = '';
   const reparseSkipped = new Map();
@@ -24,6 +25,7 @@
   function save() {
     if (initializing) return;
     const settings = { ids: [...state.jobs.keys()], selectedDemos: state.selectedDemos && [...state.selectedDemos], selectedTeams: state.selectedTeams && [...state.selectedTeams], selectedPlayers: state.selectedPlayers && [...state.selectedPlayers], map: state.map, aliases: state.aliases, side: $('analysis-side').value, floor: $('analysis-floor').value, utilityType: $('analysis-utility-type').value, utilityTime: $('analysis-utility-time').value, utilitySort: $('utility-sort').value, query: $('player-search').value, layers: metrics.filter(name => $(`layer-${name}`).checked), radius: Number($('heat-radius').value), opacity: Number($('heat-opacity').value), scale: heatMode(), landingDistance: Number($('landing-distance').value), throwDistance: Number($('throw-distance').value), migratedSessionId };
+    settings.sourceView = { ...sourceView }; settings.libraryView = { ...libraryView };
     if (restoredView) { settings.map = restoredView.map; settings.floor = restoredView.floor; }
     try { localStorage.setItem(storageKey, JSON.stringify(settings)); } catch { /* Private browsing may not offer localStorage. */ }
   }
@@ -31,6 +33,15 @@
     if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return;
     state.aliases = saved.aliases && typeof saved.aliases === 'object' && !Array.isArray(saved.aliases) ? Object.fromEntries(Object.entries(saved.aliases).filter(([, value]) => typeof value === 'string')) : {};
     state.map = typeof saved.map === 'string' ? saved.map : '';
+    for (const [key, view, prefix] of [['sourceView', sourceView, 'demo'], ['libraryView', libraryView, 'analysis-library']]) {
+      const stored = saved[key];
+      if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+        view.mode = stored.mode === 'folders' ? 'folders' : 'all';
+        for (const field of ['folder', 'query']) if (typeof stored[field] === 'string') view[field] = stored[field];
+        if (key === 'libraryView' && typeof stored.map === 'string') view.map = stored.map;
+      }
+      $(`${prefix}-view-mode`).value = view.mode; $(`${prefix}-search`).value = view.query;
+    }
     for (const key of ['selectedDemos', 'selectedTeams', 'selectedPlayers']) state[key] = Array.isArray(saved[key]) ? new Set(saved[key].filter(id => typeof id === 'string')) : null;
     for (const [key, id, choices] of [['side', 'analysis-side', ['all', '2', '3']], ['floor', 'analysis-floor', ['all', 'upper', 'lower']], ['utilityType', 'analysis-utility-type', ['all', ...Object.keys(utilityNames)]], ['utilityTime', 'analysis-utility-time', ['all', ...core.utilityTimeBuckets.map(bucket => bucket.key)]], ['utilitySort', 'utility-sort', ['common', 'rare']], ['scale', 'heat-scale', ['log', 'linear']]]) if (choices.includes(saved[key])) $(id).value = saved[key];
     if (typeof saved.query === 'string') $('player-search').value = saved.query;
@@ -85,32 +96,77 @@
     if (!state[key]) state[key] = new Set(allIds);
     if (checked) state[key].add(id); else state[key].delete(id);
   }
-  function renderJobs() {
-    const activeMap = state.map || restoredView?.map || '', jobs = [...state.jobs.values()];
-    const mapOf = job => job.map || state.demos.get(job.id)?.map || '';
+  function sourceDemo(job) {
+    const source = catalog.get(job.id);
+    return { ...source, ...job, sources: source ? source.sources : job.sources, sourceCount: source ? source.sourceCount : job.sourceCount, available: source ? source.available : job.available, map: job.map || state.demos.get(job.id)?.map || source?.map || '' };
+  }
+  function filterList(demos, view) {
+    return demos.filter(demo => library.matches(demo, view.query) && (view.mode !== 'folders' || library.inFolder(demo, view.folder)));
+  }
+  function renderFolderControls(prefix, demos, view) {
+    const select = $(`${prefix}-folder`), options = library.folderOptions(demos); select.replaceChildren(new Option('全部文件夹', 'all'));
+    for (const option of options) select.append(new Option(`${option.label} · ${number(option.count)} 场`, option.key));
+    if (view.folder !== 'all' && !options.some(option => option.key === view.folder)) select.append(new Option(`${library.folderLabel(view.folder)} · 当前范围暂无录像`, view.folder));
+    select.value = view.folder; $(`${prefix}-folder-field`).hidden = view.mode !== 'folders'; $(`${prefix}-view-mode`).value = view.mode;
+  }
+  function appendFolderGroups(list, demos, view, appendRow) {
+    for (const group of library.groupByFolder(demos, view.mode, view.folder)) {
+      let target = list;
+      if (view.mode === 'folders') {
+        target = node('section', null, 'analysis-folder-group'); target.dataset.folderKey = group.key;
+        const heading = node('h3', `${group.label} · ${number(new Set(group.demos.map(demo => demo.id)).size)} 场`, 'analysis-folder-heading'); heading.title = group.label;
+        target.append(heading); list.append(target);
+      }
+      for (const demo of group.demos) appendRow(demo, target, group.key);
+    }
+  }
+  function groupSourcePaths(demo, key) {
+    if (key === 'all') return library.sourcePaths(demo);
+    return library.sourcePaths({ sources: (Array.isArray(demo.sources) ? demo.sources : []).filter(source => library.folderKeys({ sources: [source] }).includes(key)) });
+  }
+  function sourceScope() {
+    const activeMap = state.map || restoredView?.map || '', jobs = [...state.jobs.values()].map(sourceDemo);
     const availableMaps = new Set([...state.demos.values()].map(demo => demo.map));
-    const current = jobs.filter(job => activeMap && mapOf(job) === activeMap);
-    const unmapped = jobs.filter(job => !mapOf(job) || (mapOf(job) !== activeMap && !availableMaps.has(mapOf(job))));
-    $('demo-count').textContent = `本图 ${number(current.length)} / 共 ${number(state.jobs.size + state.pendingCount)} 场`;
-    $('demo-scope').textContent = activeMap ? `只显示 ${activeMap}；切换下方地图查看其他比赛。` : '选择下方地图查看对应比赛；地图未识别的任务列在下面。';
+    return { activeMap, jobs, current: jobs.filter(job => activeMap && job.map === activeMap), unmapped: jobs.filter(job => !job.map || (job.map !== activeMap && !availableMaps.has(job.map))) };
+  }
+  function visibleSourceJobs() { const scope = sourceScope(); return [...new Map(filterList([...scope.current, ...scope.unmapped], sourceView).map(job => [job.id, job])).values()]; }
+  function changeSourceSelection(action) {
+    const visible = visibleSourceJobs().filter(job => state.demos.has(job.id));
+    if (!state.selectedDemos) state.selectedDemos = new Set(state.jobs.keys());
+    for (const job of visible) {
+      if (action === 'all' || action === 'invert' && !state.selectedDemos.has(job.id)) state.selectedDemos.add(job.id);
+      else state.selectedDemos.delete(job.id);
+    }
+    renderJobs(); renderFilters(); requestAnalysis();
+  }
+  function renderJobs() {
+    const scope = sourceScope(), { activeMap, jobs } = scope, mapOf = job => job.map;
+    renderFolderControls('demo', [...scope.current, ...scope.unmapped], sourceView);
+    const current = filterList(scope.current, sourceView), unmapped = filterList(scope.unmapped, sourceView);
+    $('demo-count').textContent = `本图 ${number(scope.current.length)} / 共 ${number(state.jobs.size + state.pendingCount)} 场`;
+    $('demo-scope').textContent = (activeMap ? `只显示 ${activeMap}；切换下方地图查看其他比赛。` : '选择下方地图查看对应比赛；地图未识别的任务列在下面。') + ` 当前列表 ${number(new Set([...current, ...unmapped].map(job => job.id)).size)} 场；列表分类与搜索不会改变分析勾选。`;
     const list = $('demo-list'), pendingList = $('unmapped-demo-list'); list.replaceChildren(); pendingList.replaceChildren();
     $('unmapped-demos').hidden = !unmapped.length;
     $('unmapped-demo-count').textContent = `${unmapped.some(job => mapOf(job)) ? '待完成分析' : '待识别地图'} · ${number(unmapped.length)} 场`;
-    for (const job of [...current, ...unmapped]) {
+    const appendRow = (job, target, groupKey) => {
       const row = node('div', null, 'check-item'), label = node('label'), check = document.createElement('input'), words = node('span');
-      label.style.display = 'contents'; check.type = 'checkbox'; check.checked = !state.selectedDemos || state.selectedDemos.has(job.id); check.disabled = !state.demos.has(job.id); check.setAttribute('aria-label', `叠加 ${job.name || job.id}`);
-      check.addEventListener('change', () => { toggleSet('selectedDemos', job.id, [...state.jobs.keys()], check.checked); state.selectedTeams = null; state.selectedPlayers = null; renderFilters(); requestAnalysis(); });
+      row.dataset.demoId = job.id; label.style.display = 'contents'; check.type = 'checkbox'; check.dataset.demoId = job.id; check.checked = !state.selectedDemos || state.selectedDemos.has(job.id); check.disabled = !state.demos.has(job.id); check.setAttribute('aria-label', `叠加 ${job.name || job.id}`);
+      check.addEventListener('change', () => { toggleSet('selectedDemos', job.id, [...state.jobs.keys()], check.checked); state.selectedTeams = null; state.selectedPlayers = null; renderJobs(); renderFilters(); requestAnalysis(); });
       const title = node('strong', job.name || '解析中的比赛'); title.title = job.name || '';
       const info = node('small', job.status === 'ready' ? `${job.map || ''}${job.synthetic ? ' · 合成示例' : ''}` : [mapOf(job), job.error || job.message || '正在处理…'].filter(Boolean).join(' · '), job.synthetic ? 'badge-synthetic' : job.status === 'error' ? 'status-error' : '');
       words.append(title, info);
+      const paths = library.sourcePaths(job);
+      if (paths.length) { const source = node('small', groupSourcePaths(job, groupKey)[0] || paths[0], 'demo-source-path'); source.title = paths.join('\n'); words.append(source); }
       if (job.summaryError) words.append(node('small', `新摘要读取失败，暂用旧结果：${job.summaryError}`, 'warning-inline'));
       if (job.warnings?.length) { const warning = node('small', `⚠ ${job.warnings[0]}${job.warnings.length > 1 ? `（另有 ${job.warnings.length - 1} 条提示）` : ''}`, 'warning-inline'); warning.title = job.warnings.join('\n'); words.append(warning); }
       label.append(check, words); row.append(label);
       const focus = node('button', '查看', 'text-button demo-focus'); focus.type = 'button'; focus.disabled = !state.demos.has(job.id); focus.title = '切换到这场 Demo 的地图并显示其队伍与玩家'; focus.setAttribute('aria-label', `查看 ${job.name || '比赛'} 所在地图`);
       focus.addEventListener('click', () => { const data = state.demos.get(job.id); if (data) void focusDemo(data); }); row.append(focus);
-      const remove = node('button', '×', 'demo-remove'); remove.title = '从分析移除，保留录像库与回放缓存'; remove.setAttribute('aria-label', `移除 ${job.name || '比赛'}`); remove.disabled = state.uploading && state.currentJob === job.id; remove.addEventListener('click', () => removeJob(job.id)); row.append(remove); (mapOf(job) === activeMap && activeMap ? list : pendingList).append(row);
-    }
-    if (!current.length) list.append(node('p', activeMap ? '当前地图暂无比赛。' : jobs.length ? '等待识别地图，或在下方选择已有地图。' : '从本地录像库选择比赛，加入后才开始分析。', 'muted'));
+      const remove = node('button', '×', 'demo-remove'); remove.title = '从分析移除，保留录像库与回放缓存'; remove.setAttribute('aria-label', `移除 ${job.name || '比赛'}`); remove.disabled = state.uploading && state.currentJob === job.id; remove.addEventListener('click', () => removeJob(job.id)); row.append(remove); target.append(row);
+    };
+    appendFolderGroups(list, current, sourceView, appendRow); appendFolderGroups(pendingList, unmapped, sourceView, appendRow);
+    for (const action of ['all', 'none', 'invert']) $(`demos-${action}`).disabled = ![...current, ...unmapped].some(job => state.demos.has(job.id));
+    if (!current.length) list.append(node('p', activeMap ? '当前地图、文件夹或搜索没有匹配比赛；已有勾选仍保留。' : jobs.length ? '等待识别地图，或在下方选择已有地图。' : '从本地录像库选择比赛，加入后才开始分析。', 'muted'));
     $('sample-analysis').disabled = state.uploading || catalogAdding;
     $('refresh-library').disabled = !libraryEnabled || libraryRefreshing || libraryScanning || state.uploading || catalogAdding;
     renderCatalog();
@@ -404,11 +460,24 @@
     finally { libraryRefreshing = false; renderJobs(); scheduleLibraryPoll(); }
   }
   function catalogSelectable(demo) { return demo.status === 'ready' || demo.available !== false; }
+  function catalogMapScope() { return [...catalog.values()].filter(demo => libraryView.map === 'all' || (demo.map || 'unknown') === libraryView.map); }
   function visibleCatalog() {
-    const query = $('analysis-library-search').value.trim().toLocaleLowerCase();
-    return [...catalog.values()].filter(demo => !query || [demo.name, demo.map, ...(demo.sources || []).flatMap(source => [source.path, source.member])].join(' ').toLocaleLowerCase().includes(query));
+    return filterList(catalogMapScope(), libraryView);
+  }
+  function changeCatalogSelection(action) {
+    if (catalogAdding || state.uploading) return;
+    for (const demo of visibleCatalog()) if (catalogSelectable(demo)) {
+      if (action === 'all' || action === 'invert' && !catalogSelection.has(demo.id)) catalogSelection.add(demo.id);
+      else catalogSelection.delete(demo.id);
+    }
+    renderCatalog();
   }
   function renderCatalog() {
+    const maps = new Map(); for (const demo of catalog.values()) maps.set(demo.map || 'unknown', (maps.get(demo.map || 'unknown') || 0) + 1);
+    const select = $('analysis-library-map'); select.replaceChildren(new Option('全部地图', 'all'));
+    for (const [map, count] of [...maps].sort(([a], [b]) => a.localeCompare(b))) select.append(new Option(`${map === 'unknown' ? '地图待解析' : map} · ${number(count)} 场`, map));
+    if (libraryView.map !== 'all' && !maps.has(libraryView.map)) select.append(new Option(`${libraryView.map} · 暂无录像`, libraryView.map));
+    select.value = libraryView.map; renderFolderControls('analysis-library', catalogMapScope(), libraryView);
     const visible = visibleCatalog(), list = $('analysis-library-list'); list.replaceChildren();
     const busy = catalogAdding || state.uploading;
     $('open-analysis-library').disabled = busy;
@@ -417,24 +486,25 @@
     $('analysis-library-add').textContent = catalogAdding ? '正在加入…' : `加入分析（${catalogSelection.size}）`;
     $('analysis-library-add').disabled = busy || !catalogSelection.size;
     $('analysis-library-all').disabled = busy || !visible.some(catalogSelectable);
-    $('analysis-library-clear').disabled = busy || !catalogSelection.size;
+    $('analysis-library-invert').disabled = busy || !visible.some(catalogSelectable);
+    $('analysis-library-clear').disabled = busy || !visible.some(demo => catalogSelection.has(demo.id));
     $('analysis-library-refresh').disabled = busy || !libraryEnabled || libraryRefreshing || libraryScanning || catalogLoading;
-    for (const demo of visible) {
+    appendFolderGroups(list, visible, libraryView, (demo, target, groupKey) => {
       const row = node('label', null, 'analysis-library-row'), check = document.createElement('input'), words = node('span', null, 'analysis-library-words');
       row.dataset.demoId = demo.id; check.type = 'checkbox'; check.dataset.demoId = demo.id; check.checked = catalogSelection.has(demo.id); check.disabled = busy || !catalogSelectable(demo);
       check.setAttribute('aria-label', `选择 ${demo.name || demo.id} 加入分析`);
       check.addEventListener('change', () => { if (check.checked) catalogSelection.add(demo.id); else catalogSelection.delete(demo.id); renderCatalog(); });
       const title = node('strong', demo.name || demo.id); title.title = demo.name || demo.id;
-      const sources = (demo.sources || []).map(source => `${source.path}${source.member ? ` → ${source.member}` : ''}`), path = node('small', sources[0] || '本机已解析记录', 'analysis-library-path'); path.title = sources.join('\n');
+      const sources = library.sourcePaths(demo), path = node('small', groupSourcePaths(demo, groupKey)[0] || sources[0] || '本机已解析记录', 'analysis-library-path'); path.title = sources.join('\n');
       const statuses = { discovered: '待选择解析', queued: '等待解析', parsing: '正在解析', error: '解析失败，可重试' };
       const status = demo.status === 'ready' ? demo.analysis ? '已加入分析 · 可直接复用' : '已解析缓存 · 可直接加入' : statuses[demo.status] || demo.message || '等待处理';
       const detail = node('small', `${demo.map || '地图待解析'} · ${status}${demo.sourceCount > 1 ? ` · ${demo.sourceCount} 个来源已去重` : ''}`, demo.status === 'error' ? 'status-error' : '');
       words.append(title, path, detail);
       if (demo.error) words.append(node('small', demo.error, 'status-error'));
       if (demo.available === false) words.append(node('small', demo.status === 'ready' ? '源文件已移走，仍可使用解析缓存' : '源文件不可用，请恢复文件后刷新', 'micro'));
-      row.append(check, words); list.append(row);
-    }
-    if (!visible.length) list.append(node('p', catalogLoading ? '正在读取录像库…' : catalog.size ? '没有匹配的录像，试试文件名或子文件夹名称。' : '录像库为空。将 .dem 或 .zip 放入 Demo 文件夹（支持所有子文件夹），然后点击刷新。', 'muted'));
+      row.append(check, words); target.append(row);
+    });
+    if (!visible.length) list.append(node('p', catalogLoading ? '正在读取录像库…' : catalog.size ? '当前地图、文件夹或搜索没有匹配录像；已选录像仍保留。' : '录像库为空。将 .dem 或 .zip 放入 Demo 文件夹（支持所有子文件夹），然后点击刷新。', 'muted'));
   }
   async function openCatalog(event) {
     if (catalogAdding || state.uploading) return;
@@ -691,10 +761,17 @@
   $('empty-open-analysis-library').addEventListener('click', openCatalog);
   $('analysis-library-close').addEventListener('click', closeCatalog);
   $('analysis-library-dialog').addEventListener('cancel', event => { event.preventDefault(); closeCatalog(); });
-  $('analysis-library-search').addEventListener('input', renderCatalog);
+  for (const [prefix, view, render] of [['demo', sourceView, renderJobs], ['analysis-library', libraryView, renderCatalog]]) {
+    $(`${prefix}-search`).addEventListener('input', () => { view.query = $(`${prefix}-search`).value; render(); save(); });
+    $(`${prefix}-view-mode`).addEventListener('change', () => { view.mode = $(`${prefix}-view-mode`).value === 'folders' ? 'folders' : 'all'; render(); save(); });
+    $(`${prefix}-folder`).addEventListener('change', () => { view.folder = $(`${prefix}-folder`).value; render(); save(); });
+  }
+  $('analysis-library-map').addEventListener('change', () => { libraryView.map = $('analysis-library-map').value; renderCatalog(); save(); });
+  for (const action of ['all', 'none', 'invert']) $(`demos-${action}`).addEventListener('click', () => changeSourceSelection(action));
   $('analysis-library-refresh').addEventListener('click', refreshLibrary);
-  $('analysis-library-all').addEventListener('click', () => { for (const demo of visibleCatalog()) if (catalogSelectable(demo)) catalogSelection.add(demo.id); renderCatalog(); });
-  $('analysis-library-clear').addEventListener('click', () => { catalogSelection.clear(); renderCatalog(); });
+  $('analysis-library-all').addEventListener('click', () => changeCatalogSelection('all'));
+  $('analysis-library-clear').addEventListener('click', () => changeCatalogSelection('none'));
+  $('analysis-library-invert').addEventListener('click', () => changeCatalogSelection('invert'));
   $('analysis-library-add').addEventListener('click', () => addCatalogDemos());
   $('cancel-upload').addEventListener('click', () => { state.cancelled = true; state.controller?.abort(); $('cancel-upload').disabled = true; $('upload-message').textContent = '正在停止等待…'; });
   $('sample-analysis').addEventListener('click', sample);

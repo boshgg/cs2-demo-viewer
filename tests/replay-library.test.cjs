@@ -11,6 +11,8 @@ const demo = (id, status = 'discovered', extra = {}) => ({ id, name: `${id}.dem`
 
 function page(initial = [], options = {}) {
   const elements = new Map(), requests = [], timers = new Map(), selected = [];
+  const stored = options.stored || new Map();
+  const storage = options.storage || { getItem: key => stored.get(key), setItem: (key, value) => stored.set(key, value) };
   let demos = initial, scanning = false, nextTimer = 0, refreshError = '', gate = null;
   class Element {
     constructor(tag) { this.tagName = tag; this.children = []; this.listeners = {}; this.dataset = {}; this.style = {}; this.classList = { toggle() {} }; this.value = ''; this.open = false; this.textContent = ''; }
@@ -40,7 +42,7 @@ function page(initial = [], options = {}) {
     }
     throw new Error(`Unexpected library request ${url}`);
   };
-  const injected = { document, fetch,
+  const injected = { document, fetch, storage,
     setTimeout: callback => { const id = ++nextTimer; timers.set(id, callback); return id; }, clearTimeout: id => timers.delete(id) };
   let api, location = { href: options.href || 'http://127.0.0.1:8771/' };
   if (options.application) {
@@ -55,8 +57,11 @@ function page(initial = [], options = {}) {
     }, { filename: 'app.js' });
   } else api = library.create({ ...injected, onSelect: item => selected.push(item), onOpen: options.onOpen });
   const text = element => element.textContent + element.children.map(text).join(' ');
-  return { api, get, requests, selected, timers, document, location,
-    rows: () => get('replay-library-list').children.filter(child => child.dataset.demoId),
+  const descend = element => element.children.flatMap(child => [child, ...descend(child)]);
+  return { api, get, requests, selected, timers, document, location, stored,
+    rows: () => descend(get('replay-library-list')).filter(child => child.dataset.demoId),
+    groups: () => get('replay-library-list').children.filter(child => child.dataset.folder),
+    change: (id, value) => { get(id).value = value; get(id).dispatch('change'); },
     text: () => text(get('replay-library-list')),
     search: query => { get('replay-library-search').value = query; get('replay-library-search').dispatch('input'); },
     setDemos: value => { demos = value; }, setScanning: value => { scanning = value; }, setRefreshError: value => { refreshError = value; }, gate: value => { gate = value; },
@@ -70,6 +75,89 @@ test('search covers relative directories, archive members, maps and multiple ter
   assert.equal(library.matches(item, '2026 maps/Grand'), true);
   assert.equal(library.matches(item, 'mirage'), false);
   assert.deepEqual(library.sourcePaths(item), ['2026/Final.zip › maps/Grand Final.DEM']);
+});
+
+test('folder keys use normalized physical parents, preserve nested directories and never use ZIP members', () => {
+  const item = demo('paths', 'ready', { sources: [
+    { path: 'root.dem' },
+    { path: '.\\练习\\上周\\match.dem', available: true },
+    { path: '练习//上周/archive.zip', member: 'different/map/deep/final.dem', kind: 'zip' },
+    { path: '练习/临时/../上周/other.dem' },
+    { path: './archive.zip', member: 'remote/folder/third.dem', kind: 'zip' },
+  ] });
+  assert.deepEqual(library.folderKeys(item), ['root', 'path:练习/上周']);
+  assert.equal(library.folderLabel('root'), 'demo 根目录');
+  assert.equal(library.folderLabel('path:练习/上周'), '练习/上周');
+  assert.equal(library.inFolder(item, 'path:different/map/deep'), false);
+  assert.equal(library.inFolder(item, 'path:练习/上周'), true);
+  assert.equal(library.inFolder(item, 'root'), true);
+  assert.equal(library.inFolder(item, 'all'), true);
+  assert.deepEqual(library.folderKeys(demo('named', 'ready', { sources: [{ path: 'root/a.dem' }, { path: 'unavailable/b.zip' }] })), ['path:root', 'path:unavailable']);
+});
+
+test('only available local sources determine folders while cache-only and invalid physical paths get a separate group', () => {
+  const unavailable = [undefined, null, {}, { sources: [] }, { sources: [{ path: 'old/match.dem', available: false }] },
+    { sources: [{ member: 'inside/final.dem', kind: 'zip' }] }, { sources: [{ path: '../outside.dem' }, { path: '/absolute/a.dem' }, { path: 'F:\\outside\\a.dem' }, { path: '\\\\server\\share\\a.dem' }] },
+    { sources: [null, { path: '' }, { path: '.' }, { path: 'folder/' }] }];
+  for (const item of unavailable) assert.deepEqual(library.folderKeys(item), ['unavailable']);
+  assert.equal(library.folderLabel('unavailable'), '仅缓存或源文件不可用');
+  assert.deepEqual(library.folderKeys({ available: true, sources: [{ path: 'old/a.dem', available: false }, { path: '新目录/a.zip', available: true }] }), ['path:新目录']);
+  assert.deepEqual(library.folderKeys({ available: false, sources: [{ path: 'current/a.dem' }] }), ['path:current'], 'per-source availability is authoritative, not the aggregate cache flag');
+});
+
+test('folder options and grouping count each ID once per physical folder and support multiple valid aliases', () => {
+  const same = demo('same', 'ready', { sources: [{ path: 'one.dem' }, { path: '赛事/one.dem' }, { path: '赛事/second.zip', member: 'one.dem' }, { path: '练习/one.zip', member: 'nested/one.dem' }] });
+  const other = demo('other', 'ready', { sources: [{ path: '赛事/other.dem' }] });
+  const cached = demo('cache', 'ready', { sources: [], available: true });
+  const input = [same, same, other, cached], before = JSON.stringify(input);
+  const options = library.folderOptions(input);
+  assert.equal(options[0].key, 'root'); assert.equal(options.at(-1).key, 'unavailable');
+  assert.deepEqual(Object.fromEntries(options.map(item => [item.key, item.count])), { root: 1, 'path:练习': 1, 'path:赛事': 2, unavailable: 1 });
+  const grouped = library.groupByFolder(input, 'folders');
+  assert.deepEqual(grouped.find(group => group.key === 'path:赛事').demos.map(demo => demo.id), ['same', 'other']);
+  assert.equal(grouped.filter(group => group.demos.some(demo => demo.id === 'same')).length, 3);
+  assert.deepEqual(library.groupByFolder(input, 'folders', 'path:练习').map(group => group.key), ['path:练习']);
+  assert.deepEqual(library.groupByFolder(input, 'folders', 'path:missing'), []);
+  assert.deepEqual(library.groupByFolder(input, 'all', 'path:练习').map(group => [group.key, group.label, group.demos.length]), [['all', '', 3]], 'flat view ignores the hidden folder preference');
+  assert.equal(JSON.stringify(input), before);
+  assert.deepEqual(library.folderOptions(null), []); assert.deepEqual(library.groupByFolder([], 'all'), [{ key: 'all', label: '', demos: [] }]);
+});
+
+test('playback folder controls filter and group the same catalog without parsing or changing the selected recording identity', async () => {
+  const same = demo('same', 'ready', { sources: [{ path: '训练/one.zip', member: 'maps/match.dem' }, { path: '比赛/one.dem' }] });
+  const p = page([same, demo('root', 'ready', { sources: [{ path: 'root.dem' }] })]);
+  p.api.show(); await settle(); assert.equal(p.rows().length, 2); assert.equal(p.get('replay-library-folder-field').hidden, true);
+  p.change('replay-library-mode', 'folders'); assert.equal(p.get('replay-library-folder-field').hidden, false);
+  assert.equal(p.groups().length, 3); assert.equal(p.rows().length, 3); assert.equal(p.get('replay-library-count').textContent, '2 / 2 场');
+  p.change('replay-library-folder', 'path:比赛'); assert.equal(p.groups().length, 1); assert.equal(p.rows()[0].dataset.demoId, 'same');
+  assert.match(p.rows()[0].children[0].children[1].textContent, /比赛\/one.dem/, 'a group row displays its own physical source first');
+  p.search('maps match'); assert.equal(p.rows().length, 1, 'member search still works without creating member folders');
+  p.change('replay-library-mode', 'all'); p.search(''); assert.equal(p.rows().length, 2); assert.equal(p.groups().length, 0);
+  p.change('replay-library-mode', 'folders'); assert.equal(p.get('replay-library-folder').value, 'path:比赛'); assert.equal(p.rows().length, 1);
+  assert.ok(p.requests.every(([, method]) => method === 'GET'));
+  p.rows()[0].children[1].click(); assert.equal(p.selected.length, 1); assert.equal(p.selected[0].id, 'same');
+});
+
+test('refresh exposes new physical folders and reclassifies unavailable aliases without duplicating a demo', async () => {
+  const p = page([demo('one', 'ready', { sources: [{ path: '旧文件夹/one.dem' }] })]); p.api.show(); await settle(); p.change('replay-library-mode', 'folders');
+  await p.api.refresh();
+  p.setDemos([demo('one', 'ready', { sources: [{ path: '旧文件夹/one.dem', available: false }, { path: '新文件夹/one.zip', member: 'inside/one.dem', available: true }] }), demo('second', 'ready', { sources: [{ path: '新文件夹/second.dem' }] })]);
+  p.setScanning(false); await p.tick();
+  assert.deepEqual(p.groups().map(group => group.dataset.folder), ['path:新文件夹']); assert.equal(p.rows().length, 2);
+  const keys = p.get('replay-library-folder').children.map(option => option.value); assert.deepEqual(keys, ['all', 'path:新文件夹']);
+  assert.equal(p.get('replay-library-count').textContent, '2 / 2 场'); assert.deepEqual(p.requests.filter(([, method]) => method !== 'GET'), [['/api/library/refresh', 'POST']]);
+});
+
+test('playback view preferences survive reopening independently of analysis selections and tolerate unavailable storage', async () => {
+  const stored = new Map([['cs2-analysis-session', '{"players":["keep"],"teams":["kept"]}'], ['cs2-statistics-multi-v1', '{"demoIds":["keep"]}']]);
+  const p = page([demo('one')], { stored }); p.api.show(); await settle(); p.change('replay-library-mode', 'folders'); p.change('replay-library-folder', 'path:season');
+  const restored = page([demo('one')], { stored }); restored.api.show(); await settle();
+  assert.equal(restored.get('replay-library-mode').value, 'folders'); assert.equal(restored.get('replay-library-folder').value, 'path:season'); assert.equal(restored.rows().length, 1);
+  assert.equal(stored.get('cs2-analysis-session'), '{"players":["keep"],"teams":["kept"]}'); assert.equal(stored.get('cs2-statistics-multi-v1'), '{"demoIds":["keep"]}');
+  assert.deepEqual([...stored.keys()].sort(), ['cs2-analysis-session', 'cs2-statistics-multi-v1', library.viewStorageKey].sort());
+  const blocked = page([demo('one')], { storage: { getItem() { throw new Error('disabled'); }, setItem() { throw new Error('disabled'); } } });
+  blocked.api.show(); await settle(); blocked.change('replay-library-mode', 'folders'); assert.equal(blocked.rows().length, 1);
+  const invalid = page([demo('one')], { stored: new Map([[library.viewStorageKey, '{broken json']]) }); invalid.api.show(); await settle(); assert.equal(invalid.get('replay-library-mode').value, 'all');
 });
 
 test('opening and searching the actual library dialog never starts parsing', async () => {

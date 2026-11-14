@@ -37,6 +37,7 @@ async function page(options = {}) {
   const elements = new Map(), requests = [], payloads = [], reparses = [], timers = new Map(), data = new Map((options.datasets || [fixture()]).map(item => [item.id, item]));
   const catalog = options.catalog || [...data.values()].map(item => ({ id: item.id, name: item.name, map: item.map, status: 'ready', sources: [{ path: `2026/nested/${item.name}`, kind: 'dem' }], sourceCount: 1, available: true }));
   const gates = new Map(), location = { href: options.href || 'http://127.0.0.1:9999/statistics.html' };
+  const preferences = new Map(options.folderSaved ? [['cs2-statistics-library-view-v1', JSON.stringify(options.folderSaved)]] : []);
   let refreshError = '', reparseError = '', catalogError = '', nextTimer = 0, statisticsError = options.statisticsError || '';
   for (const match of html.matchAll(/<([a-z][a-z0-9]*)\b([^>]*\bid="([^"]+)"[^>]*)>/g)) {
     const [, tag, attributes, id] = match, element = new Element(tag);
@@ -74,9 +75,9 @@ async function page(options = {}) {
     }
     throw new Error(`Unexpected API ${url}`);
   };
-  const app = statistics.create({ document: { getElementById: get, createElement: tag => new Element(tag) }, window: { ReplayLibrary: library, location, history: { state: null, replaceState: (_state, _title, url) => { location.href = String(url); } } }, fetch: fetcher, sleep: async () => {}, setTimeout: callback => { const id = ++nextTimer; timers.set(id, callback); return id; }, clearTimeout: id => timers.delete(id) });
+  const app = statistics.create({ document: { getElementById: get, createElement: tag => new Element(tag) }, window: { ReplayLibrary: library, location, history: { state: null, replaceState: (_state, _title, url) => { location.href = String(url); } } }, storage: { getItem: key => preferences.get(key), setItem: (key, value) => preferences.set(key, value) }, fetch: fetcher, sleep: async () => {}, setTimeout: callback => { const id = ++nextTimer; timers.set(id, callback); return id; }, clearTimeout: id => timers.delete(id) });
   await app.ready; await settle();
-  return { get, requests, payloads, reparses, timers, href: () => location.href,
+  return { get, requests, payloads, reparses, timers, href: () => location.href, folderSaved: () => JSON.parse(preferences.get('cs2-statistics-library-view-v1') || '{}'),
     async choose(id) { const button = get('stats-library-list').querySelectorAll('button').find(button => button.dataset.demoId === id); assert.ok(button); await button.click(); await settle(); },
     async change(id, value) { get(id).value = value; await get(id).dispatch('change'); await settle(); },
     async search(query) { get('stats-library-search').value = query; await get('stats-library-search').dispatch('input'); },
@@ -519,4 +520,43 @@ test('legacy or partial scoring metadata does not invent a multiplier or recalcu
   assert.equal(ui.get('stats-kill-rows').children[0].children[4].textContent, '+6', 'legacy provided score stays unchanged instead of multiplying by four');
   assert.doesNotMatch(content(ui.get('stats-kill-rows').children[1]), /未提供基础分或倍数明细/);
   assert.equal(ui.get('stats-pistol-mismatch-kills').textContent, '0');
+});
+
+function folderCatalog() {
+  return [
+    { id: 'a', name: 'a.dem', status: 'ready', available: true, map: 'de_mirage', sourceCount: 2, sources: [{ path: '赛事/决赛/a.dem', kind: 'dem', available: true }, { path: '备份/a.zip', member: '内部/demo/a.dem', kind: 'zip', available: true }] },
+    { id: 'b', name: 'b.dem', status: 'ready', available: true, map: 'de_nuke', sources: [{ path: 'b.zip', member: '赛季/正赛/b.dem', kind: 'zip', available: true }] },
+    { id: 'c', name: 'c.dem', status: 'ready', available: false, map: 'de_mirage', sources: [{ path: '已移动/c.dem', kind: 'dem', available: false }] },
+  ];
+}
+function visibleStatisticsIds(ui) { return ui.get('stats-library-list').querySelectorAll('button').map(button => button.dataset.demoId); }
+
+test('single statistics library groups physical folders, root ZIPs and unavailable caches while counting unique demos', async () => {
+  const ui = await page({ datasets: [fixture('a'), fixture('b'), fixture('c')], catalog: folderCatalog() });
+  assert.deepEqual(visibleStatisticsIds(ui), ['a', 'b', 'c']); assert.equal(ui.get('stats-library-folder-field').hidden, true);
+  await ui.change('stats-library-view', 'folders');
+  assert.deepEqual(ui.get('stats-library-list').children.map(group => group.dataset.folderKey).sort(), ['root', 'path:赛事/决赛', 'path:备份', 'unavailable'].sort());
+  assert.equal(visibleStatisticsIds(ui).filter(id => id === 'a').length, 2); assert.equal(ui.get('stats-library-count').textContent, '3 / 3 场');
+  assert.equal(ui.get('stats-library-folder').children.some(option => /内部|正赛/.test(option.value)), false);
+  await ui.change('stats-library-folder', 'root'); assert.deepEqual(visibleStatisticsIds(ui), ['b']);
+  await ui.change('stats-library-folder', 'unavailable'); assert.deepEqual(visibleStatisticsIds(ui), ['c']); await ui.choose('c'); assert.equal(ui.get('stats-total-score').textContent, '+4'); assert.equal(ui.payloads.length, 0);
+});
+
+test('single statistics folder and search changes preserve the open report and all score filters', async () => {
+  const ui = await page({ datasets: [fixture('a'), fixture('b'), fixture('c')], catalog: folderCatalog() }); await ui.choose('a'); await ui.change('stats-player', 'p1');
+  const requests = ui.requests.length;
+  await ui.change('stats-library-view', 'folders'); await ui.change('stats-library-folder', 'root'); await ui.search('a.dem'); assert.deepEqual(visibleStatisticsIds(ui), []);
+  assert.equal(ui.get('stats-player').value, 'p1'); assert.equal(ui.get('stats-total-score').textContent, '+9'); assert.equal(ui.get('stats-match-name').textContent, 'a.dem'); assert.equal(ui.requests.length, requests);
+  await ui.change('stats-library-view', 'all'); assert.deepEqual(visibleStatisticsIds(ui), ['a']); assert.equal(ui.get('stats-library-folder-field').hidden, true);
+  await ui.change('stats-library-view', 'folders'); assert.deepEqual(visibleStatisticsIds(ui), []); assert.equal(ui.get('stats-library-folder').value, 'root');
+  await ui.search(''); await ui.change('stats-library-folder', 'path:备份'); assert.deepEqual(visibleStatisticsIds(ui), ['a']); assert.match(content(ui.get('stats-library-list')), /备份\/a.zip/);
+});
+
+test('single statistics folder preferences survive reload and a missing saved folder stays empty without loading anything', async () => {
+  const options = { datasets: [fixture('a'), fixture('b'), fixture('c')], catalog: folderCatalog() }; const ui = await page(options);
+  await ui.change('stats-library-view', 'folders'); await ui.change('stats-library-folder', 'path:赛事/决赛'); const saved = ui.folderSaved();
+  const restored = await page({ ...options, folderSaved: saved }); assert.equal(restored.get('stats-library-view').value, 'folders'); assert.equal(restored.get('stats-library-folder').value, 'path:赛事/决赛'); assert.deepEqual(visibleStatisticsIds(restored), ['a']);
+  assert.equal(restored.requests.some(([url]) => url.endsWith('/statistics')), false);
+  const missing = await page({ ...options, folderSaved: { libraryView: 'folders', libraryFolder: 'path:暂时移走' } });
+  assert.deepEqual(visibleStatisticsIds(missing), []); assert.equal(missing.get('stats-library-folder').value, 'path:暂时移走'); assert.match(missing.get('stats-library-folder').children.at(-1).textContent, /当前无录像/);
 });

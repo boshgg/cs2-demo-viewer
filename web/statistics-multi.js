@@ -18,6 +18,7 @@
     let saved = {}; try { saved = JSON.parse(storage?.getItem(storageKey) || '{}') || {}; } catch { /* Ignore malformed preferences. */ }
     const strings = values => Array.isArray(values) ? values.filter(value => typeof value === 'string') : [];
     const state = { catalog: [], reports: new Map(), revisions: new Map(), demos: new Set(strings(saved.demoIds)), players: Array.isArray(saved.playerIds) ? new Set(strings(saved.playerIds)) : null, previous: new Set(strings(saved.analyzedIds)), map: typeof saved.map === 'string' ? saved.map : 'all', side: ['all', '2', '3'].includes(saved.side) ? saved.side : 'all', active: false, initialized: false, loading: false, scanning: false, refreshing: false, run: 0, controller: null, timer: null, catalogRequest: 0, catalogGeneration: 0, reportEpoch: 0, page: 0, failures: [], result: null };
+    state.libraryView = saved.libraryView === 'folders' ? 'folders' : 'all'; state.libraryFolder = typeof saved.libraryFolder === 'string' ? saved.libraryFolder : 'all';
     $('multi-library-search').value = typeof saved.libraryQuery === 'string' ? saved.libraryQuery : '';
     $('multi-player-search').value = typeof saved.playerQuery === 'string' ? saved.playerQuery : ''; $('multi-side').value = state.side;
     const isReady = demo => demo.status === 'ready';
@@ -25,8 +26,8 @@
     const mapOf = demo => state.reports.get(demo.id)?.map || demo.map || '';
     const inMap = demo => state.map === 'all' || !mapOf(demo) || mapOf(demo) === state.map;
     const scopedCatalog = () => state.catalog.filter(demo => state.demos.has(demo.id) && inMap(demo));
-    const visibleCatalog = () => state.catalog.filter(demo => inMap(demo) && library.matches({ ...demo, map: mapOf(demo) }, $('multi-library-search').value));
-    function save() { try { storage?.setItem(storageKey, JSON.stringify({ demoIds: [...state.demos], playerIds: state.players && [...state.players], map: state.map, side: state.side, libraryQuery: $('multi-library-search').value, playerQuery: $('multi-player-search').value, analyzedIds: [...new Set([...state.previous, ...state.reports.keys()])] })); } catch { /* Storage can be disabled. */ } }
+    const visibleCatalog = () => state.catalog.filter(demo => inMap(demo) && library.matches({ ...demo, map: mapOf(demo) }, $('multi-library-search').value) && (state.libraryView !== 'folders' || library.inFolder(demo, state.libraryFolder)));
+    function save() { try { storage?.setItem(storageKey, JSON.stringify({ demoIds: [...state.demos], playerIds: state.players && [...state.players], map: state.map, side: state.side, libraryView: state.libraryView, libraryFolder: state.libraryFolder, libraryQuery: $('multi-library-search').value, playerQuery: $('multi-player-search').value, analyzedIds: [...new Set([...state.previous, ...state.reports.keys()])] })); } catch { /* Storage can be disabled. */ } }
     function setError(message) { $('multi-error').hidden = !message; $('multi-error').textContent = message || ''; }
     function td(row, text, className) { const cell = node('td', text, className); row.append(cell); return cell; }
     function replay(demoId, time) { const url = new URL('/', win.location.href); url.searchParams.set('demo', demoId); if (finite(time)) url.searchParams.set('t', String(Math.max(0, time))); return url.pathname + url.search; }
@@ -43,16 +44,26 @@
     }
     function renderLibrary() {
       renderMaps(); const list = $('multi-demo-list'); list.replaceChildren();
+      const folders = library.folderOptions(state.catalog), folder = $('multi-library-folder'); folder.replaceChildren();
+      const addFolder = (value, label) => { const item = node('option', label); item.value = value; folder.append(item); }; addFolder('all', '全部文件夹');
+      for (const item of folders) addFolder(item.key, `${item.label} · ${item.count} 场`);
+      if (state.libraryFolder !== 'all' && !folders.some(item => item.key === state.libraryFolder)) addFolder(state.libraryFolder, `${library.folderLabel(state.libraryFolder)} · 当前无录像`);
+      folder.value = state.libraryFolder; $('multi-library-view').value = state.libraryView; $('multi-library-folder-field').hidden = state.libraryView !== 'folders'; $('multi-library-folder-note').hidden = state.libraryView !== 'folders';
       const visible = visibleCatalog(); $('multi-demo-count').textContent = `已选 ${state.demos.size} · 显示 ${visible.length} / ${state.catalog.length}`;
-      for (const demo of visible) {
-        const label = node('label', null, 'multi-demo-item'), check = node('input'); check.type = 'checkbox'; check.dataset.demoId = demo.id; check.checked = state.demos.has(demo.id); check.disabled = state.loading || !available(demo) && !check.checked; check.setAttribute('aria-label', `选择 ${demo.name || demo.id}`);
-        check.addEventListener('change', () => { if (check.checked) state.demos.add(demo.id); else state.demos.delete(demo.id); state.page = 0; save(); renderLibrary(); recompute(); });
-        const text = node('span'), title = node('strong', demo.name || demo.id); text.append(title);
-        text.append(node('small', `${mapOf(demo) || '地图待解析'} · ${state.reports.has(demo.id) ? '已载入统计' : isReady(demo) ? '已有解析缓存' : demo.status === 'error' ? '解析失败，可重试' : '选择后解析'}${!available(demo) ? ' · 源文件不可用' : ''}`));
-        const paths = library.sourcePaths(demo); if (paths.length) { const path = node('small', paths[0], 'multi-source-path'); path.title = paths.join('\n'); text.append(path); }
-        label.append(check, text); list.append(label);
+      for (const group of library.groupByFolder(visible, state.libraryView, state.libraryView === 'folders' ? state.libraryFolder : 'all')) {
+        let target = list;
+        if (state.libraryView === 'folders') { target = node('section', null, 'statistics-folder-group'); target.dataset.folderKey = group.key; target.append(node('h3', `${group.label} · ${group.demos.length} 场`)); list.append(target); }
+        for (const demo of group.demos) {
+          const label = node('label', null, 'multi-demo-item'), check = node('input'); check.type = 'checkbox'; check.dataset.demoId = demo.id; check.checked = state.demos.has(demo.id); check.disabled = state.loading || !available(demo) && !check.checked; check.setAttribute('aria-label', `选择 ${demo.name || demo.id}`);
+          check.addEventListener('change', () => { if (check.checked) state.demos.add(demo.id); else state.demos.delete(demo.id); state.page = 0; save(); renderLibrary(); recompute(); });
+          const text = node('span'), title = node('strong', demo.name || demo.id); text.append(title);
+          text.append(node('small', `${mapOf(demo) || '地图待解析'} · ${state.reports.has(demo.id) ? '已载入统计' : isReady(demo) ? '已有解析缓存' : demo.status === 'error' ? '解析失败，可重试' : '选择后解析'}${!available(demo) ? ' · 源文件不可用' : ''}`));
+          const paths = library.sourcePaths(demo), groupPaths = group.key === 'all' ? paths : library.sourcePaths({ sources: (demo.sources || []).filter(source => library.folderKeys({ sources: [source] }).includes(group.key)) });
+          if (paths.length) { const path = node('small', groupPaths[0] || paths[0], 'multi-source-path'); path.title = paths.join('\n'); text.append(path); }
+          label.append(check, text); target.append(label);
+        }
       }
-      if (!visible.length) list.append(node('p', state.catalog.length ? '当前地图或搜索没有匹配录像。地图未知的录像会在识别后归类。' : '将录像放入 demo 文件夹，再点击刷新。', 'micro'));
+      if (!visible.length) list.append(node('p', state.catalog.length ? '当前文件夹、地图或搜索没有匹配录像。其他录像的勾选仍保留。' : '将录像放入 demo 文件夹，再点击刷新。', 'micro'));
       for (const id of ['multi-demos-all', 'multi-demos-none', 'multi-demos-invert']) $(id).disabled = state.loading;
       $('multi-analyze').disabled = state.loading || !scopedCatalog().some(available);
       $('multi-refresh-library').disabled = state.loading || state.scanning || state.refreshing;
@@ -191,6 +202,7 @@
     $('multi-analyze').addEventListener('click', () => analyze()); $('multi-stop').addEventListener('click', stop);
     $('multi-refresh-library').addEventListener('click', async () => { if (state.loading || state.scanning || state.refreshing) return; state.refreshing = true; renderLibrary(); try { const result = await json(await fetcher('/api/library/refresh', { method: 'POST' })); state.scanning = result.scanning === true; await reloadLibrary(); } catch (error) { setError(`刷新失败：${error.message}。已有选择与结果保留。`); } finally { state.refreshing = false; renderLibrary(); pollCatalog(); } });
     $('multi-library-search').addEventListener('input', () => { save(); renderLibrary(); });
+    for (const [id, key] of [['multi-library-view', 'libraryView'], ['multi-library-folder', 'libraryFolder']]) $(id).addEventListener('change', () => { state[key] = $(id).value; save(); renderLibrary(); });
     $('multi-map').addEventListener('change', () => { state.map = $('multi-map').value; state.page = 0; save(); renderLibrary(); recompute(); });
     for (const [id, action] of [['multi-demos-all', 'all'], ['multi-demos-none', 'none'], ['multi-demos-invert', 'invert']]) $(id).addEventListener('click', () => { if (state.loading) return; for (const demo of visibleCatalog().filter(demo => available(demo) || state.demos.has(demo.id))) { if (action === 'all' || action === 'invert' && !state.demos.has(demo.id)) state.demos.add(demo.id); else state.demos.delete(demo.id); } state.page = 0; save(); renderLibrary(); recompute(); });
     $('multi-player-search').addEventListener('input', () => { save(); if (state.result) renderPlayers(state.result); });

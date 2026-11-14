@@ -5,6 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const analysis = require('../web/analysis-core.js');
 const heatmap = require('../web/heatmap.js');
+const replayLibrary = require('../web/replay-library.js');
 
 // Run the actual page script and its DOM events. Canvas records the actual
 // ImageData produced by the renderer; no private page state is exposed.
@@ -18,6 +19,14 @@ function dataset(id, map = 'de_mirage', x = 256, y = 768) {
     teams: [{ id: 'team-a', name: 'Team A', playerIds: ['76561198000000001'] }],
     series: [{ playerId: '76561198000000001', teamId: 'team-a', side: 3,
       cells: [[x, y, 0, 100, 5, 1, 10], [x + 128, y, 0, 1, 0, 0, 0]] }], utilities: [] };
+}
+
+function folderDemo(id, paths, map = 'de_mirage') {
+  return { ...dataset(id, map), sources: paths.map(source => typeof source === 'string' ? { path: source, kind: 'dem', available: true } : source), sourceCount: paths.length };
+}
+
+function viewIndependentSettings(settings) {
+  return Object.fromEntries(['ids', 'selectedDemos', 'selectedTeams', 'selectedPlayers', 'aliases', 'map', 'side', 'floor', 'utilityTime', 'query'].map(key => [key, settings[key]]));
 }
 
 async function page(datasets = [dataset('one')], pageOptions = {}) {
@@ -166,7 +175,7 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
     static revokeObjectURL() {}
   }
   const sandbox = {
-    window: { ReplayAnalysis: { ...analysis, aggregate: (...args) => { analysisCalls++; return analysis.aggregate(...args); } }, ReplayHeatmap: heatmap, history: { state: null, replaceState: (_state, _title, url) => { location.href = String(url); } } }, document: { getElementById: get, createElement: create, addEventListener: noop },
+    window: { ReplayAnalysis: { ...analysis, aggregate: (...args) => { analysisCalls++; return analysis.aggregate(...args); } }, ReplayHeatmap: heatmap, ReplayLibrary: replayLibrary, history: { state: null, replaceState: (_state, _title, url) => { location.href = String(url); } } }, document: { getElementById: get, createElement: create, addEventListener: noop },
     Option: function (text, value) { const option = new Element('option'); option.textContent = text; option.value = value; return option; },
     Image: class { decode() { return Promise.resolve(); } },
     ImageData: class { constructor(data, width, height) { this.data = data; this.width = width; this.height = height; } },
@@ -720,6 +729,114 @@ test('library search matches nested ZIP paths, keeps hidden choices, and batches
   assert.equal(ui.get('analysis-library-dialog').hidden, true);
   assert.equal(ui.get('demo-count').textContent, '本图 1 / 共 2 场'); assert.equal(deaths(ui), 1);
   await ui.change('analysis-map', 'de_nuke'); assert.deepEqual(visibleDemoNames(ui), [second.name]);
+});
+
+test('source folder classification uses catalog paths and leaves the heatmap and all selections unchanged', async () => {
+  const shared = folderDemo('shared', ['赛事/A/shared.dem', { path: '练习/B/bundle.zip', member: 'inside/match.dem', kind: 'zip', available: true }]);
+  const root = folderDemo('root', ['root.dem']), missing = folderDemo('cache-only', [{ path: 'gone/old.dem', available: false }]);
+  const other = folderDemo('other-map', ['赛事/A/other.dem'], 'de_nuke');
+  const ui = await page([shared, root, missing, other], { saved: { map: 'de_mirage', selectedDemos: ['shared', 'other-map'], selectedTeams: ['team-a'], selectedPlayers: ['76561198000000001'], side: '3' } });
+  const initial = viewIndependentSettings(ui.saved()), calls = ui.analysisCalls(), total = deaths(ui);
+  assert.ok(html.indexOf('src="/replay-library.js"') < html.indexOf('src="/analysis.js"'), 'shared helper loads before the page');
+  await ui.change('demo-view-mode', 'folders');
+  assert.deepEqual(visibleDemoNames(ui).sort(), ['shared.dem', 'shared.dem', 'root.dem', 'cache-only.dem'].sort());
+  assert.deepEqual(ui.get('demo-list').children.map(group => group.dataset.folderKey).sort(), ['root', 'path:赛事/A', 'path:练习/B', 'unavailable'].sort());
+  assert.equal(ui.get('demo-folder-field').hidden, false);
+  assert.ok(ui.get('demo-folder').children.every(option => !option.value.includes('inside')), 'ZIP member directories are not physical folder categories');
+  await ui.change('demo-folder', 'path:赛事/A'); assert.deepEqual(visibleDemoNames(ui), ['shared.dem']);
+  ui.get('demo-search').value = 'inside/match.dem'; await ui.get('demo-search').dispatch('input'); await settle();
+  assert.deepEqual(visibleDemoNames(ui), ['shared.dem'], 'search and physical folder are intersected on the same canonical record');
+  ui.get('demo-search').value = 'root.dem'; await ui.get('demo-search').dispatch('input'); await settle();
+  assert.deepEqual(visibleDemoNames(ui), []);
+  assert.deepEqual(viewIndependentSettings(ui.saved()), initial); assert.equal(ui.analysisCalls(), calls); assert.equal(deaths(ui), total);
+  await ui.change('demo-view-mode', 'all'); assert.deepEqual(visibleDemoNames(ui), ['root.dem']);
+  assert.equal(ui.get('demo-folder-field').hidden, true, 'flat mode ignores its remembered folder filter');
+  ui.get('demo-search').value = ''; await ui.get('demo-search').dispatch('input'); await settle();
+  assert.deepEqual(visibleDemoNames(ui), ['shared.dem', 'root.dem', 'cache-only.dem']);
+  assert.deepEqual(viewIndependentSettings(ui.saved()), initial);
+});
+
+test('source bulk selection acts once per visible ID and leaves hidden map, folder and roster choices intact', async () => {
+  const shared = folderDemo('shared', ['A/shared.dem', 'B/shared.dem']), one = folderDemo('one', ['B/one.dem']);
+  const hidden = folderDemo('hidden', ['A/hidden.dem'], 'de_nuke');
+  const ui = await page([shared, one, hidden], { saved: { map: 'de_mirage', selectedTeams: ['team-a'], selectedPlayers: ['76561198000000001'] } });
+  await ui.change('demo-view-mode', 'folders');
+  await clickAndSettle(ui, 'demos-invert');
+  assert.deepEqual(ui.saved().selectedDemos, ['hidden'], 'shared record is not toggled twice because it appears in two folders');
+  assert.ok(ui.get('demo-list').querySelectorAll('input').every(input => !input.checked));
+  assert.deepEqual(ui.saved().selectedTeams, ['team-a']); assert.deepEqual(ui.saved().selectedPlayers, ['76561198000000001']);
+  await clickAndSettle(ui, 'demos-all'); assert.deepEqual(ui.saved().selectedDemos.sort(), ['hidden', 'one', 'shared']); assert.equal(deaths(ui), 2);
+  await ui.change('demo-folder', 'path:A'); await clickAndSettle(ui, 'demos-invert');
+  assert.deepEqual(ui.saved().selectedDemos.sort(), ['hidden', 'one']); assert.equal(deaths(ui), 1);
+  await ui.change('demo-folder', 'all');
+  const sharedRows = ui.get('demo-list').querySelectorAll('input').filter(input => input.dataset.demoId === 'shared');
+  assert.equal(sharedRows.length, 2); assert.ok(sharedRows.every(input => !input.checked));
+  sharedRows[0].checked = true; await sharedRows[0].dispatch('change'); await settle();
+  assert.ok(ui.get('demo-list').querySelectorAll('input').filter(input => input.dataset.demoId === 'shared').every(input => input.checked), 'individual selection updates every visible copy');
+  ui.get('demo-search').value = 'one.dem'; await ui.get('demo-search').dispatch('input'); await settle();
+  await clickAndSettle(ui, 'demos-none'); assert.deepEqual(ui.saved().selectedDemos.sort(), ['hidden', 'shared']);
+  assert.equal(deaths(ui), 1); assert.equal(ui.parseBodies.length, 0);
+});
+
+test('library map, search and folder views intersect while selection and per-ID add requests remain unique', async () => {
+  const shared = { ...folderDemo('shared', ['A/shared.dem', 'B/shared.dem']), catalogMap: 'de_mirage' };
+  const second = { ...folderDemo('second', ['B/second.dem'], 'de_nuke'), catalogMap: 'de_nuke' };
+  const unknown = folderDemo('unknown', ['root.dem']);
+  const ui = await page([], { libraryDemos: [shared, second, unknown] });
+  await clickAndSettle(ui, 'open-analysis-library'); await ui.change('analysis-library-view-mode', 'folders');
+  assert.equal(ui.get('analysis-library-list').querySelectorAll('input').filter(input => input.dataset.demoId === 'shared').length, 2);
+  assert.match(ui.get('analysis-library-count').textContent, /显示 3 \/ 3 场/);
+  await ui.change('analysis-library-folder', 'path:A'); await clickAndSettle(ui, 'analysis-library-all');
+  assert.match(ui.get('analysis-library-count').textContent, /已选 1 场/);
+  await ui.change('analysis-library-folder', 'all'); await clickAndSettle(ui, 'analysis-library-invert');
+  assert.ok(ui.get('analysis-library-list').querySelectorAll('input').filter(input => input.dataset.demoId === 'shared').every(input => !input.checked));
+  assert.equal(catalogCheckbox(ui, 'second').checked, true); assert.equal(catalogCheckbox(ui, 'unknown').checked, true);
+  await ui.change('analysis-library-map', 'de_mirage'); await ui.change('analysis-library-folder', 'path:B');
+  await searchLibrary(ui, 'shared'); assert.equal(ui.get('analysis-library-list').querySelectorAll('input').length, 1);
+  await clickAndSettle(ui, 'analysis-library-all'); assert.match(ui.get('analysis-library-count').textContent, /已选 3 场/);
+  await clickAndSettle(ui, 'analysis-library-clear'); assert.match(ui.get('analysis-library-count').textContent, /已选 2 场/, 'clearing visible results retains choices hidden by map or folder');
+  await ui.change('analysis-library-map', 'unknown'); await ui.change('analysis-library-folder', 'all'); await searchLibrary(ui, '');
+  assert.equal(catalogCheckbox(ui, 'unknown').checked, true); await clickAndSettle(ui, 'analysis-library-clear');
+  await ui.change('analysis-library-map', 'de_mirage'); await clickAndSettle(ui, 'analysis-library-all');
+  await ui.change('analysis-library-view-mode', 'all'); await ui.change('analysis-library-map', 'all');
+  assert.equal(ui.get('analysis-library-list').querySelectorAll('input').length, 3, 'flat view shows each canonical recording once');
+  await clickAndSettle(ui, 'analysis-library-add');
+  assert.deepEqual(ui.parseBodies.map(([id]) => id).sort(), ['second', 'shared']);
+  assert.equal(ui.requests.some(([url]) => url.includes('/unknown/')), false);
+});
+
+test('folder view preferences restore independently without changing existing analysis groups or selections', async () => {
+  const first = folderDemo('first', ['中文/比赛/first.dem']), second = folderDemo('second', ['训练/second.dem'], 'de_nuke');
+  const ui = await page([first, second], { saved: { map: 'de_mirage', selectedDemos: ['first', 'second'], selectedTeams: ['team-a'], selectedPlayers: ['76561198000000001'], aliases: { saved: 'My squad' }, side: '3' } });
+  const initial = viewIndependentSettings(ui.saved());
+  await ui.change('demo-view-mode', 'folders'); await ui.change('demo-folder', 'path:中文/比赛');
+  ui.get('demo-search').value = 'first'; await ui.get('demo-search').dispatch('input'); await settle();
+  await ui.change('analysis-library-view-mode', 'folders'); await ui.change('analysis-library-folder', 'path:训练'); await ui.change('analysis-library-map', 'de_nuke'); await searchLibrary(ui, 'second');
+  const saved = ui.saved(), restored = await page([first, second], { saved });
+  assert.deepEqual(restored.saved().sourceView, { mode: 'folders', folder: 'path:中文/比赛', query: 'first' });
+  assert.deepEqual(restored.saved().libraryView, { mode: 'folders', folder: 'path:训练', query: 'second', map: 'de_nuke' });
+  assert.deepEqual(viewIndependentSettings(restored.saved()), initial);
+  assert.deepEqual(visibleDemoNames(restored), ['first.dem']);
+  assert.deepEqual(restored.get('analysis-library-list').querySelectorAll('input').map(input => input.dataset.demoId), ['second']);
+  assert.equal(restored.parseBodies.length, 0);
+});
+
+test('refresh updates folder metadata for cached IDs without reparsing or losing hidden selections', async () => {
+  const original = folderDemo('same-id', ['old/sub/match.zip']);
+  const ui = await page([original], { saved: { selectedDemos: ['same-id'], selectedTeams: ['team-a'], selectedPlayers: ['76561198000000001'], aliases: { saved: 'Saved group' } } });
+  await ui.change('demo-view-mode', 'folders'); await ui.change('demo-folder', 'path:old/sub');
+  await clickAndSettle(ui, 'open-analysis-library'); await ui.change('analysis-library-view-mode', 'folders'); await ui.change('analysis-library-folder', 'path:old/sub'); await clickAndSettle(ui, 'analysis-library-all');
+  const prior = viewIndependentSettings(ui.saved()), count = deaths(ui), summaryReads = ui.requests.filter(([url]) => url === '/api/demos/same-id/analysis').length;
+  ui.setJob(folderDemo('same-id', [{ path: 'new/中文/match.zip', member: 'not/a/folder/demo.dem', kind: 'zip', available: true }]));
+  await clickAndSettle(ui, 'refresh-library');
+  assert.deepEqual(visibleDemoNames(ui), []); assert.equal(ui.get('analysis-library-list').querySelectorAll('input').length, 0);
+  assert.ok(ui.get('demo-folder').children.some(option => option.value === 'path:new/中文'));
+  assert.ok(ui.get('demo-folder').children.some(option => option.value === 'path:old/sub' && option.textContent.includes('暂无录像')));
+  assert.match(ui.get('analysis-library-count').textContent, /已选 1 场/);
+  assert.equal(deaths(ui), count); assert.deepEqual(viewIndependentSettings(ui.saved()), prior);
+  await ui.change('demo-folder', 'path:new/中文'); await ui.change('analysis-library-folder', 'path:new/中文');
+  assert.equal(demoCheckbox(ui, original.name).checked, true); assert.equal(catalogCheckbox(ui, original.id).checked, true);
+  assert.equal(ui.requests.filter(([url]) => url === '/api/demos/same-id/analysis').length, summaryReads); assert.equal(ui.parseBodies.length, 0);
 });
 
 test('ready playback caches are absent from analysis until chosen and are promoted without queuing a reparse', async () => {

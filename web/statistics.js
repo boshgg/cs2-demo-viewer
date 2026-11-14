@@ -91,7 +91,10 @@
     const doc = options.document || document, fetcher = options.fetch || fetch, win = options.window || window;
     const $ = id => doc.getElementById(id), make = (tag, text, className) => { const element = doc.createElement(tag); if (text != null) element.textContent = String(text); if (className) element.className = className; return element; };
     const schedule = options.setTimeout || setTimeout, unschedule = options.clearTimeout || clearTimeout;
+    const folderStorage = options.storage || win.localStorage, folderStorageKey = 'cs2-statistics-library-view-v1';
+    let folderPrefs = {}; try { folderPrefs = JSON.parse(folderStorage?.getItem(folderStorageKey) || '{}') || {}; } catch { /* Ignore invalid local view preferences. */ }
     const state = { catalog: [], data: null, selected: '', loading: '', request: 0, controller: null, scanning: false, refreshing: false, catalogRequest: 0, catalogTimer: null, page: 0, detailRound: '', loadedRevision: '', failedRevision: '', reparseSubmitting: false, reparseAttempted: false, reparseTracked: new Map(), reparseSkipped: [], reparseError: '' };
+    state.libraryView = folderPrefs.libraryView === 'folders' ? 'folders' : 'all'; state.libraryFolder = typeof folderPrefs.libraryFolder === 'string' ? folderPrefs.libraryFolder : 'all';
     const money = value => isNumber(value) ? `$${value.toLocaleString('en-US')}` : '未知';
     const format = value => isNumber(value) ? value.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) : '—';
     const signed = value => isNumber(value) ? `${value > 0 ? '+' : ''}${format(value)}` : '—';
@@ -135,22 +138,31 @@
     }
     function renderLibrary() {
       const query = $('stats-library-search').value;
-      const shown = state.catalog.filter(demo => win.ReplayLibrary.matches(demo, query));
+      const folders = win.ReplayLibrary.folderOptions(state.catalog), folder = $('stats-library-folder'); folder.replaceChildren(); option(folder, 'all', '全部文件夹');
+      for (const item of folders) option(folder, item.key, `${item.label} · ${item.count} 场`);
+      if (state.libraryFolder !== 'all' && !folders.some(item => item.key === state.libraryFolder)) option(folder, state.libraryFolder, `${win.ReplayLibrary.folderLabel(state.libraryFolder)} · 当前无录像`);
+      folder.value = state.libraryFolder; $('stats-library-view').value = state.libraryView; $('stats-library-folder-field').hidden = state.libraryView !== 'folders'; $('stats-library-folder-note').hidden = state.libraryView !== 'folders';
+      const shown = state.catalog.filter(demo => win.ReplayLibrary.matches(demo, query) && (state.libraryView !== 'folders' || win.ReplayLibrary.inFolder(demo, state.libraryFolder)));
       $('stats-library-count').textContent = `${shown.length} / ${state.catalog.length} 场`;
       $('stats-refresh-library').disabled = state.refreshing || state.scanning;
       const list = $('stats-library-list'); list.replaceChildren();
-      for (const demo of shown) {
-        const row = make('article', null, `library-item${state.selected === demo.id || state.loading === demo.id ? ' is-selected' : ''}`); row.dataset.demoId = demo.id;
-        row.append(make('strong', demo.name || demo.id));
-        const paths = win.ReplayLibrary.sourcePaths(demo), detail = make('small', `${demo.map || '地图待解析'}${demo.sourceCount > 1 ? ` · ${demo.sourceCount} 个来源已去重` : ''}\n${paths[0] || '本机缓存'}`); detail.title = paths.join('\n'); row.append(detail);
-        if (demo.reparse?.status) {
-          const job = demo.reparse, text = job.status === 'error' ? `重新解析失败，旧缓存保留 · ${job.error || job.message || '请恢复源文件后重试'}` : job.status === 'ready' ? '已完成重新解析' : `${job.status === 'queued' ? '等待重新解析' : '正在重新解析'}${isNumber(job.progress) ? ` · ${Math.round(job.progress * 100)}%` : ''} · 仍可查看旧统计`;
-          row.append(make('small', text, job.status === 'error' ? 'reparse-error' : 'reparse-label'));
+      for (const group of win.ReplayLibrary.groupByFolder(shown, state.libraryView, state.libraryView === 'folders' ? state.libraryFolder : 'all')) {
+        let target = list;
+        if (state.libraryView === 'folders') { target = make('section', null, 'statistics-folder-group'); target.dataset.folderKey = group.key; target.append(make('h3', `${group.label} · ${group.demos.length} 场`)); list.append(target); }
+        for (const demo of group.demos) {
+          const row = make('article', null, `library-item${state.selected === demo.id || state.loading === demo.id ? ' is-selected' : ''}`); row.dataset.demoId = demo.id;
+          row.append(make('strong', demo.name || demo.id));
+          const paths = win.ReplayLibrary.sourcePaths(demo), groupPaths = group.key === 'all' ? paths : win.ReplayLibrary.sourcePaths({ sources: (demo.sources || []).filter(source => win.ReplayLibrary.folderKeys({ sources: [source] }).includes(group.key)) });
+          const detail = make('small', `${demo.map || '地图待解析'}${demo.sourceCount > 1 ? ` · ${demo.sourceCount} 个来源已去重` : ''}\n${groupPaths[0] || paths[0] || '本机缓存'}`); detail.title = paths.join('\n'); row.append(detail);
+          if (demo.reparse?.status) {
+            const job = demo.reparse, text = job.status === 'error' ? `重新解析失败，旧缓存保留 · ${job.error || job.message || '请恢复源文件后重试'}` : job.status === 'ready' ? '已完成重新解析' : `${job.status === 'queued' ? '等待重新解析' : '正在重新解析'}${isNumber(job.progress) ? ` · ${Math.round(job.progress * 100)}%` : ''} · 仍可查看旧统计`;
+            row.append(make('small', text, job.status === 'error' ? 'reparse-error' : 'reparse-label'));
+          }
+          const button = make('button', state.loading === demo.id ? '正在读取…' : state.selected === demo.id ? '重新读取统计' : demo.status === 'ready' ? '查看数据分析' : '解析并查看数据', 'button secondary'); button.type = 'button'; button.dataset.demoId = demo.id;
+          button.disabled = state.loading === demo.id || (demo.available === false && !['ready', 'queued', 'parsing'].includes(demo.status));
+          if (button.disabled && state.loading !== demo.id) button.textContent = '源文件不可用';
+          button.addEventListener('click', () => selectDemo(demo)); row.append(button); target.append(row);
         }
-        const button = make('button', state.loading === demo.id ? '正在读取…' : state.selected === demo.id ? '重新读取统计' : demo.status === 'ready' ? '查看数据分析' : '解析并查看数据', 'button secondary'); button.type = 'button'; button.dataset.demoId = demo.id;
-        button.disabled = state.loading === demo.id || (demo.available === false && !['ready', 'queued', 'parsing'].includes(demo.status));
-        if (button.disabled && state.loading !== demo.id) button.textContent = '源文件不可用';
-        button.addEventListener('click', () => selectDemo(demo)); row.append(button); list.append(row);
       }
       if (!shown.length) list.append(make('p', state.catalog.length ? '没有匹配的录像。' : '将 .dem 或 .zip 放入 demo 文件夹或其子文件夹，再点击刷新。', 'micro'));
       renderReparse();
@@ -164,7 +176,7 @@
       try {
         const [catalog, info] = await Promise.all([json(await fetcher('/api/library/demos', { cache: 'no-store' })), json(await fetcher('/api/library', { cache: 'no-store' }))]);
         if (request !== state.catalogRequest) return;
-        state.catalog = Array.isArray(catalog.demos) ? catalog.demos : []; state.scanning = catalog.scanning === true || info.scanning === true;
+        state.catalog = [...new Map((Array.isArray(catalog.demos) ? catalog.demos : []).map(demo => [demo.id, demo])).values()]; state.scanning = catalog.scanning === true || info.scanning === true;
         for (const demo of state.catalog) if (state.reparseTracked.has(demo.id) && demo.reparse) state.reparseTracked.set(demo.id, demo);
         $('stats-library-directory').textContent = info.directory || '本地 Demo 文件夹';
         const errors = (info.result?.errors || []).map(error => typeof error === 'string' ? error : error.message || error.error || '文件读取失败');
@@ -348,6 +360,7 @@
       if (!kills.length) emptyRow(body, 7);
     }
     $('stats-library-search').addEventListener('input', renderLibrary);
+    for (const [id, key] of [['stats-library-view', 'libraryView'], ['stats-library-folder', 'libraryFolder']]) $(id).addEventListener('change', () => { state[key] = $(id).value; try { folderStorage?.setItem(folderStorageKey, JSON.stringify({ libraryView: state.libraryView, libraryFolder: state.libraryFolder })); } catch { /* Storage can be disabled. */ } renderLibrary(); });
     $('stats-refresh-library').addEventListener('click', refreshLibrary);
     $('stats-reparse-current').addEventListener('click', () => requestReparse([state.selected]));
     $('stats-reparse-all').addEventListener('click', () => requestReparse(state.catalog.filter(demo => demo.status === 'ready').map(demo => demo.id)));
