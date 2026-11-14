@@ -13,14 +13,14 @@ func TestStatisticsPistolMismatchMatchesActualGunClasses(t *testing.T) {
 		score          int
 		excluded       bool
 	}{
-		{"MP9", "Glock-18", true, -1, false},
-		{"MP5-SD", "USP-S", true, -1, false},
-		{"AK-47", "P250", true, -4, false},
-		{"M4A1-S", "Desert Eagle", true, -4, false},
-		{"Nova", "Glock-18", true, -4, false},
-		{"XM1014", "USP-S", true, -4, false},
-		{"M249", "Five-SeveN", true, -4, false},
-		{"Negev", "Dual Berettas", true, -4, false},
+		{"MP9", "Glock-18", true, 0, false},
+		{"MP5-SD", "USP-S", true, 0, false},
+		{"AK-47", "P250", true, 0, false},
+		{"M4A1-S", "Desert Eagle", true, 0, false},
+		{"Nova", "Glock-18", true, 0, false},
+		{"XM1014", "USP-S", true, 0, false},
+		{"M249", "Five-SeveN", true, 0, false},
+		{"Negev", "Dual Berettas", true, 0, false},
 		{"AWP", "Glock-18", false, -6, false},
 		{"SSG 08", "P250", false, -6, false},
 		{"SCAR-20", "Glock-18", false, -6, false},
@@ -53,7 +53,7 @@ func TestStatisticsPistolMismatchMatchesActualGunClasses(t *testing.T) {
 					t.Fatal("excluded weapon gained a score")
 				}
 			} else if kill.Score == nil || *kill.Score != test.score || result.Summary.Score != test.score {
-				t.Fatal("the new count changed the existing signed kill value")
+				t.Fatal("final value does not honor the zero-value pistol-mismatch rule")
 			}
 			after, _ := json.Marshal(d)
 			if !reflect.DeepEqual(before, after) {
@@ -140,7 +140,7 @@ func TestStatisticsPistolMismatchAggregatesByPlayerRoundSideHalfAndTeam(t *testi
 	dontCount.KillerID, dontCount.VictimID = "s3-p0", "s2-p1"
 	d.Events = []Event{a, b, c, dontCount}
 	result := BuildStatistics(d)
-	if result.RuleVersion != StatisticsVersion || result.Summary.PistolMismatchKills != 3 || result.Summary.Score != -15 {
+	if result.RuleVersion != StatisticsVersion || result.Summary.PistolMismatchKills != 3 || result.Summary.Score != -6 {
 		t.Fatalf("total or rule version wrong: %+v", result.Summary)
 	}
 	assertPlayers := func(label string, players []StatisticsPlayer, want map[string]int) {

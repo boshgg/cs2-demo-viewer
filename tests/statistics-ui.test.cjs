@@ -424,6 +424,32 @@ function mismatchFixture() {
 function mismatchCellValue(row) { return Number(row.children.find(cell => cell.dataset.metric === 'pistol-mismatch')?.textContent); }
 function highlightedKills(ui) { return ui.get('stats-kill-rows').children.filter(row => row.dataset.pistolMismatch === 'true'); }
 
+test('zero-adjusted pistol mismatches keep counts and gold highlights while showing the true original calculation and final zero', async () => {
+  const data = mismatchFixture(); data.ruleVersion = '4';
+  for (const kill of data.kills) if (statistics.isPistolMismatch(kill)) Object.assign(kill, { baseScore: kill.victimValue - kill.killerValue, scoreMultiplier: 1, score: 0, scoreAdjustment: 'pistol_mismatch_zero', scoreReason: '特了几个：净值记 0；死亡由死亡影响模块计算。' });
+  const before = structuredClone(data), ui = await page({ datasets: [data] }); await ui.choose('match');
+  assert.equal(ui.get('stats-total-score').textContent, '-2'); assert.equal(ui.get('stats-pistol-mismatch-kills').textContent, '4');
+  const highlighted = highlightedKills(ui); assert.equal(highlighted.length, 4); assert.deepEqual(highlighted.map(row => row.children[4].textContent), ['0', '0', '0', '0']);
+  for (const row of highlighted) { assert.match(content(row), /特殊规则归零 → 最终 0/); assert.match(content(row), /死亡由死亡影响模块计算/); assert.equal(row.children[5].dataset.scoreAdjustment, 'pistol_mismatch_zero'); assert.doesNotMatch(content(row), /基础 -[14] × 1 = 0/); }
+  assert.match(content(highlighted[0]), /基础 -4 × 1 = -4 →/); assert.match(content(highlighted[1]), /基础 -1 × 1 = -1 →/);
+  const sniper = ui.get('stats-kill-rows').children.find(row => row.dataset.killIndex === '104'); assert.equal(sniper.children[4].textContent, '-6'); assert.notEqual(sniper.dataset.pistolMismatch, 'true');
+  await ui.change('stats-team', 'alpha'); await ui.change('stats-player', 'p1'); await ui.change('stats-side', '2'); await ui.change('stats-half', 'second'); await ui.change('stats-round', '13');
+  assert.equal(ui.get('stats-pistol-mismatch-kills').textContent, '1'); assert.equal(ui.get('stats-total-score').textContent, '+3'); assert.equal(highlightedKills(ui)[0].children[4].textContent, '0');
+  assert.deepEqual(data, before, 'the UI must not rewrite backend scores or death evidence');
+});
+
+test('legacy and incomplete adjustment evidence never changes backend final values or claims a false equation', async () => {
+  const data = weightedFixture(), legacy = data.kills[6];
+  data.kills = [legacy, { ...legacy, index: 20, score: 0 }, { ...legacy, index: 21, score: 0, baseScore: null, scoreAdjustment: 'pistol_mismatch_zero' }, { ...legacy, index: 22, scoreAdjustment: 'pistol_mismatch_zero' }];
+  const ui = await page({ datasets: [data] }); await ui.choose('match'); const rows = ui.get('stats-kill-rows').children;
+  assert.equal(ui.get('stats-total-score').textContent, '-8'); assert.equal(ui.get('stats-pistol-mismatch-kills').textContent, '4');
+  assert.equal(rows[0].children[4].textContent, '-4'); assert.equal(formulaTexts(rows[0])[0], '基础 -4 × 1 = -4'); assert.doesNotMatch(content(rows[0]), /特殊规则归零/);
+  assert.equal(rows[1].children[4].textContent, '0'); assert.match(content(rows[1]), /基础 -4 × 1 = -4；后端最终净值 0（调整依据未提供）/); assert.doesNotMatch(content(rows[1]), /特殊规则归零/);
+  assert.match(content(rows[2]), /未提供基础分或倍数明细/); assert.match(content(rows[2]), /净值记 0/); assert.deepEqual(formulaTexts(rows[2]), []);
+  assert.equal(rows[3].children[4].textContent, '-4'); assert.doesNotMatch(content(rows[3]), /特殊规则归零/, 'a marker cannot override a contradictory final score');
+  for (const row of rows) assert.doesNotMatch(content(row), /基础 -4 × 1 = 0/);
+});
+
 test('pistol mismatch requires a valid SMG or five-point gun kill against an active pistol and ignores flags or negative score alone', () => {
   const base = { killerValue: 5, victimValue: 1, score: -4, excludedReason: '' };
   for (const killerValue of [2, 5]) assert.equal(statistics.isPistolMismatch({ ...base, killerValue, pistolMismatch: false }), true);

@@ -9,7 +9,7 @@ import (
 func assertWeightedKill(t *testing.T, kill KillScore, base, multiplier, score int) {
 	t.Helper()
 	if kill.ExcludedReason != "" || kill.BaseScore == nil || *kill.BaseScore != base || kill.ScoreMultiplier == nil || *kill.ScoreMultiplier != multiplier || kill.Score == nil || *kill.Score != score {
-		t.Fatalf("wrong weighted score: base=%v multiplier=%v score=%v; want %d × %d = %d, exclusion=%q", kill.BaseScore, kill.ScoreMultiplier, kill.Score, base, multiplier, score, kill.ExcludedReason)
+		t.Fatalf("wrong weighted score: base=%v multiplier=%v score=%v; want base %d, multiplier %d, final %d, exclusion=%q", kill.BaseScore, kill.ScoreMultiplier, kill.Score, base, multiplier, score, kill.ExcludedReason)
 	}
 	body, err := json.Marshal(kill)
 	if err != nil {
@@ -20,6 +20,13 @@ func assertWeightedKill(t *testing.T, kill KillScore, base, multiplier, score in
 	if payload["baseScore"] != float64(base) || payload["scoreMultiplier"] != float64(multiplier) || payload["score"] != float64(score) {
 		t.Fatal("weighted score provenance missing from JSON")
 	}
+	if score != base*multiplier {
+		if kill.ScoreAdjustment != "pistol_mismatch_zero" || kill.ScoreReason == "" || !kill.PistolMismatch {
+			t.Fatal("final exception has no explicit audit explanation")
+		}
+	} else if kill.ScoreAdjustment != "" || kill.ScoreReason != "" {
+		t.Fatal("ordinary matchup incorrectly marked as adjusted")
+	}
 }
 
 func TestStatisticsWeightedScoreExplicitFourByFourMatrix(t *testing.T) {
@@ -27,7 +34,7 @@ func TestStatisticsWeightedScoreExplicitFourByFourMatrix(t *testing.T) {
 	// Independent literal oracle: rows are killer tier, columns victim tier.
 	bases := [4][4]int{{0, 1, 4, 6}, {-1, 0, 3, 5}, {-4, -3, 0, 2}, {-6, -5, -2, 0}}
 	multipliers := [4][4]int{{1, 2, 3, 4}, {1, 1, 2, 3}, {1, 1, 1, 2}, {1, 1, 1, 1}}
-	scores := [4][4]int{{0, 2, 12, 24}, {-1, 0, 6, 15}, {-4, -3, 0, 4}, {-6, -5, -2, 0}}
+	scores := [4][4]int{{0, 2, 12, 24}, {0, 0, 6, 15}, {0, -3, 0, 4}, {-6, -5, -2, 0}}
 	for attacker, weapon := range guns {
 		for victim, held := range guns {
 			t.Run(weapon+"_vs_"+held, func(t *testing.T) {
@@ -114,7 +121,7 @@ func TestStatisticsWeightedScoresAndMeansReachAllAggregates(t *testing.T) {
 		{"AK-47", "AWP", "s2-p0", "s3-p0", 13, 3, 150},      // +4
 		{"Glock-18", "AK-47", "s3-p1", "s2-p1", 13, 2, 151}, // +12
 		{"AK-47", "M4A4", "s3-p0", "s2-p0", 13, 2, 152},     // 0
-		{"MP9", "Glock-18", "s2-p1", "s3-p1", 13, 3, 153},   // -1
+		{"MP9", "Glock-18", "s2-p1", "s3-p1", 13, 3, 153},   // mismatch: base -1, final 0
 	} {
 		e := statsKill(row.weapon, row.victimWeapon)
 		e.KillerID, e.VictimID, e.Round, e.KillerTeam, e.VictimTeam = row.killer, row.victim, row.round, row.side, 5-row.side
@@ -122,18 +129,18 @@ func TestStatisticsWeightedScoresAndMeansReachAllAggregates(t *testing.T) {
 		d.Events = append(d.Events, e)
 	}
 	result := BuildStatistics(d)
-	assertWeightedSummary(t, "total", result.Summary, 39, 7)
+	assertWeightedSummary(t, "total", result.Summary, 40, 7)
 	if result.Summary.ExcludedKills != 1 || result.Summary.PistolMismatchKills != 1 {
 		t.Fatal("excluded/mismatch counts changed under weighted scoring")
 	}
-	assertWeightedPlayers(t, "total", result.Players, map[string][2]int{"s2-p0": {28, 2}, "s2-p1": {5, 2}, "s3-p1": {6, 2}, "s3-p0": {0, 1}})
+	assertWeightedPlayers(t, "total", result.Players, map[string][2]int{"s2-p0": {28, 2}, "s2-p1": {6, 2}, "s3-p1": {6, 2}, "s3-p0": {0, 1}})
 	for _, round := range result.Rounds {
 		if round.Number == 2 {
 			assertWeightedSummary(t, "round2", round.Summary, 24, 3)
 			assertWeightedPlayers(t, "round2", round.Players, map[string][2]int{"s2-p0": {24, 1}, "s2-p1": {6, 1}, "s3-p1": {-6, 1}})
 		} else {
-			assertWeightedSummary(t, "round13", round.Summary, 15, 4)
-			assertWeightedPlayers(t, "round13", round.Players, map[string][2]int{"s2-p0": {4, 1}, "s2-p1": {-1, 1}, "s3-p1": {12, 1}, "s3-p0": {0, 1}})
+			assertWeightedSummary(t, "round13", round.Summary, 16, 4)
+			assertWeightedPlayers(t, "round13", round.Players, map[string][2]int{"s2-p0": {4, 1}, "s2-p1": {0, 1}, "s3-p1": {12, 1}, "s3-p0": {0, 1}})
 		}
 	}
 	for _, half := range result.Halves {
@@ -141,8 +148,8 @@ func TestStatisticsWeightedScoresAndMeansReachAllAggregates(t *testing.T) {
 			assertWeightedSummary(t, "half1", half.Summary, 24, 3)
 			assertWeightedPlayers(t, "half1", half.Players, map[string][2]int{"s2-p0": {24, 1}, "s2-p1": {6, 1}, "s3-p1": {-6, 1}})
 		} else {
-			assertWeightedSummary(t, "half2", half.Summary, 15, 4)
-			assertWeightedPlayers(t, "half2", half.Players, map[string][2]int{"s2-p0": {4, 1}, "s2-p1": {-1, 1}, "s3-p1": {12, 1}, "s3-p0": {0, 1}})
+			assertWeightedSummary(t, "half2", half.Summary, 16, 4)
+			assertWeightedPlayers(t, "half2", half.Players, map[string][2]int{"s2-p0": {4, 1}, "s2-p1": {0, 1}, "s3-p1": {12, 1}, "s3-p0": {0, 1}})
 		}
 	}
 	for _, side := range result.Sides {
@@ -150,15 +157,15 @@ func TestStatisticsWeightedScoresAndMeansReachAllAggregates(t *testing.T) {
 			assertWeightedSummary(t, "T", side.Summary, 42, 4)
 			assertWeightedPlayers(t, "T", side.Players, map[string][2]int{"s2-p0": {24, 1}, "s2-p1": {6, 1}, "s3-p1": {12, 1}, "s3-p0": {0, 1}})
 		} else {
-			assertWeightedSummary(t, "CT", side.Summary, -3, 3)
-			assertWeightedPlayers(t, "CT", side.Players, map[string][2]int{"s2-p0": {4, 1}, "s2-p1": {-1, 1}, "s3-p1": {-6, 1}})
+			assertWeightedSummary(t, "CT", side.Summary, -2, 3)
+			assertWeightedPlayers(t, "CT", side.Players, map[string][2]int{"s2-p0": {4, 1}, "s2-p1": {0, 1}, "s3-p1": {-6, 1}})
 		}
 	}
 	firstTeam := result.Rounds[0].T.TeamKey
 	for _, team := range result.Teams {
 		if team.TeamKey == firstTeam {
-			assertWeightedSummary(t, "first team", team.Summary, 33, 4)
-			assertWeightedPlayers(t, "first team", team.Players, map[string][2]int{"s2-p0": {28, 2}, "s2-p1": {5, 2}})
+			assertWeightedSummary(t, "first team", team.Summary, 34, 4)
+			assertWeightedPlayers(t, "first team", team.Players, map[string][2]int{"s2-p0": {28, 2}, "s2-p1": {6, 2}})
 		} else {
 			assertWeightedSummary(t, "second team", team.Summary, 6, 3)
 			assertWeightedPlayers(t, "second team", team.Players, map[string][2]int{"s3-p1": {6, 2}, "s3-p0": {0, 1}})
@@ -195,8 +202,8 @@ func TestStatisticsWeightedLegacyCacheDerivesWithoutReparsing(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertWeightedKill(t, result.Kills[0], 6, 4, 24)
-	assertWeightedKill(t, result.Kills[1], -4, 1, -4)
-	assertWeightedSummary(t, "legacy", result.Summary, 20, 2)
+	assertWeightedKill(t, result.Kills[1], -4, 1, 0)
+	assertWeightedSummary(t, "legacy", result.Summary, 24, 2)
 	if result.RuleVersion != StatisticsVersion || !result.Kills[0].Approx || !result.Kills[1].Approx || !result.Kills[1].PistolMismatch || j.Revision != id || len(a.pending) != 0 || fileHash(t, j.result) != before {
 		t.Fatal("legacy derived report lost evidence or changed its original replay")
 	}

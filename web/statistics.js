@@ -365,10 +365,18 @@
         const scored = !kill.excludedReason && isNumber(kill.score);
         const reason = cell(row, kill.excludedReason || (scored ? '计入累计净值' : '缺少有效分数，不计分'), 'reason');
         if (scored) {
-          if (isNumber(kill.baseScore) && Number.isInteger(kill.scoreMultiplier) && kill.scoreMultiplier >= 1 && kill.scoreMultiplier <= 4) {
-            const formula = make('span', `基础 ${signed(kill.baseScore)} × ${format(kill.scoreMultiplier)} = ${signed(kill.score)}`, 'score-formula');
-            formula.title = '基础分 × 奖励倍数 = 最终净值'; formula.dataset.scoreFormula = 'true'; reason.append(formula);
+          const zeroAdjusted = kill.scoreAdjustment === 'pistol_mismatch_zero' && mismatch && kill.score === 0;
+          if (isNumber(kill.baseScore) && Number.isInteger(kill.scoreMultiplier) && kill.scoreMultiplier >= 1 && kill.scoreMultiplier <= 4 && isNumber(kill.baseScore * kill.scoreMultiplier)) {
+            // This product explains the original formula only. All totals use
+            // the backend's final score, including explicit rule adjustments.
+            const original = kill.baseScore * kill.scoreMultiplier;
+            let evidence = `基础 ${signed(kill.baseScore)} × ${format(kill.scoreMultiplier)} = ${signed(original)}`;
+            if (zeroAdjusted) evidence += ' → 特殊规则归零 → 最终 0';
+            else if (original !== kill.score) evidence += `；后端最终净值 ${signed(kill.score)}（调整依据未提供）`;
+            const formula = make('span', evidence, 'score-formula');
+            formula.title = zeroAdjusted ? '常规公式计算结果，经特了几个规则调整为零' : original === kill.score ? '基础分 × 奖励倍数 = 最终净值' : '原公式与报告最终净值分别显示，累计使用报告最终净值'; formula.dataset.scoreFormula = 'true'; reason.append(formula);
           } else reason.append(make('small', '未提供基础分或倍数明细，沿用现有得分。', 'score-detail-unavailable'));
+          if (zeroAdjusted) { reason.dataset.scoreAdjustment = 'pistol_mismatch_zero'; reason.append(make('small', kill.scoreReason || '特了几个：净值记 0；死亡由死亡影响模块计算，不在此击杀中追加扣分。', 'score-adjustment-note')); }
         }
         reason.append(make('small', `${sourceLabels[kill.weaponSource] || '来源未知'}${isNumber(kill.weaponTime) ? ` · ${clock(kill.weaponTime)}` : ''}`));
         if (kill.approx || ['sampled_cache', 'sampled_frame'].includes(kill.weaponSource)) reason.append(make('span', kill.weaponSource === 'previous_tick' ? '近似 · 前一 tick' : kill.weaponSource === 'sampled_frame' ? '近似 · 邻近帧' : '近似 · 采样推断', 'approx-badge'));

@@ -89,6 +89,30 @@ test('cross-demo impact only aggregates selected repeated players and follows ma
   assert.equal(view.parsed.length, 0); assert.equal(view.requests.filter(([url]) => url.endsWith('/statistics')).length, 4);
 });
 
+test('cross-demo zero-adjusted mismatch scores retain counts and independently combine death impacts', async () => {
+  const data = [fixture('a'), fixture('b')];
+  for (const demo of data) {
+    demo.ruleVersion = '4'; Object.assign(demo.kills[0], { weapon: 'AK-47', victimWeapon: 'Glock-18', killerValue: 5, victimValue: 1, baseScore: -4, scoreMultiplier: 1 });
+    for (const kill of demo.kills.filter(kill => kill.killerId)) Object.assign(kill, { score: 0, scoreAdjustment: 'pistol_mismatch_zero', scoreReason: '特了几个：净值记 0；死亡由死亡影响模块计算。' });
+    const event = kill => ({ index: kill.index, time: kill.time, round: 1, half: 1, playerId: kill.killerId, player: kill.killer, side: kill.killerSide, teamKey: kill.killerSide === 3 ? 'ct' : 't' });
+    demo.impact = { version: '1', warnings: [], rounds: demo.kills.filter(kill => kill.killerId).map(kill => ({ ...event(kill), eligible: true })), kills: demo.kills.filter(kill => kill.killerId).map(kill => ({ ...event(kill), score: 1000, reason: '1,000 + 125 × 最终净值 0' })), deaths: [{ ...event(demo.kills[0]), index: 1, penalty: -1000, corePenalty: 1000, economyPenalty: 0 }] };
+  }
+  const ui = await page({ datasets: data }); await ui.click('multi-demos-all'); await ui.click('multi-analyze');
+  assert.equal(ui.get('multi-total-score').textContent, '0'); assert.equal(ui.get('multi-pistol-mismatch').textContent, '4'); assert.equal(ui.get('multi-scored').textContent, '4');
+  const rows = ui.get('multi-kill-rows').children, highlights = rows.filter(row => row.className === 'pistol-mismatch-row'); assert.equal(highlights.length, 4);
+  for (const row of highlights) { assert.equal(row.children[4].textContent, '0'); assert.match(content(row), /基础 -[14] × 1 = -[14] → 特殊规则归零 → 最终 0/); assert.match(content(row), /死亡由死亡影响模块计算/); assert.doesNotMatch(content(row), /基础 -[14] × 1 = 0/); }
+  const root = ui.get('multi-impact'); assert.equal(impactNode(root, 'killContribution').textContent, '+4,000'); assert.equal(impactNode(root, 'deathPenalty').textContent, '-2,000'); assert.equal(impactNode(root, 'combined').textContent, '+2,000');
+  await ui.change('multi-side', '2'); assert.equal(ui.get('multi-pistol-mismatch').textContent, '2'); assert.equal(ui.get('multi-total-score').textContent, '0'); assert.equal(impactNode(root, 'deathPenalty').textContent, '0'); assert.equal(impactNode(root, 'combined').textContent, '+2,000');
+});
+
+test('cross-demo legacy mismatch scores remain authoritative without a zero-adjustment marker', async () => {
+  const data = [fixture('a'), fixture('b')]; Object.assign(data[0].kills[1], { score: 0, scoreAdjustment: 'pistol_mismatch_zero' });
+  const ui = await page({ datasets: data }); await ui.click('multi-demos-all'); await ui.click('multi-analyze');
+  assert.equal(ui.get('multi-total-score').textContent, '+47'); assert.equal(ui.get('multi-pistol-mismatch').textContent, '2');
+  const rows = ui.get('multi-kill-rows').children.filter(row => row.className === 'pistol-mismatch-row'); assert.equal(rows[0].children[4].textContent, '0'); assert.match(content(rows[0]), /特殊规则归零/);
+  assert.equal(rows[1].children[4].textContent, '-1'); assert.match(content(rows[1]), /基础 -1 × 1 = -1/); assert.doesNotMatch(content(rows[1]), /特殊规则归零/);
+});
+
 test('single mode remains separate and multi mode never parses or reads reports until an explicit selection', async () => {
   const ui = await page({ href: 'http://127.0.0.1:9999/statistics.html?demo=a&view=stats#chart' });
   assert.equal(ui.get('stats-single-view').hidden, false); assert.equal(ui.requests.length, 0);

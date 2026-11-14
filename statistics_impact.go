@@ -508,7 +508,10 @@ func buildStatisticsImpact(d *DemoData, statistics *StatisticsDemo, rounds []Rou
 				ik.Reason = "有效敌对枪械击杀基础贡献 1000"
 				if k.Score != nil && victimGunKnown {
 					score += 125 * *k.Score
-					ik.Reason += fmt.Sprintf(" + 原加权净值 %d × 125", *k.Score)
+					ik.Reason += fmt.Sprintf(" + 最终击杀净值 %d × 125", *k.Score)
+					if k.ScoreAdjustment != "" {
+						ik.Reason += "；" + k.ScoreReason
+					}
 				} else {
 					ik.Reason += "；受害者手持非枪械或武器证据缺失，不追加武器对位权重"
 					if !impactKnownNonFirearm(k.VictimWeapon) || k.WeaponSource == "unknown" {

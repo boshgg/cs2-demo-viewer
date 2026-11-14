@@ -302,7 +302,7 @@ func TestStatisticsLegacyDeathUsesNearestAliveActiveOnly(t *testing.T) {
 	dead.Weapon = "Knife"
 	d.Frames = []Frame{{Round: 2, T: 28, Players: []PlayerFrame{old}}, {Round: 2, T: 29.9, Players: []PlayerFrame{recent}}, {Round: 2, T: 30, Players: []PlayerFrame{dead}}, {Round: 2, T: 31, Players: []PlayerFrame{old}}}
 	k := BuildStatistics(d).Kills[0]
-	if k.Score == nil || *k.Score != -4 || k.VictimWeapon != "Glock-18" || !k.Approx || k.WeaponTime != 29.9 || k.WeaponSource != "sampled_cache" {
+	if k.Score == nil || *k.Score != 0 || k.BaseScore == nil || *k.BaseScore != -4 || k.ScoreAdjustment != "pistol_mismatch_zero" || k.VictimWeapon != "Glock-18" || !k.Approx || k.WeaponTime != 29.9 || k.WeaponSource != "sampled_cache" {
 		t.Fatalf("used dead/future/backpack weapon: %+v", k)
 	}
 	d.Frames = []Frame{{Round: 1, T: 29, Players: []PlayerFrame{old}}}

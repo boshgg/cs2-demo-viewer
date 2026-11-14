@@ -12,7 +12,7 @@ import (
 
 // Bump when scoring or classification rules change; persisted replay bytes do
 // not need to be rewritten to rebuild this derived, compact report.
-const StatisticsVersion = "3"
+const StatisticsVersion = "4"
 
 type EconomySnapshot struct {
 	Time       float64       `json:"time"`
@@ -117,6 +117,8 @@ type KillScore struct {
 	BaseScore       *int    `json:"baseScore"`
 	ScoreMultiplier *int    `json:"scoreMultiplier"`
 	Score           *int    `json:"score"`
+	ScoreAdjustment string  `json:"scoreAdjustment"`
+	ScoreReason     string  `json:"scoreReason"`
 	WeaponSource    string  `json:"weaponSource"`
 	WeaponTime      float64 `json:"weaponTime"`
 	Approx          bool    `json:"approx"`
@@ -598,6 +600,13 @@ func statisticsScore(d *DemoData, e Event, index int, r *StatisticsRound, frames
 		k.Score = &score
 	}
 	k.PistolMismatch = statisticsPistolMismatch(k)
+	if k.PistolMismatch {
+		// Keep the weapon matchup and multiplier as audit evidence. This final
+		// exception is unconditional: a later death is charged only by impact.
+		*k.Score = 0
+		k.ScoreAdjustment = "pistol_mismatch_zero"
+		k.ScoreReason = "冲锋枪/长枪击杀手枪净值统一为 0；死亡只由死亡影响模块另行扣分"
+	}
 	return k
 }
 
