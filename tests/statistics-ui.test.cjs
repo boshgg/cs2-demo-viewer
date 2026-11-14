@@ -91,6 +91,18 @@ async function page(options = {}) {
   };
 }
 
+test('cross-demo mode never auto-parses the single-demo URL in the hidden panel', async () => {
+  const view = await page({ href: 'http://127.0.0.1:9999/statistics.html?mode=multi&demo=match', catalog: [{ id: 'match', name: 'match.dem', status: 'discovered', available: true }] });
+  assert.equal(view.payloads.length, 0);
+  assert.ok(!view.requests.some(([url]) => url.endsWith('/statistics')));
+});
+
+test('a statistics response identifies its own revision when the catalog predates a completed reparse', async () => {
+  const data = { ...fixture(), revision: 'match-new' };
+  const loaded = await statistics.loadStatistics({ id: 'match', status: 'ready', revision: 'match-old' }, { fetch: async url => { assert.equal(url, '/api/demos/match/statistics'); return good(data); } });
+  assert.equal(loaded.revision, 'match-new');
+});
+
 test('statistical totals are sums, include zero and negative scores, and retain exclusions', () => {
   const data = fixture(), total = statistics.summarize(data.kills);
   assert.deepEqual(total, { kills: 6, scoredKills: 4, excludedKills: 2, score: 4, deaths: 6, headshots: 1, pistolMismatchKills: 0 });

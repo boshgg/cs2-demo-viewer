@@ -85,7 +85,7 @@
     const data = await json(await fetcher(`/api/demos/${encodeURIComponent(id)}/statistics`, { signal: options.signal, cache: 'no-store' }));
     checkActive(options);
     if (!data || !Array.isArray(data.rounds) || !Array.isArray(data.kills)) throw new Error('统计数据不完整，请确认本地程序已更新。');
-    return { id, data, revision: status.revision || demo.revision || '' };
+    return { id, data, revision: data.revision || status.revision || demo.revision || '' };
   }
   function create(options = {}) {
     const doc = options.document || document, fetcher = options.fetch || fetch, win = options.window || window;
@@ -358,7 +358,7 @@
     for (const [id, step] of [['stats-previous-round', -1], ['stats-next-round', 1]]) $(id).addEventListener('click', () => { const rounds = state.data?.rounds || [], index = rounds.findIndex(round => String(round.number) === state.detailRound); if (rounds[index + step]) { state.detailRound = String(rounds[index + step].number); renderEconomy(); } });
     $('stats-kills-prev').addEventListener('click', () => { state.page = Math.max(0, state.page - 1); renderKills(); });
     $('stats-kills-next').addEventListener('click', () => { state.page++; renderKills(); });
-    const ready = reloadLibrary().then(async () => { const id = new URL(win.location.href).searchParams.get('demo'); if (id) { const demo = state.catalog.find(item => item.id === id); if (demo) await selectDemo(demo); else setError('链接中的录像不在本地资料库，请刷新后重新选择。'); } });
+    const ready = reloadLibrary().then(async () => { const params = new URL(win.location.href).searchParams; if (params.get('mode') === 'multi') return; const id = params.get('demo'); if (id) { const demo = state.catalog.find(item => item.id === id); if (demo) await selectDemo(demo); else setError('链接中的录像不在本地资料库，请刷新后重新选择。'); } });
     return { ready };
   }
   return { summarize, rankPlayers, visibleKills, isPistolMismatch, loadStatistics, create };
