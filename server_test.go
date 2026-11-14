@@ -272,6 +272,29 @@ func TestRealDemoHTTPRoundTrip(t *testing.T) {
 	if !ready {
 		t.Fatal("real demo did not finish within 5 minutes")
 	}
+	analysisResponse, err := client.Get(srv.URL + "/api/demos/" + uploaded.ID + "/analysis")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var analysis AnalysisDemo
+	err = json.NewDecoder(analysisResponse.Body).Decode(&analysis)
+	analysisResponse.Body.Close()
+	if err != nil || analysisResponse.StatusCode != 200 || analysis.ID != uploaded.ID || len(analysis.Series) == 0 || len(analysis.Teams) < 2 || len(analysis.Utilities) == 0 {
+		t.Fatalf("real analysis incomplete: %d, series=%d teams=%d utilities=%d (%v)", analysisResponse.StatusCode, len(analysis.Series), len(analysis.Teams), len(analysis.Utilities), err)
+	}
+	var movement, fights, deaths, shots float64
+	for _, s := range analysis.Series {
+		for _, c := range s.Cells {
+			movement += c[3]
+			fights += c[4]
+			deaths += c[5]
+			shots += c[6]
+		}
+	}
+	if movement <= 0 || movement > analysis.Duration*float64(len(analysis.Players)) || fights <= 0 || deaths <= 0 || shots <= 0 {
+		t.Fatalf("invalid real analysis totals: movement=%.2f fights=%.0f deaths=%.0f shots=%.0f", movement, fights, deaths, shots)
+	}
+	t.Logf("analysis: living seconds=%.2f, gunfight involvements=%.0f, deaths=%.0f, shots=%.0f, utilities=%d", movement, fights, deaths, shots, len(analysis.Utilities))
 	var firstMap string
 	var firstRounds int
 	for _, encoding := range []string{"gzip", "identity"} {

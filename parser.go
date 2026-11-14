@@ -22,6 +22,7 @@ import (
 const sampleRate = 16
 const maxFrames = 120000
 const maxShots = 200000
+const maxDamageEvents = 200000
 
 // Clock preserves elapsed time when a recording resets the server tick counter.
 type timelineClock struct {
@@ -96,7 +97,7 @@ func parseDemo(ctx context.Context, path, id, name string, progress func(float64
 	cfg.MsgQueueBufferSize = 0 // bounded, deterministic event dispatch
 	p := demo.NewParserWithConfig(reader, cfg)
 	defer p.Close()
-	d := &DemoData{ID: id, Name: name, SampleRate: sampleRate, Players: []PlayerInfo{}, Rounds: []Round{}, Frames: []Frame{}, Events: []Event{}, Shots: []Shot{}, Utilities: []Utility{}, Warnings: []string{}}
+	d := &DemoData{ID: id, Name: name, SampleRate: sampleRate, Players: []PlayerInfo{}, Rounds: []Round{}, Frames: []Frame{}, Events: []Event{}, Shots: []Shot{}, Damage: []DamageEvent{}, Utilities: []Utility{}, Warnings: []string{}}
 	players := map[string]PlayerInfo{}
 	seenWarnings := map[string]bool{}
 	warn := func(s string) {
@@ -193,6 +194,18 @@ func parseDemo(ctx context.Context, path, id, name string, progress func(float64
 		}
 		pos := e.Shooter.Position()
 		d.Shots = append(d.Shots, Shot{T: rounded(now()), Round: currentRound(), PlayerID: playerID(e.Shooter), Team: int(e.Shooter.Team), Weapon: e.Weapon.String(), X: rounded(pos.X), Y: rounded(pos.Y), Z: rounded(pos.Z), Yaw: rounded(float64(e.Shooter.ViewDirectionX()))})
+	})
+	p.RegisterEventHandler(func(e events.PlayerHurt) {
+		if !clock.initialized || p.GameState().IsWarmupPeriod() {
+			return
+		}
+		if len(d.Damage) >= maxDamageEvents {
+			warn("伤害事件过多，仅保留前 200000 次；后续交火分析可能不完整。")
+			return
+		}
+		if damage, ok := damageFromEvent(e, now(), currentRound()); ok {
+			d.Damage = append(d.Damage, damage)
+		}
 	})
 	p.RegisterEventHandler(func(e events.BombPlanted) {
 		bombState = "planted"
@@ -424,6 +437,42 @@ func playerTeam(p *common.Player) int {
 		return 0
 	}
 	return int(p.Team)
+}
+
+func damageFromEvent(e events.PlayerHurt, t float64, round int) (DamageEvent, bool) {
+	if e.Player == nil || math.IsNaN(t) || math.IsInf(t, 0) || t < 0 || round < 1 {
+		return DamageEvent{}, false
+	}
+	// Armor-only hits still show participation in an observed weapon exchange.
+	// Do not turn a missing/invalid health figure into the weapon's nominal damage.
+	if e.HealthDamageTaken < 0 || (e.HealthDamageTaken == 0 && e.ArmorDamageTaken <= 0) {
+		return DamageEvent{}, false
+	}
+	weapon := e.WeaponString
+	if e.Weapon != nil {
+		weapon = e.Weapon.String()
+	}
+	return DamageEvent{T: rounded(t), Round: round, AttackerID: playerID(e.Attacker), VictimID: playerID(e.Player),
+		AttackerTeam: playerTeam(e.Attacker), VictimTeam: playerTeam(e.Player), Weapon: weapon, Damage: e.HealthDamageTaken,
+		AttackerPos: damagePlayerPosition(e.Attacker), VictimPos: damagePlayerPosition(e.Player)}, true
+}
+
+func damagePlayerPosition(p *common.Player) *Position {
+	if p == nil || p.Entity == nil {
+		return nil
+	}
+	pawn := p.PlayerPawnEntity()
+	if pawn == nil {
+		return nil
+	}
+	pos := pawn.Position()
+	for _, v := range []float64{pos.X, pos.Y, pos.Z} {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil
+		}
+	}
+	observed := vectorPosition(pos)
+	return &observed
 }
 func vectorPosition(v r3.Vector) Position {
 	return Position{X: rounded(v.X), Y: rounded(v.Y), Z: rounded(v.Z)}

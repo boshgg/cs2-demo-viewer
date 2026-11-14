@@ -1,20 +1,21 @@
 package main
 
 type DemoData struct {
-	ID         string       `json:"id"`
-	Name       string       `json:"name"`
-	Map        string       `json:"map"`
-	TickRate   float64      `json:"tickRate"`
-	Duration   float64      `json:"duration"`
-	SampleRate int          `json:"sampleRate"`
-	Players    []PlayerInfo `json:"players"`
-	Rounds     []Round      `json:"rounds"`
-	Frames     []Frame      `json:"frames"`
-	Events     []Event      `json:"events"`
-	Shots      []Shot       `json:"shots"`
-	Utilities  []Utility    `json:"utilities"`
-	Warnings   []string     `json:"warnings"`
-	Synthetic  bool         `json:"synthetic,omitempty"`
+	ID         string        `json:"id"`
+	Name       string        `json:"name"`
+	Map        string        `json:"map"`
+	TickRate   float64       `json:"tickRate"`
+	Duration   float64       `json:"duration"`
+	SampleRate int           `json:"sampleRate"`
+	Players    []PlayerInfo  `json:"players"`
+	Rounds     []Round       `json:"rounds"`
+	Frames     []Frame       `json:"frames"`
+	Events     []Event       `json:"events"`
+	Shots      []Shot        `json:"shots"`
+	Damage     []DamageEvent `json:"damage"`
+	Utilities  []Utility     `json:"utilities"`
+	Warnings   []string      `json:"warnings"`
+	Synthetic  bool          `json:"synthetic,omitempty"`
 }
 
 type PlayerInfo struct {
@@ -67,6 +68,22 @@ type Shot struct {
 	Y        float64 `json:"y"`
 	Z        float64 `json:"z"`
 	Yaw      float64 `json:"yaw"`
+}
+
+// DamageEvent records an observed player_hurt event. Missing participant
+// positions remain nil rather than appearing at an invented map coordinate.
+// Damage is actual health removed, excluding weapon over-damage.
+type DamageEvent struct {
+	T            float64   `json:"t"`
+	Round        int       `json:"round"`
+	AttackerID   string    `json:"attackerId"`
+	VictimID     string    `json:"victimId"`
+	AttackerTeam int       `json:"attackerTeam"`
+	VictimTeam   int       `json:"victimTeam"`
+	Weapon       string    `json:"weapon"`
+	Damage       int       `json:"damage"`
+	AttackerPos  *Position `json:"attackerPos"`
+	VictimPos    *Position `json:"victimPos"`
 }
 
 type InventoryItem struct {

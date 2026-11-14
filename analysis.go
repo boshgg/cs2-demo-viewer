@@ -1,0 +1,625 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"math"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/common"
+)
+
+const analysisCellSize = 64
+
+// AnalysisCell holds a world-space grid centre followed by independent metrics:
+// x, y, z, observed living-player seconds, gunfight involvements, deaths, shots.
+// Counts are never normalised here: the client can combine independent demos
+// without losing the underlying sample sizes.
+type AnalysisCell [7]float64
+
+type AnalysisPlayer struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Stable bool   `json:"stable"`
+}
+
+type AnalysisTeam struct {
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	PlayerIDs      []string `json:"playerIds"`
+	IdentitySource string   `json:"identitySource"`
+}
+
+type AnalysisSeries struct {
+	PlayerID string         `json:"playerId"`
+	TeamID   string         `json:"teamId"`
+	Side     int            `json:"side"`
+	Cells    []AnalysisCell `json:"cells"`
+	Rounds   int            `json:"rounds"`
+}
+
+type AnalysisUtility struct {
+	ID            string         `json:"id"`
+	Type          string         `json:"type"`
+	PlayerID      string         `json:"playerId"`
+	Owner         string         `json:"owner"`
+	TeamID        string         `json:"teamId"`
+	Side          int            `json:"side"`
+	Round         int            `json:"round"`
+	Time          float64        `json:"time"`
+	Start         *Position      `json:"start"`
+	End           Position       `json:"end"`
+	Path          []UtilityPoint `json:"path"`
+	ThrowObserved bool           `json:"throwObserved"`
+	Detonated     bool           `json:"detonated"`
+}
+
+type AnalysisBounds struct {
+	MinX float64 `json:"minX"`
+	MaxX float64 `json:"maxX"`
+	MinY float64 `json:"minY"`
+	MaxY float64 `json:"maxY"`
+}
+
+type AnalysisDemo struct {
+	ID         string            `json:"id"`
+	Name       string            `json:"name"`
+	Map        string            `json:"map"`
+	Duration   float64           `json:"duration"`
+	RoundCount int               `json:"roundCount"`
+	Synthetic  bool              `json:"synthetic"`
+	Warnings   []string          `json:"warnings"`
+	Players    []AnalysisPlayer  `json:"players"`
+	Teams      []AnalysisTeam    `json:"teams"`
+	Series     []AnalysisSeries  `json:"series"`
+	Utilities  []AnalysisUtility `json:"utilities"`
+	Bounds     AnalysisBounds    `json:"bounds"`
+	CellSize   int               `json:"cellSize"`
+}
+
+type analysisRoundWindow struct {
+	start, end float64
+}
+
+type analysisTeamGroup struct {
+	team    AnalysisTeam
+	members map[string]bool
+	stable  map[string]bool
+}
+
+type analysisRoster struct {
+	members map[string]bool
+	stable  map[string]bool
+	names   map[string]int
+}
+
+type analysisSeriesKey struct {
+	player, team string
+	side         int
+}
+
+type analysisGridKey struct{ x, y, z int }
+
+type analysisCellValue struct {
+	cell    AnalysisCell
+	zSum    float64
+	zWeight float64
+}
+
+type analysisSeriesValue struct {
+	cells  map[analysisGridKey]*analysisCellValue
+	rounds map[int]bool
+}
+
+type analysisEngagementKey struct {
+	series analysisSeriesKey
+	grid   analysisGridKey
+	round  int
+	second int64
+}
+
+// BuildAnalysis does not mutate the source replay. It condenses frames to a
+// world-space grid and keeps identities and side changes separate from metrics.
+// Gunfights require observed opponent firearm damage; empty damage data is not
+// silently substituted with missed shots or speculative lines of sight.
+func BuildAnalysis(d *DemoData) *AnalysisDemo {
+	a := &AnalysisDemo{CellSize: analysisCellSize, Players: []AnalysisPlayer{}, Teams: []AnalysisTeam{}, Series: []AnalysisSeries{}, Utilities: []AnalysisUtility{}, Warnings: []string{}}
+	if d == nil {
+		return a
+	}
+	a.ID, a.Name, a.Map, a.Synthetic = d.ID, d.Name, strings.ToLower(strings.TrimSpace(d.Map)), d.Synthetic
+	if analysisFinite(d.Duration) && d.Duration > 0 {
+		a.Duration = d.Duration
+	}
+	a.Warnings = append(a.Warnings, d.Warnings...)
+	if d.Damage == nil {
+		a.Warnings = append(a.Warnings, "此回放没有伤害事件字段，交火热力图为空；重新导入 Demo 后可提取真实枪械交火。")
+	}
+	scope := strings.TrimSpace(d.ID)
+	if scope == "" {
+		// Production imports always have an ID. The deterministic fallback keeps
+		// programmatic callers usable without treating nicknames as identity.
+		scope = "anonymous-" + analysisHash(fmt.Sprintf("%s\x00%s\x00%g\x00%v", d.Name, d.Map, d.Duration, d.Players))
+	}
+	players := map[string]AnalysisPlayer{}
+	normalisePlayer := func(raw, name string) string {
+		if raw == "" {
+			return ""
+		}
+		id, stable := analysisPlayerID(scope, raw)
+		p, ok := players[id]
+		if !ok {
+			p = AnalysisPlayer{ID: id, Stable: stable, Name: raw}
+		}
+		if strings.TrimSpace(name) != "" {
+			p.Name = name
+		}
+		players[id] = p
+		return id
+	}
+	for _, p := range d.Players {
+		normalisePlayer(p.ID, p.Name)
+	}
+	windows := map[int]analysisRoundWindow{}
+	for _, r := range d.Rounds {
+		if r.Number < 1 || !analysisFinite(r.Start) || !analysisFinite(r.End) || r.End < r.Start {
+			continue
+		}
+		start := r.Start
+		if analysisFinite(r.FreezeEnd) && r.FreezeEnd > start && r.FreezeEnd <= r.End {
+			start = r.FreezeEnd
+		}
+		end := r.End
+		if analysisFinite(r.EndedAt) && r.EndedAt >= start && r.EndedAt > r.Start && r.EndedAt <= end {
+			end = r.EndedAt
+		}
+		windows[r.Number] = analysisRoundWindow{start, end}
+	}
+	a.RoundCount = len(windows)
+	inside := func(round int, t float64) bool {
+		w, ok := windows[round]
+		return ok && analysisFinite(t) && t >= w.start && t <= w.end
+	}
+	// Team snapshots use the actual side in each round. Names are an identity
+	// hint only when they are real clan names; CT/T labels never merge opponents.
+	rosters := map[int]map[int]*analysisRoster{}
+	for _, f := range d.Frames {
+		if !inside(f.Round, f.T) {
+			continue
+		}
+		if rosters[f.Round] == nil {
+			rosters[f.Round] = map[int]*analysisRoster{}
+		}
+		for _, side := range []int{2, 3} {
+			if rosters[f.Round][side] == nil {
+				rosters[f.Round][side] = &analysisRoster{members: map[string]bool{}, stable: map[string]bool{}, names: map[string]int{}}
+			}
+			r := rosters[f.Round][side]
+			name := f.TName
+			if side == 3 {
+				name = f.CTName
+			}
+			if clean := analysisClanName(name); clean != "" {
+				r.names[clean]++
+			}
+		}
+		for _, p := range f.Players {
+			id := normalisePlayer(p.ID, "")
+			if id == "" || !analysisSide(p.Team) || !p.Connected {
+				continue
+			}
+			r := rosters[f.Round][p.Team]
+			r.members[id] = true
+			if players[id].Stable {
+				r.stable[id] = true
+			}
+		}
+	}
+	roundTeams, groups := analysisIdentifyTeams(scope, windows, rosters)
+	unknown := &analysisTeamGroup{team: AnalysisTeam{ID: "demo:" + scope + ":team:unknown", Name: "队伍未知", IdentitySource: "unknown", PlayerIDs: []string{}}, members: map[string]bool{}, stable: map[string]bool{}}
+	unknownUsed := false
+	teamAt := func(round, side int, player string) *analysisTeamGroup {
+		g := roundTeams[round][side]
+		if g == nil {
+			g, unknownUsed = unknown, true
+		}
+		if player != "" {
+			g.members[player] = true
+		}
+		return g
+	}
+	series := map[analysisSeriesKey]*analysisSeriesValue{}
+	seriesFor := func(player string, round, side int) (analysisSeriesKey, *analysisSeriesValue) {
+		key := analysisSeriesKey{player: player, team: teamAt(round, side, player).team.ID, side: side}
+		s := series[key]
+		if s == nil {
+			s = &analysisSeriesValue{cells: map[analysisGridKey]*analysisCellValue{}, rounds: map[int]bool{}}
+			series[key] = s
+		}
+		s.rounds[round] = true
+		return key, s
+	}
+	deathTimes := map[int]map[string][]float64{}
+	for _, e := range d.Events {
+		if e.Type == "kill" && e.VictimID != "" && inside(e.Round, e.T) {
+			if deathTimes[e.Round] == nil {
+				deathTimes[e.Round] = map[string][]float64{}
+			}
+			deathTimes[e.Round][e.VictimID] = append(deathTimes[e.Round][e.VictimID], e.T)
+		}
+	}
+	for _, byPlayer := range deathTimes {
+		for _, times := range byPlayer {
+			sort.Float64s(times)
+		}
+	}
+	hasBounds := false
+	includeBounds := func(p Position) {
+		if !hasBounds {
+			a.Bounds = AnalysisBounds{p.X, p.X, p.Y, p.Y}
+			hasBounds = true
+		} else {
+			a.Bounds.MinX = math.Min(a.Bounds.MinX, p.X)
+			a.Bounds.MaxX = math.Max(a.Bounds.MaxX, p.X)
+			a.Bounds.MinY = math.Min(a.Bounds.MinY, p.Y)
+			a.Bounds.MaxY = math.Max(a.Bounds.MaxY, p.Y)
+		}
+	}
+	add := func(s *analysisSeriesValue, p Position, metric int, weight float64) {
+		if !analysisPosition(&p) || !analysisFinite(weight) || weight <= 0 {
+			return
+		}
+		g := analysisGrid(p)
+		c := s.cells[g]
+		if c == nil {
+			c = &analysisCellValue{cell: AnalysisCell{(float64(g.x) + .5) * analysisCellSize, (float64(g.y) + .5) * analysisCellSize}}
+			s.cells[g] = c
+		}
+		c.cell[metric] += weight
+		c.zSum += p.Z * weight
+		c.zWeight += weight
+		includeBounds(p)
+	}
+	for i, f := range d.Frames {
+		w, ok := windows[f.Round]
+		if !ok || !analysisFinite(f.T) || i+1 >= len(d.Frames) {
+			continue
+		}
+		next := d.Frames[i+1]
+		if next.Round != f.Round || !analysisFinite(next.T) || next.T <= f.T {
+			continue
+		}
+		// Clip the observed sample interval to live play. A recording gap cannot
+		// contribute minutes of fabricated occupancy at the last known position.
+		start := math.Max(f.T, w.start)
+		end := math.Min(math.Min(next.T, f.T+.25), w.end)
+		if end <= start {
+			continue
+		}
+		for _, p := range f.Players {
+			if !p.Alive || !p.Connected || !analysisSide(p.Team) || p.ID == "" {
+				continue
+			}
+			pos := Position{p.X, p.Y, p.Z}
+			if !analysisPosition(&pos) {
+				continue
+			}
+			playerEnd := end
+			if times := deathTimes[f.Round][p.ID]; len(times) > 0 {
+				n := sort.SearchFloat64s(times, f.T)
+				if n < len(times) {
+					playerEnd = math.Min(playerEnd, times[n])
+				}
+			}
+			if playerEnd <= start {
+				continue
+			}
+			_, s := seriesFor(normalisePlayer(p.ID, ""), f.Round, p.Team)
+			add(s, pos, 3, playerEnd-start)
+		}
+	}
+	seenEngagements := map[analysisEngagementKey]bool{}
+	for _, e := range d.Damage {
+		if !inside(e.Round, e.T) || e.Damage < 0 || !analysisSide(e.AttackerTeam) || !analysisSide(e.VictimTeam) || e.AttackerTeam == e.VictimTeam || e.AttackerID == "" || e.VictimID == "" || e.AttackerID == e.VictimID || !analysisFirearm(e.Weapon) {
+			continue
+		}
+		for _, p := range []struct {
+			id   string
+			side int
+			pos  *Position
+		}{{e.AttackerID, e.AttackerTeam, e.AttackerPos}, {e.VictimID, e.VictimTeam, e.VictimPos}} {
+			if !analysisPosition(p.pos) {
+				continue
+			}
+			key, s := seriesFor(normalisePlayer(p.id, ""), e.Round, p.side)
+			seen := analysisEngagementKey{series: key, grid: analysisGrid(*p.pos), round: e.Round, second: int64(math.Floor(e.T - windows[e.Round].start))}
+			if seenEngagements[seen] {
+				continue
+			}
+			seenEngagements[seen] = true
+			add(s, *p.pos, 4, 1)
+		}
+	}
+	for _, e := range d.Events {
+		if e.Type != "kill" || !inside(e.Round, e.T) || e.VictimID == "" || !analysisSide(e.VictimTeam) || !analysisPosition(e.VictimPos) {
+			continue
+		}
+		_, s := seriesFor(normalisePlayer(e.VictimID, e.Victim), e.Round, e.VictimTeam)
+		add(s, *e.VictimPos, 5, 1)
+	}
+	for _, e := range d.Shots {
+		if !inside(e.Round, e.T) || e.PlayerID == "" || !analysisSide(e.Team) || !analysisFirearm(e.Weapon) {
+			continue
+		}
+		pos := Position{e.X, e.Y, e.Z}
+		if !analysisPosition(&pos) {
+			continue
+		}
+		_, s := seriesFor(normalisePlayer(e.PlayerID, ""), e.Round, e.Team)
+		add(s, pos, 6, 1)
+	}
+	for _, u := range d.Utilities {
+		end := Position{u.X, u.Y, u.Z}
+		when := u.Detonate
+		if u.ThrowObserved {
+			when = u.Start
+		}
+		if !u.Detonated || !analysisPosition(&end) || !analysisFinite(u.Detonate) || !inside(u.Round, when) {
+			continue
+		}
+		player := normalisePlayer(u.OwnerID, u.Owner)
+		out := AnalysisUtility{ID: u.ID, Type: u.Type, PlayerID: player, Owner: u.Owner, TeamID: teamAt(u.Round, u.Team, player).team.ID, Side: u.Team, Round: u.Round, Time: when, End: end, Path: []UtilityPoint{}, ThrowObserved: u.ThrowObserved, Detonated: true}
+		if u.ThrowObserved && len(u.Path) > 0 {
+			first := u.Path[0]
+			pos := Position{first.X, first.Y, first.Z}
+			if analysisPosition(&pos) && analysisFinite(first.T) && math.Abs(first.T-u.Start) <= .25 {
+				out.Start = &pos
+			}
+		}
+		validPath := make([]UtilityPoint, 0, len(u.Path))
+		for _, p := range u.Path {
+			if analysisFinite(p.T) && analysisPosition(&Position{p.X, p.Y, p.Z}) {
+				validPath = append(validPath, p)
+			}
+		}
+		if len(validPath) <= 24 {
+			out.Path = validPath
+		} else {
+			for n := 0; n < 24; n++ {
+				out.Path = append(out.Path, validPath[n*(len(validPath)-1)/23])
+			}
+		}
+		a.Utilities = append(a.Utilities, out)
+		includeBounds(end)
+		if out.Start != nil {
+			includeBounds(*out.Start)
+		}
+	}
+	for _, p := range players {
+		a.Players = append(a.Players, p)
+	}
+	sort.Slice(a.Players, func(i, j int) bool { return a.Players[i].ID < a.Players[j].ID })
+	if unknownUsed {
+		groups = append(groups, unknown)
+	}
+	for _, g := range groups {
+		g.team.PlayerIDs = analysisSortedKeys(g.members)
+		a.Teams = append(a.Teams, g.team)
+	}
+	sort.Slice(a.Teams, func(i, j int) bool { return a.Teams[i].ID < a.Teams[j].ID })
+	for key, s := range series {
+		out := AnalysisSeries{PlayerID: key.player, TeamID: key.team, Side: key.side, Rounds: len(s.rounds), Cells: []AnalysisCell{}}
+		for _, c := range s.cells {
+			c.cell[2] = math.Round(c.zSum/c.zWeight*100) / 100
+			c.cell[3] = math.Round(c.cell[3]*10000) / 10000
+			out.Cells = append(out.Cells, c.cell)
+		}
+		sort.Slice(out.Cells, func(i, j int) bool {
+			for n := 0; n < 3; n++ {
+				if out.Cells[i][n] != out.Cells[j][n] {
+					return out.Cells[i][n] < out.Cells[j][n]
+				}
+			}
+			return false
+		})
+		a.Series = append(a.Series, out)
+	}
+	sort.Slice(a.Series, func(i, j int) bool {
+		x, y := a.Series[i], a.Series[j]
+		if x.PlayerID != y.PlayerID {
+			return x.PlayerID < y.PlayerID
+		}
+		if x.TeamID != y.TeamID {
+			return x.TeamID < y.TeamID
+		}
+		return x.Side < y.Side
+	})
+	sort.SliceStable(a.Utilities, func(i, j int) bool {
+		if a.Utilities[i].Time != a.Utilities[j].Time {
+			return a.Utilities[i].Time < a.Utilities[j].Time
+		}
+		return a.Utilities[i].ID < a.Utilities[j].ID
+	})
+	return a
+}
+
+func analysisIdentifyTeams(scope string, windows map[int]analysisRoundWindow, rosters map[int]map[int]*analysisRoster) (map[int]map[int]*analysisTeamGroup, []*analysisTeamGroup) {
+	result := map[int]map[int]*analysisTeamGroup{}
+	groups := []*analysisTeamGroup{}
+	roundNumbers := make([]int, 0, len(windows))
+	for round := range windows {
+		roundNumbers = append(roundNumbers, round)
+	}
+	sort.Ints(roundNumbers)
+	for _, round := range roundNumbers {
+		result[round] = map[int]*analysisTeamGroup{}
+		used := map[*analysisTeamGroup]bool{}
+		for _, side := range []int{2, 3} {
+			r := rosters[round][side]
+			if r == nil || len(r.members) == 0 {
+				continue
+			}
+			name := analysisRosterName(r)
+			key := ""
+			otherName := analysisRosterName(rosters[round][5-side])
+			if name != "" && !strings.EqualFold(name, otherName) {
+				key = "name:" + strings.ToLower(name)
+			}
+			var found *analysisTeamGroup
+			for _, g := range groups {
+				if !used[g] && key != "" && g.team.ID == key {
+					found = g
+					break
+				}
+			}
+			if found == nil {
+				best := 0
+				for _, g := range groups {
+					if used[g] {
+						continue
+					}
+					a, b := r.stable, g.stable
+					if len(a) == 0 || len(b) == 0 {
+						a, b = r.members, g.members
+					}
+					shared := 0
+					for id := range a {
+						if b[id] {
+							shared++
+						}
+					}
+					minimum := min(len(a), len(b))
+					if shared > best && (shared >= 3 && shared*2 >= minimum || shared > 0 && shared == minimum) {
+						found, best = g, shared
+					}
+				}
+			}
+			if found == nil {
+				identity := "clan"
+				if key == "" {
+					identity = "roster"
+					key = "roster:" + analysisHash(strings.Join(analysisSortedKeys(r.stable), ","))
+					name = "阵容队伍 " + strconv.Itoa(len(groups)+1)
+					if len(r.stable) == 0 {
+						identity = "demo"
+						key = fmt.Sprintf("demo:%s:team:%d", scope, len(groups)+1)
+					}
+				}
+				// Identical clan labels on opposing sides are ambiguous. Keep
+				// both records distinct rather than collapsing an entire match.
+				for _, g := range groups {
+					if g.team.ID == key {
+						key, identity = key+":demo:"+scope+":roster:"+analysisHash(strings.Join(analysisSortedKeys(r.members), ",")), "ambiguous"
+						break
+					}
+				}
+				found = &analysisTeamGroup{team: AnalysisTeam{ID: key, Name: name, IdentitySource: identity}, members: map[string]bool{}, stable: map[string]bool{}}
+				groups = append(groups, found)
+			} else if found.team.IdentitySource != "clan" && key != "" {
+				duplicate := false
+				for _, g := range groups {
+					duplicate = duplicate || g != found && g.team.ID == key
+				}
+				if !duplicate {
+					found.team.ID, found.team.Name, found.team.IdentitySource = key, name, "clan"
+				}
+			}
+			for id := range r.members {
+				found.members[id] = true
+			}
+			for id := range r.stable {
+				found.stable[id] = true
+			}
+			result[round][side], used[found] = found, true
+		}
+	}
+	return result, groups
+}
+
+func analysisPlayerID(scope, raw string) (string, bool) {
+	v, err := strconv.ParseUint(raw, 10, 64)
+	// Steam's public individual-user ID: universe 1, account type 1,
+	// desktop instance 1, nonzero account number. Small synthetic IDs and
+	// server-local bot IDs are intentionally never shared across recordings.
+	if err == nil && v>>56 == 1 && v>>52&15 == 1 && v>>32&0xfffff == 1 && uint32(v) != 0 {
+		return strconv.FormatUint(v, 10), true
+	}
+	return "demo:" + scope + ":player:" + raw, false
+}
+
+func analysisClanName(name string) string {
+	name = strings.Join(strings.Fields(name), " ")
+	key := strings.ToLower(name)
+	key = strings.NewReplacer("-", "", "_", "", " ", "").Replace(key)
+	switch key {
+	case "", "ct", "t", "counterterrorist", "counterterrorists", "terrorist", "terrorists", "反恐精英", "恐怖分子", "ctteam", "tteam", "teamct", "teamt", "counterterroriststeam", "terroriststeam", "team", "team1", "team2", "teama", "teamb", "队伍1", "队伍2", "a队", "b队":
+		return ""
+	}
+	return name
+}
+
+func analysisRosterName(r *analysisRoster) string {
+	name := ""
+	if r == nil {
+		return name
+	}
+	for _, n := range analysisSortedIntKeys(r.names) {
+		if name == "" || r.names[n] > r.names[name] {
+			name = n
+		}
+	}
+	return name
+}
+
+func analysisSortedKeys(values map[string]bool) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func analysisSortedIntKeys(values map[string]int) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func analysisHash(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:12])
+}
+
+func analysisSide(side int) bool    { return side == 2 || side == 3 }
+func analysisFinite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+func analysisPosition(p *Position) bool {
+	return p != nil && analysisFinite(p.X) && analysisFinite(p.Y) && analysisFinite(p.Z) && math.Abs(p.X) <= 1e6 && math.Abs(p.Y) <= 1e6 && math.Abs(p.Z) <= 1e6
+}
+
+func analysisGrid(p Position) analysisGridKey {
+	return analysisGridKey{int(math.Floor(p.X / analysisCellSize)), int(math.Floor(p.Y / analysisCellSize)), int(math.Floor(p.Z / analysisCellSize))}
+}
+
+var analysisFirearms = func() map[string]bool {
+	names := map[string]bool{}
+	for _, typ := range []common.EquipmentType{
+		common.EqP2000, common.EqGlock, common.EqP250, common.EqDeagle, common.EqFiveSeven, common.EqDualBerettas, common.EqTec9, common.EqCZ, common.EqUSP, common.EqRevolver,
+		common.EqMP7, common.EqMP9, common.EqBizon, common.EqMac10, common.EqUMP, common.EqP90, common.EqMP5,
+		common.EqSawedOff, common.EqNova, common.EqMag7, common.EqXM1014, common.EqM249, common.EqNegev,
+		common.EqGalil, common.EqFamas, common.EqAK47, common.EqM4A4, common.EqM4A1, common.EqSSG08, common.EqSG553, common.EqAUG, common.EqAWP, common.EqScar20, common.EqG3SG1,
+	} {
+		names[strings.ToLower(typ.String())] = true
+	}
+	return names
+}()
+
+func analysisFirearm(name string) bool {
+	return analysisFirearms[strings.ToLower(strings.TrimSpace(name))]
+}

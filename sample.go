@@ -9,7 +9,7 @@ import (
 // Synthetic fixture: explicitly labeled in both the API and the interface.
 // Its paths and effects exercise the viewer; they are not a recorded match.
 func sampleDemo() *DemoData {
-	d := &DemoData{ID: "sample", Name: "交互示例 · 非真实比赛", Map: "de_mirage", TickRate: 64, Duration: 105, SampleRate: 12, Synthetic: true, Players: []PlayerInfo{}, Rounds: []Round{}, Frames: []Frame{}, Events: []Event{}, Shots: []Shot{}, Utilities: []Utility{}, Warnings: []string{"这是人工生成的交互示例，玩家路线、道具轨迹、开火和火焰位置均为演示数据。"}}
+	d := &DemoData{ID: "sample", Name: "交互示例 · 非真实比赛", Map: "de_mirage", TickRate: 64, Duration: 105, SampleRate: 12, Synthetic: true, Players: []PlayerInfo{}, Rounds: []Round{}, Frames: []Frame{}, Events: []Event{}, Shots: []Shot{}, Damage: []DamageEvent{}, Utilities: []Utility{}, Warnings: []string{"这是人工生成的交互示例，玩家路线、伤害、道具轨迹、开火和火焰位置均为演示数据。"}}
 	for i := 0; i < 10; i++ {
 		team := 2
 		if i >= 5 {
@@ -36,6 +36,7 @@ func sampleDemo() *DemoData {
 			killer, victim := d.Players[attackingOffset+k], d.Players[victimOffset+k]
 			kp, vp := samplePlayerPosition(attackingOffset+k, phase), samplePlayerPosition(victimOffset+k, phase)
 			event := Event{T: base + phase, Round: r + 1, Type: "kill", Killer: killer.Name, Victim: victim.Name, KillerID: killer.ID, VictimID: victim.ID, KillerTeam: killer.Team, VictimTeam: victim.Team, Weapon: sampleWeapon(attackingOffset + k), Headshot: k%2 == 0, KillerPos: &kp, VictimPos: &vp}
+			d.Damage = append(d.Damage, DamageEvent{T: base + phase, Round: r + 1, AttackerID: killer.ID, VictimID: victim.ID, AttackerTeam: killer.Team, VictimTeam: victim.Team, Weapon: event.Weapon, Damage: 100, AttackerPos: &kp, VictimPos: &vp})
 			for burst := 0; burst < 3; burst++ {
 				shotTime := phase - float64(2-burst)*.09
 				shotPos := samplePlayerPosition(attackingOffset+k, shotTime)

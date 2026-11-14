@@ -13,12 +13,16 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 const maxUploadBytes int64 = 2 << 30
+const maxAnalysisDemos = 10
+const maxReplayHistory = 6
 
 type job struct {
 	mu                   sync.Mutex
@@ -27,27 +31,33 @@ type job struct {
 	Progress             float64 `json:"progress"`
 	Message              string  `json:"message,omitempty"`
 	Error                string  `json:"error,omitempty"`
+	Name                 string  `json:"name"`
+	Map                  string  `json:"map,omitempty"`
+	Analysis             bool    `json:"analysis"`
 	name, source, result string
+	analysisResult       string
+	releaseAnalysis      sync.Once
 	created              time.Time
 	ctx                  context.Context
 	cancel               context.CancelFunc
 }
 
 type app struct {
-	root   string
-	assets fs.FS
-	mu     sync.Mutex
-	jobs   map[string]*job
-	queue  chan *job
-	slots  chan struct{}
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	root          string
+	assets        fs.FS
+	mu            sync.Mutex
+	jobs          map[string]*job
+	queue         chan *job
+	slots         chan struct{}
+	analysisSlots chan struct{}
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
 }
 
 func newApp(root string, assets fs.FS) *app {
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &app{root: root, assets: assets, jobs: map[string]*job{}, queue: make(chan *job, 3), slots: make(chan struct{}, 3), ctx: ctx, cancel: cancel}
+	a := &app{root: root, assets: assets, jobs: map[string]*job{}, queue: make(chan *job, 3), slots: make(chan struct{}, 3), analysisSlots: make(chan struct{}, maxAnalysisDemos), ctx: ctx, cancel: cancel}
 	a.wg.Add(1)
 	go a.worker()
 	return a
@@ -79,14 +89,17 @@ func apiError(w http.ResponseWriter, status int, message string) {
 func (a *app) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
-		jsonResponse(w, 200, map[string]any{"app": "cs2-local-viewer", "version": "3.1.0", "parser": "demoinfocs-golang v5.2.0"})
+		jsonResponse(w, 200, map[string]any{"app": "cs2-local-viewer", "version": "4.0.0", "parser": "demoinfocs-golang v5.2.0"})
 	})
 	mux.HandleFunc("POST /api/demos", a.upload)
 	mux.HandleFunc("GET /api/demos/{id}/status", a.status)
+	mux.HandleFunc("GET /api/demos/{id}/analysis", a.analysisResult)
+	mux.HandleFunc("GET /api/analyses", a.analyses)
 	mux.HandleFunc("GET /api/demos/{id}", a.result)
 	mux.HandleFunc("DELETE /api/demos/{id}", a.remove)
 	mux.HandleFunc("GET /api/maps/{map}", a.mapInfo)
 	mux.HandleFunc("GET /api/sample", func(w http.ResponseWriter, r *http.Request) { jsonResponse(w, 200, sampleDemo()) })
+	mux.HandleFunc("GET /api/sample/analysis", func(w http.ResponseWriter, r *http.Request) { jsonResponse(w, 200, BuildAnalysis(sampleDemo())) })
 	files := http.FileServer(http.FS(a.assets))
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/")
@@ -130,6 +143,21 @@ func (a *app) handler() http.Handler {
 }
 
 func (a *app) upload(w http.ResponseWriter, r *http.Request) {
+	analysis := r.URL.Query().Get("mode") == "analysis"
+	analysisRegistered := false
+	if analysis {
+		select {
+		case a.analysisSlots <- struct{}{}:
+		default:
+			apiError(w, 409, "分析工作台最多保留 10 个 Demo，请先移除不需要的比赛")
+			return
+		}
+		defer func() {
+			if !analysisRegistered {
+				<-a.analysisSlots
+			}
+		}()
+	}
 	select {
 	case a.slots <- struct{}{}:
 	default:
@@ -206,32 +234,45 @@ func (a *app) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	id := hex.EncodeToString(b)
 	ctx, cancel := context.WithCancel(a.ctx)
-	j := &job{ID: id, Status: "queued", Message: "已上传，等待解析", name: name, source: source, result: filepath.Join(a.root, id+".json.gz"), created: time.Now(), ctx: ctx, cancel: cancel}
+	j := &job{ID: id, Name: name, Analysis: analysis, Status: "queued", Message: "已上传，等待解析", name: name, source: source, result: filepath.Join(a.root, id+".json.gz"), analysisResult: filepath.Join(a.root, id+".analysis.json.gz"), created: time.Now(), ctx: ctx, cancel: cancel}
 	a.mu.Lock()
-	// Keep a small recent history; raw uploads are removed immediately after parsing.
-	if len(a.jobs) >= 6 {
+	// Analysis jobs have their own ten-slot quota and are never silently evicted
+	// by a later playback import. Ordinary playback retains six recent matches.
+	replayCount := 0
+	for _, x := range a.jobs {
+		if !x.Analysis {
+			replayCount++
+		}
+	}
+	if !analysis && replayCount >= maxReplayHistory {
 		var oldest *job
 		for _, x := range a.jobs {
 			x.mu.Lock()
 			done := x.Status == "ready" || x.Status == "error"
 			x.mu.Unlock()
-			if done && (oldest == nil || x.created.Before(oldest.created)) {
+			if !x.Analysis && done && (oldest == nil || x.created.Before(oldest.created)) {
 				oldest = x
 			}
 		}
 		if oldest != nil {
 			delete(a.jobs, oldest.ID)
 			_ = os.Remove(oldest.result)
+			_ = os.Remove(oldest.analysisResult)
 			oldest.cancel()
 		}
 	}
 	a.jobs[id] = j
+	analysisRegistered = analysis
 	a.mu.Unlock()
 	select {
 	case a.queue <- j:
 		queued = true
 	case <-a.ctx.Done():
 		cancel()
+		a.mu.Lock()
+		delete(a.jobs, id)
+		a.mu.Unlock()
+		a.releaseAnalysisSlot(j)
 		apiError(w, 503, "服务正在关闭")
 		return
 	}
@@ -254,6 +295,14 @@ func (a *app) status(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, 200, j)
 }
 func (a *app) result(w http.ResponseWriter, r *http.Request) {
+	a.serveResult(w, r, false)
+}
+
+func (a *app) analysisResult(w http.ResponseWriter, r *http.Request) {
+	a.serveResult(w, r, true)
+}
+
+func (a *app) serveResult(w http.ResponseWriter, r *http.Request, analysis bool) {
 	j := a.getJob(r)
 	if j == nil {
 		apiError(w, 404, "任务不存在，请重新导入")
@@ -261,6 +310,9 @@ func (a *app) result(w http.ResponseWriter, r *http.Request) {
 	}
 	j.mu.Lock()
 	state, path := j.Status, j.result
+	if analysis {
+		path = j.analysisResult
+	}
 	j.mu.Unlock()
 	if state != "ready" {
 		apiError(w, 409, "Demo 尚未完成解析")
@@ -271,11 +323,18 @@ func (a *app) result(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 404, "回放缓存已释放，请重新导入")
 		return
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+		// Windows cannot unlink an open cache. DELETE may have raced with
+		// this response; retry only this generated file after closing it.
+		if j.ctx != nil && j.ctx.Err() != nil {
+			_ = os.Remove(path)
+		}
+	}()
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Vary", "Accept-Encoding")
-	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+	if acceptsGzip(r.Header.Get("Accept-Encoding")) {
 		w.Header().Set("Content-Encoding", "gzip")
 		_, _ = io.Copy(w, f)
 	} else {
@@ -288,6 +347,57 @@ func (a *app) result(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(w, gz)
 	}
 }
+
+func acceptsGzip(header string) bool {
+	for _, part := range strings.Split(header, ",") {
+		fields := strings.Split(part, ";")
+		if !strings.EqualFold(strings.TrimSpace(fields[0]), "gzip") {
+			continue
+		}
+		quality := 1.0
+		for _, parameter := range fields[1:] {
+			pair := strings.SplitN(strings.TrimSpace(parameter), "=", 2)
+			if len(pair) == 2 && strings.EqualFold(pair[0], "q") {
+				value, err := strconv.ParseFloat(strings.TrimSpace(pair[1]), 64)
+				if err != nil || value < 0 || value > 1 {
+					quality = 0
+				} else {
+					quality = value
+				}
+			}
+		}
+		return quality > 0
+	}
+	return false
+}
+
+func (a *app) analyses(w http.ResponseWriter, r *http.Request) {
+	// Copy metadata while holding each job's lock. Never decode ten full demos
+	// just to populate the analysis library.
+	a.mu.Lock()
+	jobs := make([]*job, 0, maxAnalysisDemos)
+	for _, j := range a.jobs {
+		if j.Analysis {
+			jobs = append(jobs, j)
+		}
+	}
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].created.Before(jobs[j].created) })
+	items := make([]map[string]any, 0, len(jobs))
+	for _, j := range jobs {
+		j.mu.Lock()
+		items = append(items, map[string]any{"id": j.ID, "name": j.Name, "map": j.Map, "analysis": true, "status": j.Status, "progress": j.Progress, "message": j.Message, "error": j.Error})
+		j.mu.Unlock()
+	}
+	a.mu.Unlock()
+	jsonResponse(w, 200, map[string]any{"demos": items, "maxDemos": maxAnalysisDemos})
+}
+
+func (a *app) releaseAnalysisSlot(j *job) {
+	if j.Analysis {
+		j.releaseAnalysis.Do(func() { <-a.analysisSlots })
+	}
+}
+
 func (a *app) remove(w http.ResponseWriter, r *http.Request) {
 	j := a.getJob(r)
 	if j == nil {
@@ -298,7 +408,9 @@ func (a *app) remove(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	delete(a.jobs, j.ID)
 	a.mu.Unlock()
+	a.releaseAnalysisSlot(j)
 	_ = os.Remove(j.result)
+	_ = os.Remove(j.analysisResult)
 	w.WriteHeader(204)
 }
 func (a *app) mapInfo(w http.ResponseWriter, r *http.Request) {
@@ -344,7 +456,8 @@ func (a *app) process(j *job) {
 	d, err := parseDemo(j.ctx, j.source, j.ID, j.name, func(p float64) { j.mu.Lock(); j.Progress = p; j.mu.Unlock() })
 	if err == nil && j.ctx.Err() == nil {
 		j.mu.Lock()
-		j.Message = "正在准备回放数据"
+		j.Message = "正在准备回放与热力图分析数据"
+		j.Map = d.Map
 		j.mu.Unlock()
 		var f *os.File
 		f, err = os.Create(j.result)
@@ -358,9 +471,13 @@ func (a *app) process(j *job) {
 				err = e
 			}
 		}
+		if err == nil && j.ctx.Err() == nil {
+			err = writeAnalysisCache(j.analysisResult, BuildAnalysis(d))
+		}
 	}
 	if j.ctx.Err() != nil {
 		_ = os.Remove(j.result)
+		_ = os.Remove(j.analysisResult)
 		return
 	}
 	j.mu.Lock()
@@ -370,6 +487,7 @@ func (a *app) process(j *job) {
 		j.Error = err.Error()
 		j.Message = "解析未完成"
 		_ = os.Remove(j.result)
+		_ = os.Remove(j.analysisResult)
 		log.Printf("parse %s: %v", j.name, err)
 		return
 	}
@@ -377,4 +495,20 @@ func (a *app) process(j *job) {
 	j.Progress = 1
 	j.Message = "回放已就绪"
 	log.Printf("Parsed %s: %s, %d rounds, %d frames, %.1f seconds", j.name, d.Map, len(d.Rounds), len(d.Frames), d.Duration)
+}
+
+func writeAnalysisCache(path string, data *AnalysisDemo) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	gz, _ := gzip.NewWriterLevel(f, gzip.BestSpeed)
+	err = json.NewEncoder(gz).Encode(data)
+	if e := gz.Close(); err == nil {
+		err = e
+	}
+	if e := f.Close(); err == nil {
+		err = e
+	}
+	return err
 }

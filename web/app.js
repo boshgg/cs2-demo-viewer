@@ -89,6 +89,7 @@
   }
   function setDemoQuery(id) {
     const url = new URL(window.location.href);
+    url.searchParams.delete('t');
     if (id) url.searchParams.set('demo', id);
     else url.searchParams.delete('demo');
     window.history.replaceState(null, '', url);
@@ -163,6 +164,10 @@
       const data = await json(response);
       if (generation !== state.generation) return;
       await loadDemo(data, generation, signal);
+      if (generation === state.generation) {
+        const requestedTime = new URL(window.location.href).searchParams.get('t');
+        if (requestedTime !== null && Number.isFinite(Number(requestedTime))) seek(Number(requestedTime));
+      }
     } catch (err) {
       if (generation !== state.generation) return;
       state.controller = null;
@@ -175,6 +180,8 @@
     if (!Array.isArray(data.frames) || !data.frames.length) throw new Error('Demo 中没有可回放的玩家帧。');
     if (!data.frames.every((frame, i) => finite(frame.t) && (!i || frame.t >= data.frames[i - 1].t))) throw new Error('Demo 的时间数据不完整，无法建立回放。');
     state.data = data;
+    const analysisLink = document.querySelector('a[href^="/analysis.html"]');
+    if (analysisLink) analysisLink.href = data.synthetic ? '/analysis.html' : `/analysis.html?demo=${encodeURIComponent(data.id)}`;
     state.t = 0;
     state.frameIndex = 0;
     state.speed = 1;

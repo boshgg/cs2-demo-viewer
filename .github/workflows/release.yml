@@ -1,0 +1,100 @@
+name: Windows portable release
+
+on:
+  push:
+    branches: [main]
+    paths: [RELEASE_VERSION]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    name: Test and package
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Read release version
+        id: version
+        run: |
+          $version = (Get-Content -LiteralPath RELEASE_VERSION -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'RELEASE_VERSION must contain a numeric semantic version.' }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: Test Go code
+        run: go test ./...
+      - name: Vet Go code
+        run: go vet ./...
+      - name: Test frontend analysis and labels
+        run: node --test tests/*.test.cjs
+      - name: Build the portable ZIP and checksum
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: ./release.ps1 -Version $env:RELEASE_VERSION
+      - name: Store the tested package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-release-${{ steps.version.outputs.version }}
+          path: |
+            dist/cs2-demo-viewer-v${{ steps.version.outputs.version }}-windows-amd64.zip
+            dist/cs2-demo-viewer-v${{ steps.version.outputs.version }}-windows-amd64.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the release notes
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Download the tested package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: windows-release-${{ needs.build.outputs.version }}
+          path: dist
+      - name: Verify and publish a new version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          $version = $env:RELEASE_VERSION
+          $tag = "v$version"
+          $zip = "dist/cs2-demo-viewer-v$version-windows-amd64.zip"
+          $checksum = "$zip.sha256"
+          $expectedHash = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
+          $actualHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($expectedHash -ne $actualHash) { throw 'The downloaded release package failed SHA-256 verification.' }
+          & gh release view $tag --repo $env:GITHUB_REPOSITORY --json tagName *> $null
+          if ($LASTEXITCODE -eq 0) { throw "Release $tag already exists. Existing releases are never overwritten." }
+          & gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$tag" *> $null
+          if ($LASTEXITCODE -eq 0) { throw "Tag $tag already exists. Use a new version to avoid publishing a different commit under an existing tag." }
+          & gh release create $tag $zip $checksum --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --notes-file RELEASE_NOTES.md --title "CS2 Replay v$version · 多 Demo 分析" --latest
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release creation failed.' }
