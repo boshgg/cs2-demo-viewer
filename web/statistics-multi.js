@@ -13,8 +13,10 @@
   function create(options = {}) {
     const doc = options.document || document, win = options.window || window, fetcher = options.fetch || fetch;
     const core = options.core || win.ReplayMultiStatistics, statistics = options.statistics || win.ReplayStatistics, library = options.library || win.ReplayLibrary;
+    const impactCore = options.impact || win.ReplayImpact, impactUI = options.impactUI || win.ReplayImpactUI;
     const storage = options.storage || win.localStorage, schedule = options.setTimeout || setTimeout, unschedule = options.clearTimeout || clearTimeout;
     const $ = id => doc.getElementById(id), node = (tag, text, className) => { const el = doc.createElement(tag); if (text != null) el.textContent = String(text); if (className) el.className = className; return el; };
+    const impactPanel = impactUI?.create({ document: doc, root: $('multi-impact'), prefix: 'multi', replayLink: replay, multi: true });
     let saved = {}; try { saved = JSON.parse(storage?.getItem(storageKey) || '{}') || {}; } catch { /* Ignore malformed preferences. */ }
     const folderExpansion = library.createFolderExpansion(saved.folderExpansion), folderBodies = new Map();
     const strings = values => Array.isArray(values) ? values.filter(value => typeof value === 'string') : [];
@@ -161,6 +163,7 @@
       const filter = { demoIds: [...state.demos], map: state.map, playerIds: state.players && [...state.players], side: state.side };
       const catalogIds = new Set(state.catalog.map(demo => demo.id));
       const result = core.aggregate([...state.reports.values()].filter(demo => catalogIds.has(demo.id)), filter); state.result = result; renderPlayers(result);
+      if (impactPanel && impactCore) impactPanel.render(impactCore.aggregate([...state.reports.values()].filter(demo => catalogIds.has(demo.id)), { ...filter, playerIds: result.selectedPlayerIds || [] }));
       const scoped = scopedCatalog(), loaded = scoped.filter(demo => state.reports.has(demo.id) && (state.map === 'all' || mapOf(demo) === state.map)), pending = scoped.filter(demo => !state.reports.has(demo.id));
       $('multi-scope').textContent = `已勾选 ${state.demos.size} 场 · 当前地图范围 ${scoped.length} 场 · 已载入 ${loaded.length} 场 · ${state.map === 'all' ? '全部地图' : state.map}`;
       $('multi-incomplete').hidden = !pending.length; $('multi-incomplete').textContent = `还有 ${pending.length} 场所选录像尚未载入；请点击“分析所选比赛”。下方仅使用已载入部分，重复玩家资格与统计可能随剩余比赛变化。`;

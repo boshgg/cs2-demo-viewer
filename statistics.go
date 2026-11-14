@@ -12,7 +12,7 @@ import (
 
 // Bump when scoring or classification rules change; persisted replay bytes do
 // not need to be rewritten to rebuild this derived, compact report.
-const StatisticsVersion = "2"
+const StatisticsVersion = "3"
 
 type EconomySnapshot struct {
 	Time       float64       `json:"time"`
@@ -138,6 +138,7 @@ type StatisticsDemo struct {
 	Sides       []StatisticsGroup  `json:"sides"`
 	Halves      []StatisticsGroup  `json:"halves"`
 	Teams       []StatisticsGroup  `json:"teams"`
+	Impact      *StatisticsImpact  `json:"impact"`
 }
 
 func statisticsRules() []StatisticsRule {
@@ -688,7 +689,7 @@ func statisticsAggregate(kills []KillScore, names map[string]string, include fun
 
 // BuildStatistics is pure: no parsing, filesystem access or mutation of d.
 func BuildStatistics(d *DemoData) *StatisticsDemo {
-	out := &StatisticsDemo{RuleVersion: StatisticsVersion, Warnings: []string{}, Rules: statisticsRules(), Rounds: []StatisticsRound{}, Kills: []KillScore{}, Players: []StatisticsPlayer{}, Sides: []StatisticsGroup{}, Halves: []StatisticsGroup{}, Teams: []StatisticsGroup{}}
+	out := &StatisticsDemo{RuleVersion: StatisticsVersion, Warnings: []string{}, Rules: statisticsRules(), Rounds: []StatisticsRound{}, Kills: []KillScore{}, Players: []StatisticsPlayer{}, Sides: []StatisticsGroup{}, Halves: []StatisticsGroup{}, Teams: []StatisticsGroup{}, Impact: emptyStatisticsImpact()}
 	if d == nil {
 		return out
 	}
@@ -941,5 +942,6 @@ func BuildStatistics(d *DemoData) *StatisticsDemo {
 			break
 		}
 	}
+	out.Impact = buildStatisticsImpact(d, out, rounds, snapshots, frames, names)
 	return out
 }

@@ -6,7 +6,10 @@ const uiModule = require('../web/statistics-multi.js');
 const statistics = require('../web/statistics.js');
 const core = require('../web/statistics-multi-core.js');
 const library = require('../web/replay-library.js');
+const impact = require('../web/impact-core.js');
+const impactUI = require('../web/impact-ui.js');
 const html = fs.readFileSync(path.join(__dirname, '../web/statistics.html'), 'utf8');
+const impactNode = (root, suffix) => { const walk = node => [node, ...node.children.flatMap(walk)]; const node = walk(root).find(item => item.id === `multi-impact-${suffix}`); assert.ok(node, suffix); return node; };
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(setImmediate); };
 const p1 = '76561198000000001', p2 = '76561198000000002', p3 = '76561198000000003';
 function fixture(id, map = 'de_anubis', partner = p2) {
@@ -53,7 +56,7 @@ async function page(options = {}) {
     if (demo) return ok(demo[2] === 'status' ? { id: demo[1], status: 'ready', revision: data.get(demo[1])?.revision } : data.get(demo[1]));
     throw new Error(`Unexpected ${url}`);
   };
-  const app = uiModule.create({ document: { getElementById: get, createElement: tag => new Element(tag) }, window: { location, history: { state: null, replaceState(_state, _title, url) { location.href = String(url); } } }, core, statistics, library, fetch: fetcher, storage: { getItem: key => stored.get(key), setItem: (key, value) => stored.set(key, value) }, sleep: async () => {}, setTimeout: callback => { const id = ++timerId; timers.set(id, callback); return id; }, clearTimeout: id => timers.delete(id) });
+  const app = uiModule.create({ impact, impactUI, document: { getElementById: get, createElement: tag => new Element(tag) }, window: { location, history: { state: null, replaceState(_state, _title, url) { location.href = String(url); } } }, core, statistics, library, fetch: fetcher, storage: { getItem: key => stored.get(key), setItem: (key, value) => stored.set(key, value) }, sleep: async () => {}, setTimeout: callback => { const id = ++timerId; timers.set(id, callback); return id; }, clearTimeout: id => timers.delete(id) });
   await app.ready; await settle();
   return { get, requests, parsed, timers, href: () => location.href, saved: () => JSON.parse(stored.get(uiModule.storageKey) || '{}'),
     async click(id) { await get(id).click(); await settle(); }, async change(id, value) { get(id).value = value; await get(id).dispatch('change'); await settle(); },
@@ -69,6 +72,22 @@ async function page(options = {}) {
 const candidates = ui => ui.get('multi-player-list').querySelectorAll('input').map(input => input.dataset.playerId).sort();
 const checkedPlayers = ui => ui.get('multi-player-list').querySelectorAll('input').filter(input => input.checked).map(input => input.dataset.playerId).sort();
 const reportRequests = ui => ui.requests.filter(([url]) => url.endsWith('/statistics'));
+
+test('cross-demo impact only aggregates selected repeated players and follows map and side scopes', async () => {
+  const data = fixtures();
+  for (const demo of data) {
+    demo.impact = { version: '1', warnings: [], rounds: demo.players.map(player => ({ playerId: player.id, player: player.name, round: 1, half: 1, side: player.id === p1 ? 3 : 2, teamKey: player.id === p1 ? 'ct' : 't', eligible: true })),
+      kills: demo.kills.filter(kill => kill.killerId).map(kill => ({ playerId: kill.killerId, player: kill.killer, round: 1, half: 1, side: kill.killerSide, teamKey: kill.killerSide === 3 ? 'ct' : 't', index: kill.index, time: kill.time, score: kill.killerId === p1 ? 4000 : 875 })),
+      deaths: demo.kills.map(kill => ({ playerId: kill.victimId, player: kill.victim, round: 1, half: 1, side: kill.victimSide, teamKey: kill.victimSide === 3 ? 'ct' : 't', index: kill.index, time: kill.time, penalty: kill.killerId ? -1000 : null, corePenalty: kill.killerId ? 1000 : null, economyPenalty: 0, excludedReason: kill.killerId ? '' : '世界伤害不计个人惩罚' })) };
+  }
+  const view = await page({ datasets: data }); await view.click('multi-demos-all'); await view.click('multi-analyze');
+  const root = view.get('multi-impact'); assert.equal(impactNode(root, 'combined').textContent, '+15,500');
+  assert.equal(impactNode(root, 'players').children.length, 3); assert.doesNotMatch(content(impactNode(root, 'players')), /One match only/);
+  await view.click('multi-players-none'); await view.checkPlayer(p1); assert.equal(impactNode(root, 'combined').textContent, '+12,000');
+  await view.change('multi-map', 'de_anubis'); assert.equal(impactNode(root, 'combined').textContent, '+6,000'); assert.match(content(impactNode(root, 'death-rows')), /a.dem/); assert.doesNotMatch(content(impactNode(root, 'death-rows')), /c.dem/);
+  await view.change('multi-side', '2'); assert.equal(impactNode(root, 'combined').textContent, '—');
+  assert.equal(view.parsed.length, 0); assert.equal(view.requests.filter(([url]) => url.endsWith('/statistics')).length, 4);
+});
 
 test('single mode remains separate and multi mode never parses or reads reports until an explicit selection', async () => {
   const ui = await page({ href: 'http://127.0.0.1:9999/statistics.html?demo=a&view=stats#chart' });

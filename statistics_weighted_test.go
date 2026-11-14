@@ -197,7 +197,7 @@ func TestStatisticsWeightedLegacyCacheDerivesWithoutReparsing(t *testing.T) {
 	assertWeightedKill(t, result.Kills[0], 6, 4, 24)
 	assertWeightedKill(t, result.Kills[1], -4, 1, -4)
 	assertWeightedSummary(t, "legacy", result.Summary, 20, 2)
-	if result.RuleVersion != "2" || !result.Kills[0].Approx || !result.Kills[1].Approx || !result.Kills[1].PistolMismatch || j.Revision != id || len(a.pending) != 0 || fileHash(t, j.result) != before {
+	if result.RuleVersion != StatisticsVersion || !result.Kills[0].Approx || !result.Kills[1].Approx || !result.Kills[1].PistolMismatch || j.Revision != id || len(a.pending) != 0 || fileHash(t, j.result) != before {
 		t.Fatal("legacy derived report lost evidence or changed its original replay")
 	}
 }

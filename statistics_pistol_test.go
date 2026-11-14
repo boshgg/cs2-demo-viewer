@@ -140,7 +140,7 @@ func TestStatisticsPistolMismatchAggregatesByPlayerRoundSideHalfAndTeam(t *testi
 	dontCount.KillerID, dontCount.VictimID = "s3-p0", "s2-p1"
 	d.Events = []Event{a, b, c, dontCount}
 	result := BuildStatistics(d)
-	if result.RuleVersion != "2" || result.Summary.PistolMismatchKills != 3 || result.Summary.Score != -15 {
+	if result.RuleVersion != StatisticsVersion || result.Summary.PistolMismatchKills != 3 || result.Summary.Score != -15 {
 		t.Fatalf("total or rule version wrong: %+v", result.Summary)
 	}
 	assertPlayers := func(label string, players []StatisticsPlayer, want map[string]int) {
@@ -218,7 +218,7 @@ func TestStatisticsPistolMismatchRuleVersionInvalidatesDerivedCache(t *testing.T
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.RuleVersion != "2" || result.Summary.PistolMismatchKills != 1 || !result.Kills[0].PistolMismatch || j.Revision != id || len(a.pending) != 0 || j.Analysis {
+	if result.RuleVersion != StatisticsVersion || result.Summary.PistolMismatchKills != 1 || !result.Kills[0].PistolMismatch || j.Revision != id || len(a.pending) != 0 || j.Analysis {
 		t.Fatal("old derived report was not upgraded from replay without reparse or membership changes")
 	}
 	for _, value := range []any{StatisticsSummary{}, KillScore{}} {

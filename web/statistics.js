@@ -81,7 +81,7 @@
       if (!['ready', 'error'].includes(status.status)) await sleep(650, options.signal);
       checkActive(options);
     }
-    options.onProgress?.({ progress: 1, message: '正在计算回合经济与击杀净值…' });
+    options.onProgress?.({ progress: 1, message: '正在计算回合经济、击杀净值与死亡影响…' });
     const data = await json(await fetcher(`/api/demos/${encodeURIComponent(id)}/statistics`, { signal: options.signal, cache: 'no-store' }));
     checkActive(options);
     if (!data || !Array.isArray(data.rounds) || !Array.isArray(data.kills)) throw new Error('统计数据不完整，请确认本地程序已更新。');
@@ -89,7 +89,9 @@
   }
   function create(options = {}) {
     const doc = options.document || document, fetcher = options.fetch || fetch, win = options.window || window;
+    const impactCore = options.impact || win.ReplayImpact, impactUI = options.impactUI || win.ReplayImpactUI;
     const $ = id => doc.getElementById(id), make = (tag, text, className) => { const element = doc.createElement(tag); if (text != null) element.textContent = String(text); if (className) element.className = className; return element; };
+    const impactPanel = impactUI?.create({ document: doc, root: $('stats-impact'), prefix: 'stats', replayLink: (_id, time) => replayLink(time) });
     const schedule = options.setTimeout || setTimeout, unschedule = options.clearTimeout || clearTimeout;
     const folderStorage = options.storage || win.localStorage, folderStorageKey = 'cs2-statistics-library-view-v1';
     let folderPrefs = {}; try { folderPrefs = JSON.parse(folderStorage?.getItem(folderStorageKey) || '{}') || {}; } catch { /* Ignore invalid local view preferences. */ }
@@ -298,6 +300,7 @@
       }
       if (!rounds.childElementCount) emptyRow(rounds, 8);
       renderEconomy(); renderKills();
+      if (impactPanel && impactCore) impactPanel.render(impactCore.aggregate([state.data], selected));
     }
     function renderSplits(id, entries, key, selected) {
       const body = $(id); body.replaceChildren();

@@ -4,7 +4,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const statistics = require('../web/statistics.js');
 const library = require('../web/replay-library.js');
+const impact = require('../web/impact-core.js');
+const impactUI = require('../web/impact-ui.js');
 const html = fs.readFileSync(path.join(__dirname, '../web/statistics.html'), 'utf8');
+const impactNode = (root, suffix) => { const walk = node => [node, ...node.children.flatMap(walk)]; const node = walk(root).find(item => item.id === `stats-impact-${suffix}`); assert.ok(node, suffix); return node; };
 const settle = async () => { for (let i = 0; i < 10; i++) await new Promise(setImmediate); };
 const good = body => ({ ok: true, json: async () => body });
 const rejected = (error, status = 409) => ({ ok: false, status, json: async () => ({ error }) });
@@ -75,7 +78,7 @@ async function page(options = {}) {
     }
     throw new Error(`Unexpected API ${url}`);
   };
-  const app = statistics.create({ document: { getElementById: get, createElement: tag => new Element(tag) }, window: { ReplayLibrary: library, location, history: { state: null, replaceState: (_state, _title, url) => { location.href = String(url); } } }, storage: { getItem: key => preferences.get(key), setItem: (key, value) => preferences.set(key, value) }, fetch: fetcher, sleep: async () => {}, setTimeout: callback => { const id = ++nextTimer; timers.set(id, callback); return id; }, clearTimeout: id => timers.delete(id) });
+  const app = statistics.create({ impact, impactUI, document: { getElementById: get, createElement: tag => new Element(tag) }, window: { ReplayLibrary: library, location, history: { state: null, replaceState: (_state, _title, url) => { location.href = String(url); } } }, storage: { getItem: key => preferences.get(key), setItem: (key, value) => preferences.set(key, value) }, fetch: fetcher, sleep: async () => {}, setTimeout: callback => { const id = ++nextTimer; timers.set(id, callback); return id; }, clearTimeout: id => timers.delete(id) });
   await app.ready; await settle();
   return { get, requests, payloads, reparses, timers, href: () => location.href, folderSaved: () => JSON.parse(preferences.get('cs2-statistics-library-view-v1') || '{}'),
     async choose(id) { const button = get('stats-library-list').querySelectorAll('button').find(button => button.dataset.demoId === id); assert.ok(button); await button.click(); await settle(); },
@@ -91,6 +94,24 @@ async function page(options = {}) {
     async poll() { const callbacks = [...timers.values()]; timers.clear(); for (const callback of callbacks) callback(); await settle(); },
   };
 }
+
+test('single impact panel follows player, side and round filters without re-parsing or changing original net score', async () => {
+  const data = fixture();
+  data.impact = { version: '1', warnings: [], rounds: [{ playerId: 'p1', player: 'Alice', round: 1, half: 'first', side: 3, teamKey: 'alpha', eligible: true }, { playerId: 'p1', player: 'Alice', round: 13, half: 'second', side: 2, teamKey: 'alpha', eligible: true }, { playerId: 'p2', player: 'Bob', round: 1, half: 'first', side: 3, teamKey: 'alpha', eligible: true }],
+    kills: [{ playerId: 'p1', player: 'Alice', round: 1, half: 'first', side: 3, teamKey: 'alpha', index: 1, time: 30, score: 4000, reason: '劣势枪械贡献' }, { playerId: 'p2', player: 'Bob', round: 1, half: 'first', side: 3, teamKey: 'alpha', index: 3, time: 50, score: 625 }],
+    deaths: [{ playerId: 'p1', player: 'Alice', round: 13, half: 'second', side: 2, teamKey: 'alpha', index: 4, time: 1260, penalty: -1200, corePenalty: 1000, economyPenalty: 200, excludedReason: '', next: { reason: '开局武器降档' } }] };
+  const view = await page({ datasets: [data] }); await view.choose('match'); const root = view.get('stats-impact');
+  assert.equal(impactNode(root, 'combined').textContent, '+3,425'); assert.equal(view.get('stats-total-score').textContent, '+4');
+  await view.change('stats-player', 'p1'); assert.equal(impactNode(root, 'combined').textContent, '+2,800'); assert.equal(impactNode(root, 'perRound').textContent, '+1,400');
+  await view.change('stats-side', '2'); assert.equal(impactNode(root, 'combined').textContent, '-1,200'); assert.equal(impactNode(root, 'death-rows').children.length, 1);
+  await view.change('stats-side', 'all'); await view.change('stats-round', '1'); assert.equal(impactNode(root, 'combined').textContent, '+4,000'); assert.match(content(impactNode(root, 'death-rows')), /没有死亡记录/);
+  assert.equal(view.payloads.length, 0); assert.equal(view.requests.filter(([url]) => url.endsWith('/statistics')).length, 1);
+});
+
+test('single impact shows compatibility message for reports without impact data', async () => {
+  const view = await page(); await view.choose('match'); assert.equal(impactNode(view.get('stats-impact'), 'unavailable').hidden, false);
+  assert.match(content(impactNode(view.get('stats-impact'), 'unavailable')), /无需删除录像/);
+});
 
 test('cross-demo mode never auto-parses the single-demo URL in the hidden panel', async () => {
   const view = await page({ href: 'http://127.0.0.1:9999/statistics.html?mode=multi&demo=match', catalog: [{ id: 'match', name: 'match.dem', status: 'discovered', available: true }] });
