@@ -21,9 +21,9 @@ function dataset(id, map = 'de_mirage', x = 256, y = 768) {
 }
 
 async function page(datasets = [dataset('one')], pageOptions = {}) {
-  const elements = new Map(), canvases = [], downloads = [], requests = [], timers = new Map(), parseBodies = [];
+  const elements = new Map(), canvases = [], downloads = [], requests = [], timers = new Map(), parseBodies = [], reparseBodies = [], summaryFailures = new Map();
   const mapGates = new Map(), resizeObservers = [], timerDelays = new Map(), savedWrites = [];
-  let nextTimer = 0, analysisCalls = 0, refreshError = '';
+  let nextTimer = 0, analysisCalls = 0, refreshError = '', reparseRequestError = '';
   class Element {
     constructor(tag = 'div') {
       this.tagName = tag; this.children = []; this.listeners = {}; this.style = {}; this.dataset = {};
@@ -87,7 +87,7 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
   const scanned = new Set(source.keys());
   const catalogDemos = () => [...new Map([...libraryFiles, ...source]).values()].map(d => ({
     id: d.id, name: d.name, map: source.has(d.id) || d.jobStatus === 'ready' ? d.map : d.catalogMap || '', status: d.jobStatus || (source.has(d.id) ? 'ready' : 'discovered'),
-    revision: d.revision, error: d.parseError, analysis: source.has(d.id) && d.analysis !== false,
+    revision: d.revision, error: d.parseError, analysis: source.has(d.id) && d.analysis !== false, reparse: d.reparse,
     available: d.available !== false, sourceCount: d.sourceCount || 1,
     sources: d.sources || [{ path: d.name, kind: 'dem', available: d.available !== false }],
   }));
@@ -98,6 +98,22 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
     if (url === '/api/session-settings') return response(pageOptions.session || { sessionId: '', settings: null });
     if (url === '/api/library') return response({ count: libraryFiles.size, ...libraryInfo });
     if (url === '/api/library/demos') return response({ demos: catalogDemos(), scanning: libraryInfo.scanning === true });
+    if (url === '/api/library/reparse' && options.method === 'POST') {
+      const body = JSON.parse(options.body); reparseBodies.push(body);
+      if (pageOptions.reparseGate) await pageOptions.reparseGate;
+      if (reparseRequestError) return { ok: false, status: 503, json: async () => ({ error: reparseRequestError }) };
+      const result = { queued: [], active: [], skipped: [] };
+      for (const id of body.ids) {
+        const demo = source.get(id);
+        if (!demo || demo.reparseSkip) {
+          result.skipped.push({ id, name: demo?.name || id, error: demo?.reparseSkip || '录像不存在' });
+          if (demo) source.set(id, { ...demo, reparse: { status: 'error', error: demo.reparseSkip } });
+        }
+        else if (['queued', 'parsing'].includes(demo.reparse?.status)) result.active.push(id);
+        else { result.queued.push(id); source.set(id, { ...demo, reparse: { status: 'queued', progress: 0, message: '等待重新解析', revision: `${id}-next` } }); }
+      }
+      return response(result);
+    }
     const parsing = /^\/api\/library\/demos\/([^/]+)\/parse$/.exec(url);
     if (parsing && options.method === 'POST') {
       const id = decodeURIComponent(parsing[1]), demo = source.get(id) || libraryFiles.get(id);
@@ -116,7 +132,7 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
       for (const id of libraryFiles.keys()) if (!scanned.has(id)) { scanned.add(id); added++; }
       return response({ added, unchanged: libraryFiles.size - added, queued: [...source.values()].filter(d => d.jobStatus === 'queued').length, directory: 'F:\\viewer\\demo', errors: pageOptions.libraryErrors || [] });
     }
-    if (url === '/api/analyses') return response([...source.values()].filter(d => d.analysis !== false && d.jobStatus !== 'discovered').map(d => ({ id: d.id, name: d.name, map: d.map, status: d.jobStatus || 'ready', revision: d.revision, error: d.parseError })));
+    if (url === '/api/analyses') return response([...source.values()].filter(d => d.analysis !== false && d.jobStatus !== 'discovered').map(d => ({ id: d.id, name: d.name, map: d.map, status: d.jobStatus || 'ready', revision: d.revision, error: d.parseError, reparse: d.reparse })));
     const removingAnalysis = /^\/api\/analyses\/([^/]+)$/.exec(url);
     if (removingAnalysis && options.method === 'DELETE') {
       const id = decodeURIComponent(removingAnalysis[1]);
@@ -130,6 +146,7 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
     const match = /^\/api\/demos\/([^/]+)(\/(?:analysis|status))?$/.exec(url);
     if (match) {
       if (options.method === 'DELETE') { source.delete(match[1]); return response({}); }
+      if (match[2] === '/analysis' && summaryFailures.has(match[1])) return { ok: false, status: 503, json: async () => ({ error: summaryFailures.get(match[1]) }) };
       if (match[2] === '/analysis' && source.has(match[1])) return response(source.get(match[1]));
       if (match[2] === '/status' && source.has(match[1])) {
         const demo = source.get(match[1]);
@@ -166,13 +183,15 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
   const main = get('analysis-canvas');
   const renderedHeat = () => main.context.draws.map(args => args[0]).find(image => image.imageData) || null;
   const hasVisibleHeat = () => renderedHeat()?.imageData.data.some((value, index) => index % 4 === 3 && value > 0) || false;
-  return { get, main, canvases, downloads, requests, parseBodies, renderedHeat, hasVisibleHeat, href: () => location.href,
+  return { get, main, canvases, downloads, requests, parseBodies, reparseBodies, renderedHeat, hasVisibleHeat, href: () => location.href,
     saved: () => JSON.parse(stored.get('cs2-analysis-v4') || '{}'),
     savedWrites, analysisCalls: () => analysisCalls,
     setLibraryFiles(demos) { libraryFiles.clear(); for (const demo of demos) libraryFiles.set(demo.id, demo); },
     setLibraryInfo(info) { Object.assign(libraryInfo, info); },
     setJob(demo) { source.set(demo.id, demo); },
     failRefresh(message) { refreshError = message; },
+    failReparseRequest(message) { reparseRequestError = message; },
+    failSummary(id, message) { if (message) summaryFailures.set(id, message); else summaryFailures.delete(id); },
     async pollLibrary() { for (const [id, callback] of [...timers]) if (timerDelays.get(id) === 1200) { timers.delete(id); timerDelays.delete(id); callback(); } await settle(); },
     async upload(...names) { get('analysis-files').files = names.map(name => ({ name, size: 1024 })); await get('analysis-files').dispatch('change'); await settle(); },
     async change(id, value) { get(id).value = value; await get(id).dispatch('change'); await settle(); },
@@ -844,4 +863,98 @@ test('a shared upload parser error retains the retryable catalog record without 
   assert.match(ui.get('global-error').textContent, /录像读取失败/);
   await clickAndSettle(ui, 'open-analysis-library');
   assert.equal(catalogCheckbox(ui, 'broken-shared').disabled, false);
+});
+
+test('bulk reparse includes every imported ready match across maps but excludes discovered and playback-only records', async () => {
+  const chosen = { ...rosterDemo('chosen', 'de_nuke'), revision: 'v1' }, hidden = { ...rosterDemo('hidden', 'de_ancient'), revision: 'v1' };
+  const playback = { ...dataset('playback'), analysis: false }, discovered = { ...dataset('interrupted'), jobStatus: 'discovered' }, failed = { ...dataset('failed'), jobStatus: 'error', parseError: '首次解析失败' };
+  const saved = { selectedDemos: ['chosen'], selectedTeams: ['alias:squad'], selectedPlayers: ['p1'], aliases: { alpha: 'Squad' }, map: 'de_nuke', floor: 'lower', side: '3', query: 'Alice', layers: ['deaths'], scale: 'linear' };
+  const ui = await page([chosen, hidden, playback, discovered, failed], { saved, libraryDemos: [dataset('unselected')], mapInfo: { lowerMaxZ: 100, lowerRadar: '/maps/lower.png' } });
+  const before = ui.saved(), calls = ui.requests.filter(([url]) => url.endsWith('/analysis')).length;
+  await clickAndSettle(ui, 'reparse-analyses');
+  assert.deepEqual(ui.reparseBodies, [{ ids: ['chosen', 'hidden'] }]);
+  assert.equal(deaths(ui), 1); assert.deepEqual(ui.saved(), before);
+  assert.equal(ui.requests.filter(([url]) => url.endsWith('/analysis')).length, calls, 'queued replacement does not fetch or discard the current summary');
+  assert.equal(ui.get('reparse-analyses').disabled, true);
+  assert.match(ui.get('analysis-reparse-summary').textContent, /等待 2/);
+  assert.equal(ui.get('analysis-reparse-status').hidden, false);
+  assert.equal(ui.parseBodies.length, 0);
+});
+
+test('successful replacement reloads only changed revisions and preserves player groups, filters, map, floor, zoom and pan', async () => {
+  const original = { ...rosterDemo('selected', 'de_nuke'), revision: 'v1' }, other = { ...rosterDemo('other', 'de_ancient'), revision: 'v1' };
+  const saved = { selectedDemos: ['selected'], selectedTeams: ['alias:squad'], selectedPlayers: ['p1'], aliases: { alpha: 'Squad' }, map: 'de_nuke', floor: 'lower', side: '3', query: 'Alice', layers: ['deaths'], radius: 224, opacity: 75, scale: 'linear' };
+  const ui = await page([original, other], { saved, mapInfo: { lowerMaxZ: 100, lowerRadar: '/maps/lower.png' } });
+  await ui.main.dispatch('keydown', { key: '+' });
+  await ui.main.dispatch('pointerdown', { pointerId: 1, clientX: 200, clientY: 200 });
+  await ui.main.dispatch('pointermove', { pointerId: 1, clientX: 237, clientY: 219 });
+  await ui.main.dispatch('pointerup', { pointerId: 1 });
+  const before = ui.saved(), projection = ui.main.context.draws[0].slice(1), zoom = ui.get('zoom-value').textContent;
+  await clickAndSettle(ui, 'reparse-analyses');
+  ui.setJob({ ...original, reparse: { status: 'parsing', progress: .45, message: '提取精确事件' } }); await ui.pollLibrary();
+  assert.equal(deaths(ui), 1); assert.ok(ui.get('analysis-reparse-details').children.some(item => /45%/.test(item.textContent)));
+  const updated = { ...rosterDemo('selected', 'de_nuke'), revision: 'v2', reparse: { status: 'ready', progress: 1, revision: 'v2' } }; updated.series[0].cells[0][5] = 9;
+  ui.setJob(updated); ui.setJob({ ...other, revision: 'v2', reparse: { status: 'ready', progress: 1, revision: 'v2' } }); await ui.pollLibrary();
+  assert.equal(deaths(ui), 9); assert.deepEqual(ui.saved(), before);
+  assert.equal(ui.get('analysis-map').value, 'de_nuke'); assert.equal(ui.get('analysis-floor').value, 'lower');
+  assert.equal(ui.get('zoom-value').textContent, zoom); assert.deepEqual(ui.main.context.draws[0].slice(1), projection);
+  assert.equal(ui.get('reparse-analyses').disabled, false); assert.match(ui.get('analysis-reparse-summary').textContent, /完成 2/);
+  for (const id of ['selected', 'other']) assert.equal(ui.requests.filter(([url]) => url === `/api/demos/${id}/analysis`).length, 2);
+  const count = ui.requests.length; await ui.pollLibrary(); assert.equal(ui.requests.length, count, 'a finished replacement does not poll indefinitely');
+});
+
+test('parser failure and missing source retain old heatmaps and offer a retry limited to failed or skipped IDs', async () => {
+  const bad = { ...dataset('bad'), revision: 'old' }, missing = { ...dataset('missing'), revision: 'old', reparseSkip: '原始录像不可用；请放回 demo 文件夹并刷新' }, good = { ...dataset('good'), revision: 'old' };
+  const ui = await page([bad, missing, good]); const before = ui.saved();
+  await clickAndSettle(ui, 'reparse-analyses');
+  ui.setJob({ ...bad, reparse: { status: 'error', error: '完整录像校验失败', revision: 'failed-attempt' } });
+  ui.setJob({ ...good, revision: 'new', reparse: { status: 'ready', revision: 'new' } }); await ui.pollLibrary();
+  assert.equal(deaths(ui), 3); assert.deepEqual(ui.saved(), before);
+  assert.ok(ui.get('analysis-reparse-details').children.some(item => /完整录像校验失败.*旧结果仍保留/.test(item.textContent)));
+  assert.ok(ui.get('analysis-reparse-details').children.some(item => /原始录像不可用.*旧结果仍保留/.test(item.textContent)));
+  assert.equal(ui.get('retry-reparse-failures').hidden, false); assert.equal(ui.get('retry-reparse-failures').disabled, false);
+  for (const id of ['bad', 'missing']) assert.equal(ui.requests.filter(([url]) => url === `/api/demos/${id}/analysis`).length, 1);
+  ui.setJob({ ...missing, reparseSkip: '' }); await clickAndSettle(ui, 'retry-reparse-failures');
+  assert.deepEqual([...ui.reparseBodies[1].ids].sort(), ['bad', 'missing']);
+  assert.equal(ui.requests.some(([, method]) => method === 'DELETE'), false);
+});
+
+test('reparse progress and failure are recovered from server metadata after page reload', async () => {
+  const ongoing = { ...dataset('ongoing'), revision: 'old', reparse: { status: 'parsing', progress: .3, message: '后台重解析' } };
+  const failed = { ...dataset('failed'), revision: 'old', reparse: { status: 'error', error: '上次解析已中断' } };
+  const ui = await page([ongoing, failed], { saved: { selectedDemos: ['ongoing'] } });
+  assert.equal(deaths(ui), 1); assert.equal(ui.get('reparse-analyses').disabled, true); assert.equal(ui.reparseBodies.length, 0);
+  assert.match(ui.get('analysis-reparse-summary').textContent, /进行 1/); assert.ok(ui.get('analysis-reparse-details').children.some(item => /上次解析已中断/.test(item.textContent)));
+  const calls = ui.requests.filter(([url]) => url === '/api/analyses').length; await ui.pollLibrary();
+  assert.equal(ui.requests.filter(([url]) => url === '/api/analyses').length, calls + 1);
+  assert.equal(ui.requests.filter(([url]) => url === '/api/demos/ongoing/analysis').length, 1);
+});
+
+test('duplicate reparse clicks are ignored while submitting and while server replacements are active', async () => {
+  let release; const reparseGate = new Promise(resolve => { release = resolve; });
+  const ui = await page([dataset('one')], { reparseGate });
+  const pending = ui.get('reparse-analyses').click(); await settle();
+  await ui.get('reparse-analyses').click(); assert.equal(ui.reparseBodies.length, 1);
+  release(); await pending; await settle();
+  await ui.get('reparse-analyses').click(); assert.equal(ui.reparseBodies.length, 1);
+  assert.equal(deaths(ui), 1);
+});
+
+test('a failed refresh of a newly published summary preserves the previous data until replacement succeeds', async () => {
+  const old = { ...dataset('one'), revision: 'old' }, ui = await page([old]);
+  await clickAndSettle(ui, 'reparse-analyses');
+  const updated = { ...dataset('one'), revision: 'new', reparse: { status: 'ready', revision: 'new' } }; updated.series[0].cells[0][5] = 8;
+  ui.setJob(updated); ui.failSummary('one', '读取新缓存暂时失败'); await ui.pollLibrary();
+  assert.equal(deaths(ui), 1); assert.ok(ui.hasVisibleHeat());
+  assert.ok(ui.get('demo-list').querySelectorAll('small').some(item => /暂用旧结果/.test(item.textContent)));
+  ui.failSummary('one', ''); await ui.pollLibrary();
+  assert.equal(deaths(ui), 8); assert.equal(ui.get('demo-list').querySelectorAll('small').some(item => /暂用旧结果/.test(item.textContent)), false);
+});
+
+test('a rejected bulk request leaves cached data and explicit empty selections untouched and can be retried', async () => {
+  const ui = await page([dataset('one')], { saved: { selectedDemos: [], selectedTeams: [], selectedPlayers: [] } }); const before = ui.saved();
+  ui.failReparseRequest('服务暂不可用'); await clickAndSettle(ui, 'reparse-analyses');
+  assert.equal(deaths(ui), 0); assert.deepEqual(ui.saved(), before); assert.match(ui.get('analysis-reparse-summary').textContent, /服务暂不可用.*旧缓存与筛选仍保留/);
+  assert.equal(ui.get('reparse-analyses').disabled, false);
+  ui.failReparseRequest(''); await clickAndSettle(ui, 'reparse-analyses'); assert.equal(ui.reparseBodies.length, 2); assert.deepEqual(ui.saved().selectedDemos, []);
 });

@@ -1,4 +1,4 @@
-param([string]$Version = '4.0.6')
+param([string]$Version = '4.0.7')
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Use a numeric semantic version, for example 4.0.0.' }
@@ -53,6 +53,7 @@ CS2 Replay v$Version - Windows x64 便携版
 4. 分析页从本地录像库勾选需要的比赛并加入分析，按地图、玩家ID、队伍和CT/T筛选叠加，不设10场数量上限。
 5. 数据分析页显示回合经济类型、开局装备证据、逐次击杀净值，以及玩家、队伍、CT/T、半场和全场累计。旧缓存中的采样推断会标明。
 6. 扫描只更新录像列表并校验去重，不自动解析全部比赛。重复刷新、不同子目录、ZIP与原DEM中的相同内容不会重复统计；原始文件保留。
+7. 旧缓存可在地图分析页点击「重新解析已导入」，或在数据分析页重新解析当前比赛 / 全部已解析录像。原文件或 ZIP 仍在 demo 目录时无需删除再导入；队伍分组和筛选保留，新结果完成后才替换旧缓存，失败可继续使用旧数据。
 
 已包含可执行程序，不需要安装 Go、Node.js 或 CS2。地图与图标内嵌，可离线使用。
 保持启动终端开启，在终端按 Ctrl+C 停止。解析记录保存在本目录 data 文件夹，重启会自动恢复，无需逐个重新导入；原始 demo 文件不会删除。

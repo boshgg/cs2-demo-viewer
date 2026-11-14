@@ -266,7 +266,7 @@ func statisticsEquipment(p PlayerFrame, names map[string]string) (EquipmentEvide
 }
 
 func statisticsEconomy(snapshot EconomySnapshot, side int, pistol bool, names map[string]string, group *analysisTeamGroup) TeamEconomy {
-	e := TeamEconomy{Side: side, Type: "unknown", Label: "未知", Source: snapshot.Source, Time: snapshot.Time, Complete: snapshot.Source == "freeze_end" || snapshot.Source == "sampled_cache", MatchedTypes: []string{}, Players: []EquipmentEvidence{}}
+	e := TeamEconomy{Side: side, Type: "unknown", Label: "未知", Source: snapshot.Source, Time: snapshot.Time, Complete: snapshot.Source == "freeze_end" || snapshot.Source == "sampled_cache" || snapshot.Source == "sampled_frame", MatchedTypes: []string{}, Players: []EquipmentEvidence{}}
 	if side == 3 {
 		e.Name = snapshot.CTName
 	} else {
@@ -361,6 +361,8 @@ func statisticsEconomy(snapshot EconomySnapshot, side int, pistol bool, names ma
 	}
 	if e.Source == "sampled_cache" {
 		e.Reason += " 本次依据旧缓存邻近采样，不能视为冻结结束精确购买记录。"
+	} else if e.Source == "sampled_frame" {
+		e.Reason += " 本回合缺少冻结结束事件快照，依据新版解析的邻近帧推断，不能视为精确记录。"
 	}
 	return e
 }
@@ -711,11 +713,15 @@ func BuildStatistics(d *DemoData) *StatisticsDemo {
 		sort.SliceStable(list, func(i, j int) bool { return list[i].T < list[j].T })
 	}
 	snapshots := map[int]EconomySnapshot{}
-	sampled := false
+	sampled, sampledFrame := false, false
 	for _, r := range rounds {
 		s := statisticsEconomySnapshot(r, frames[r.Number])
+		if d.StatisticsVersion > 0 && s.Source == "sampled_cache" {
+			s.Source = "sampled_frame"
+		}
 		snapshots[r.Number] = s
 		sampled = sampled || s.Source == "sampled_cache"
+		sampledFrame = sampledFrame || s.Source == "sampled_frame"
 		for _, p := range s.Players {
 			if p.ID != "" && names[p.ID] == "" {
 				names[p.ID] = p.ID
@@ -889,6 +895,9 @@ func BuildStatistics(d *DemoData) *StatisticsDemo {
 	}
 	if sampled {
 		out.Warnings = append(out.Warnings, "缺少冻结结束精确快照时，经济分类使用前后 0.25 秒内最近缓存采样；离开该窗口或字段不足时标未知。")
+	}
+	if sampledFrame {
+		out.Warnings = append(out.Warnings, "本次已使用新版解析；部分回合未记录冻结结束事件，经济分类采用前后 0.25 秒内邻近帧推断，并逐回合标明；重新解析不能补造录像中缺失的事件。")
 	}
 	for _, k := range out.Kills {
 		if k.Approx {

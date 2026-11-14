@@ -223,6 +223,26 @@ func TestStatisticsSampledEconomyIsLocalToRoundAndQuarterSecond(t *testing.T) {
 	}
 }
 
+func TestModernMissingFreezeSnapshotIsNotLabeledLegacyCache(t *testing.T) {
+	players := append(statsSquad(3, "AK-47", 9000, 100, statsFour()), statsSquad(2, "AK-47", 9000, 100, statsFour())...)
+	d := statsDemo(players)
+	d.StatisticsVersion = 1
+	d.Rounds[0].Economy = nil
+	d.Frames = []Frame{{Round: 2, T: 10.1, Players: players}}
+	result := BuildStatistics(d)
+	got := result.Rounds[0].CT
+	if got.Source != "sampled_frame" || got.Type != "full" || !strings.Contains(got.Reason, "邻近帧") || strings.Contains(got.Reason, "旧缓存") {
+		t.Fatalf("new replay was mislabeled as legacy: %+v", got)
+	}
+	if !strings.Contains(strings.Join(result.Warnings, " "), "已使用新版解析") {
+		t.Fatal("missing-event limitation should remain explicit after reparse")
+	}
+	d.Frames[0].T = 10.3
+	if got := BuildStatistics(d).Rounds[0].CT; got.Source != "unknown" {
+		t.Fatal("modern frames must retain the same quarter-second evidence limit")
+	}
+}
+
 func TestStatisticsActualKillWeaponAndVictimActiveWeaponScoring(t *testing.T) {
 	d := statsDemo(append(statsSquad(3, "AWP", 0, 100, nil), statsSquad(2, "AWP", 0, 100, nil)...))
 	d.Events = []Event{statsKill("Glock-18", "AWP"), statsKill("AWP", "Glock-18"), statsKill("AK-47", "M4A4"), statsKill("Nova", "Negev")}

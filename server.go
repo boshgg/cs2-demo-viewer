@@ -28,15 +28,16 @@ const maxReplayHistory = 6
 
 type job struct {
 	mu                   sync.Mutex
-	ID                   string  `json:"id"`
-	Revision             string  `json:"revision"`
-	Status               string  `json:"status"`
-	Progress             float64 `json:"progress"`
-	Message              string  `json:"message,omitempty"`
-	Error                string  `json:"error,omitempty"`
-	Name                 string  `json:"name"`
-	Map                  string  `json:"map,omitempty"`
-	Analysis             bool    `json:"analysis"`
+	ID                   string        `json:"id"`
+	Revision             string        `json:"revision"`
+	Status               string        `json:"status"`
+	Progress             float64       `json:"progress"`
+	Message              string        `json:"message,omitempty"`
+	Error                string        `json:"error,omitempty"`
+	Name                 string        `json:"name"`
+	Map                  string        `json:"map,omitempty"`
+	Analysis             bool          `json:"analysis"`
+	Reparse              *reparseState `json:"reparse,omitempty"`
 	name, source, result string
 	analysisResult       string
 	ownedSource          bool
@@ -47,6 +48,10 @@ type job struct {
 	created              time.Time
 	ctx                  context.Context
 	cancel               context.CancelFunc
+	reparseStage         *job
+	reparseBase          *job
+	reparseBaseRevision  string
+	stopBaseCancellation func() bool
 }
 
 type app struct {
@@ -74,6 +79,7 @@ type app struct {
 	statisticsGate  chan struct{}
 	statisticsKey   string
 	statisticsJSON  []byte
+	reparseParser   func(context.Context, string, string, string, func(float64)) (*DemoData, error)
 }
 
 func newApp(root string, assets fs.FS) *app {
@@ -135,6 +141,7 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("POST /api/library/demos/{id}/parse", a.parseLibraryDemo)
 	mux.HandleFunc("DELETE /api/library/demos/{id}", a.removeLibraryDemo)
 	mux.HandleFunc("POST /api/library/refresh", a.refreshLibrary)
+	mux.HandleFunc("POST /api/library/reparse", a.reparseLibrary)
 	mux.HandleFunc("GET /api/demos/{id}", a.result)
 	mux.HandleFunc("DELETE /api/demos/{id}", a.remove)
 	mux.HandleFunc("GET /api/maps/{map}", a.mapInfo)
@@ -457,7 +464,7 @@ func (a *app) analyses(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0, len(jobs))
 	for _, j := range jobs {
 		j.mu.Lock()
-		items = append(items, map[string]any{"id": j.ID, "revision": j.Revision, "name": j.Name, "map": j.Map, "analysis": true, "status": j.Status, "progress": j.Progress, "message": j.Message, "error": j.Error})
+		items = append(items, map[string]any{"id": j.ID, "revision": j.Revision, "name": j.Name, "map": j.Map, "analysis": true, "status": j.Status, "progress": j.Progress, "message": j.Message, "error": j.Error, "reparse": copyReparseState(j.Reparse)})
 		j.mu.Unlock()
 	}
 	a.mu.Unlock()
@@ -534,7 +541,11 @@ func (a *app) worker() {
 		}
 		a.mu.Unlock()
 		if j != nil {
-			a.process(j)
+			if j.reparseBase != nil {
+				a.processReparse(j)
+			} else {
+				a.process(j)
+			}
 			continue
 		}
 		select {

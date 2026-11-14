@@ -161,7 +161,7 @@ func (a *app) libraryDemos(w http.ResponseWriter, r *http.Request) {
 			origins = append(origins, map[string]any{"path": filepath.ToSlash(rel), "member": source.Member, "kind": kind, "available": a.sourceAvailable(source)})
 		}
 		j.mu.Lock()
-		items = append(items, map[string]any{"id": j.ID, "name": j.Name, "map": j.Map, "status": j.Status, "revision": j.Revision, "progress": j.Progress, "message": j.Message, "error": j.Error, "analysis": j.Analysis, "sourceCount": len(origins), "sources": origins, "available": a.jobAvailable(j, sources)})
+		items = append(items, map[string]any{"id": j.ID, "name": j.Name, "map": j.Map, "status": j.Status, "revision": j.Revision, "progress": j.Progress, "message": j.Message, "error": j.Error, "analysis": j.Analysis, "sourceCount": len(origins), "sources": origins, "available": a.jobAvailable(j, sources), "reparse": copyReparseState(j.Reparse)})
 		j.mu.Unlock()
 	}
 	scanning := a.scanning

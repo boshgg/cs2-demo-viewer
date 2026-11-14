@@ -7,6 +7,8 @@
   const loadingJobs = new Map();
   const catalog = new Map(), catalogSelection = new Set();
   let catalogAdding = false, catalogLoading = false, catalogOpener = null;
+  let reparseSubmitting = false, reparseRequestError = '';
+  const reparseSkipped = new Map();
   const metricNames = { movement: '移动', engagements: '交火', deaths: '死亡', shots: '开火' };
   const heatResolution = 384;
   const metrics = ['movement', 'engagements', 'deaths', 'shots'];
@@ -100,6 +102,7 @@
       const title = node('strong', job.name || '解析中的比赛'); title.title = job.name || '';
       const info = node('small', job.status === 'ready' ? `${job.map || ''}${job.synthetic ? ' · 合成示例' : ''}` : [mapOf(job), job.error || job.message || '正在处理…'].filter(Boolean).join(' · '), job.synthetic ? 'badge-synthetic' : job.status === 'error' ? 'status-error' : '');
       words.append(title, info);
+      if (job.summaryError) words.append(node('small', `新摘要读取失败，暂用旧结果：${job.summaryError}`, 'warning-inline'));
       if (job.warnings?.length) { const warning = node('small', `⚠ ${job.warnings[0]}${job.warnings.length > 1 ? `（另有 ${job.warnings.length - 1} 条提示）` : ''}`, 'warning-inline'); warning.title = job.warnings.join('\n'); words.append(warning); }
       label.append(check, words); row.append(label);
       const focus = node('button', '查看', 'text-button demo-focus'); focus.type = 'button'; focus.disabled = !state.demos.has(job.id); focus.title = '切换到这场 Demo 的地图并显示其队伍与玩家'; focus.setAttribute('aria-label', `查看 ${job.name || '比赛'} 所在地图`);
@@ -110,6 +113,49 @@
     $('sample-analysis').disabled = state.uploading || catalogAdding;
     $('refresh-library').disabled = !libraryEnabled || libraryRefreshing || libraryScanning || state.uploading || catalogAdding;
     renderCatalog();
+    renderReparse();
+  }
+  function importedReadyJobs() { return [...state.jobs.values()].filter(job => job.owned && !job.synthetic && job.status === 'ready'); }
+  function reparseActive(job) { return ['queued', 'parsing'].includes(job.reparse?.status); }
+  function reparseFailures() {
+    const failures = new Map([...reparseSkipped].filter(([id]) => state.jobs.has(id)));
+    for (const job of state.jobs.values()) if (job.reparse?.status === 'error' && !failures.has(job.id)) failures.set(job.id, { id: job.id, name: job.name, error: job.reparse.error || job.reparse.message || '重新解析失败' });
+    return failures;
+  }
+  function renderReparse() {
+    const jobs = importedReadyJobs(), active = jobs.filter(reparseActive), failures = reparseFailures();
+    $('reparse-analyses').textContent = reparseSubmitting ? '正在提交重新解析…' : active.length ? `重新解析中（${active.length} 场）` : `重新解析已导入（${jobs.length} 场）`;
+    $('reparse-analyses').disabled = reparseSubmitting || state.uploading || catalogAdding || !!active.length || !jobs.length;
+    $('retry-reparse-failures').hidden = !failures.size;
+    $('retry-reparse-failures').disabled = reparseSubmitting || state.uploading || catalogAdding || !!active.length || !jobs.some(job => failures.has(job.id));
+    const attempts = jobs.filter(job => job.reparse && !reparseSkipped.has(job.id));
+    const queued = attempts.filter(job => job.reparse.status === 'queued').length, parsing = attempts.filter(job => job.reparse.status === 'parsing').length, completed = attempts.filter(job => job.reparse.status === 'ready').length;
+    $('analysis-reparse-status').hidden = !reparseSubmitting && !attempts.length && !failures.size && !reparseRequestError;
+    $('analysis-reparse-summary').textContent = reparseRequestError || (reparseSubmitting ? '正在提交已加入分析的比赛…' : `重新解析：等待 ${queued} · 进行 ${parsing} · 完成 ${completed} · 失败 / 跳过 ${failures.size}`);
+    const progress = attempts.reduce((sum, job) => sum + (['ready', 'error'].includes(job.reparse.status) ? 1 : Math.max(0, Math.min(1, Number(job.reparse.progress) || 0))), 0);
+    $('analysis-reparse-progress').value = attempts.length ? progress / attempts.length : 0;
+    $('analysis-reparse-progress').hidden = !active.length;
+    const details = $('analysis-reparse-details'); details.replaceChildren();
+    for (const job of active) details.append(node('li', `${job.name || job.id}：${job.reparse.message || (job.reparse.status === 'queued' ? '等待重新解析' : '正在重新解析')}${job.reparse.status === 'parsing' ? ` · ${Math.round((Number(job.reparse.progress) || 0) * 100)}%` : ''}`));
+    for (const failure of failures.values()) details.append(node('li', `${failure.name || failure.id}：${failure.error}。旧结果仍保留。`, 'status-error'));
+    details.hidden = !details.childElementCount;
+  }
+  async function requestReparse(ids) {
+    if (reparseSubmitting || state.uploading || catalogAdding || importedReadyJobs().some(reparseActive)) return;
+    const eligible = new Set(importedReadyJobs().map(job => job.id)), selected = [...new Set(ids)].filter(id => eligible.has(id));
+    if (!selected.length) return;
+    reparseSubmitting = true; reparseRequestError = ''; renderReparse();
+    try {
+      const result = await json(await fetch('/api/library/reparse', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: selected }) }));
+      for (const id of selected) reparseSkipped.delete(id);
+      for (const id of result.queued || []) { const job = state.jobs.get(id); if (job) job.reparse = { status: 'queued', progress: 0, message: '等待重新解析' }; }
+      for (const id of result.active || []) { const job = state.jobs.get(id); if (job && !reparseActive(job)) job.reparse = { status: 'parsing', progress: 0, message: '已有重新解析任务，继续等待' }; }
+      for (const skipped of result.skipped || []) reparseSkipped.set(skipped.id, skipped);
+      renderReparse();
+      if (syncPromise) await syncPromise;
+      await syncServerJobs();
+    } catch (error) { reparseRequestError = `重新解析请求失败：${error.message}。旧缓存与筛选仍保留，可重试。`; }
+    finally { reparseSubmitting = false; renderReparse(); scheduleLibraryPoll(); }
   }
   async function removeJob(id) {
     const job = state.jobs.get(id);
@@ -259,7 +305,7 @@
     if (!data || !Array.isArray(data.series) || !Array.isArray(data.players)) throw new Error('分析摘要格式不完整，请重新导入 Demo。');
     if (options.batch && !state.jobs.has(id)) return null;
     const existing = state.jobs.get(id);
-    state.jobs.set(id, { ...existing, ...options, id, name: data.name, map: data.map, status: 'ready', synthetic: data.synthetic, warnings: data.warnings }); state.demos.set(id, data);
+    state.jobs.set(id, { ...existing, ...options, id, name: data.name, map: data.map, status: 'ready', synthetic: data.synthetic, warnings: data.warnings, loadedRevision: existing?.revision, summaryError: '' }); state.demos.set(id, data);
     if (options.batch) return data;
     updateWorkerData(); renderJobs();
     if (options.focus) await focusDemo(data);
@@ -268,7 +314,7 @@
   }
   function scheduleLibraryPoll() {
     clearTimeout(libraryTimer);
-    if (!state.uploading && (libraryScanning || [...state.jobs.values()].some(job => job.owned && !['ready', 'error', 'discovered'].includes(job.status)))) {
+    if (!state.uploading && (libraryScanning || [...state.jobs.values()].some(job => job.owned && (!['ready', 'error', 'discovered'].includes(job.status) || reparseActive(job) || job.summaryError)))) {
       libraryTimer = setTimeout(async () => {
         try { await loadLibraryInfo(true); await syncServerJobs(); }
         catch (error) { $('library-status').textContent = `更新解析进度失败：${error.message}。正在重试…`; scheduleLibraryPoll(); }
@@ -298,16 +344,18 @@
       const ready = [];
       for (const job of jobs) {
         const existing = state.jobs.get(job.id);
+        if (['queued', 'parsing', 'ready'].includes(job.reparse?.status)) reparseSkipped.delete(job.id);
         state.jobs.set(job.id, { ...existing, ...job, owned: true });
-        if (existing && job.revision && job.revision !== existing.revision) changed = state.demos.delete(job.id) || changed;
         if (job.status !== 'ready') changed = state.demos.delete(job.id) || changed;
-        else if (!state.demos.has(job.id)) ready.push(job.id);
+        else if (!state.demos.has(job.id) || (job.revision && job.revision !== existing?.loadedRevision)) ready.push(job.id);
       }
       // Bound browser fetch/decode work; recompute once for the complete batch.
       for (let offset = 0; offset < ready.length; offset += 3) {
         await Promise.all(ready.slice(offset, offset + 3).map(async id => {
           try { await loadJob(id, { owned: true, batch: true }); changed = true; }
-          catch (error) { if (state.jobs.has(id)) Object.assign(state.jobs.get(id), { status: 'error', error: error.message }); }
+          catch (error) {
+            if (state.jobs.has(id)) Object.assign(state.jobs.get(id), state.demos.has(id) ? { summaryError: error.message } : { status: 'error', error: error.message });
+          }
         }));
       }
       renderJobs();
@@ -616,6 +664,8 @@
   function download(blob, filename) { const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(url), 30000); }
   $('analysis-files').addEventListener('change', event => importFiles(event.target.files));
   $('refresh-library').addEventListener('click', refreshLibrary);
+  $('reparse-analyses').addEventListener('click', () => requestReparse(importedReadyJobs().map(job => job.id)));
+  $('retry-reparse-failures').addEventListener('click', () => requestReparse([...reparseFailures().keys()]));
   $('open-analysis-library').addEventListener('click', openCatalog);
   $('empty-open-analysis-library').addEventListener('click', openCatalog);
   $('analysis-library-close').addEventListener('click', closeCatalog);

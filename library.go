@@ -19,20 +19,21 @@ import (
 )
 
 type libraryRecord struct {
-	ID            string    `json:"id"`
-	Revision      string    `json:"revision,omitempty"`
-	Name          string    `json:"name"`
-	Map           string    `json:"map"`
-	Analysis      bool      `json:"analysis"`
-	Status        string    `json:"status"`
-	Error         string    `json:"error,omitempty"`
-	Source        string    `json:"source,omitempty"`
-	OwnedSource   bool      `json:"ownedSource,omitempty"`
-	SourceSize    int64     `json:"sourceSize,omitempty"`
-	SourceModTime int64     `json:"sourceModTime,omitempty"`
-	ContentSHA256 string    `json:"contentSHA256,omitempty"`
-	Catalog       bool      `json:"catalog,omitempty"`
-	Created       time.Time `json:"created"`
+	ID            string        `json:"id"`
+	Revision      string        `json:"revision,omitempty"`
+	Name          string        `json:"name"`
+	Map           string        `json:"map"`
+	Analysis      bool          `json:"analysis"`
+	Status        string        `json:"status"`
+	Error         string        `json:"error,omitempty"`
+	Source        string        `json:"source,omitempty"`
+	OwnedSource   bool          `json:"ownedSource,omitempty"`
+	SourceSize    int64         `json:"sourceSize,omitempty"`
+	SourceModTime int64         `json:"sourceModTime,omitempty"`
+	ContentSHA256 string        `json:"contentSHA256,omitempty"`
+	Catalog       bool          `json:"catalog,omitempty"`
+	Reparse       *reparseState `json:"reparse,omitempty"`
+	Created       time.Time     `json:"created"`
 }
 type libraryManifest struct {
 	Version   int             `json:"version"`
@@ -165,18 +166,33 @@ func (a *app) persistLibrary() error {
 	a.persistMu.Lock()
 	defer a.persistMu.Unlock()
 	a.mu.Lock()
+	m := a.libraryManifestLocked(nil)
+	a.mu.Unlock()
+	return a.writeLibraryManifest(m)
+}
+
+// Caller holds a.mu. A replacement lets reparse persist a complete new revision
+// before exposing it to readers, while retaining all current session metadata.
+func (a *app) libraryManifestLocked(replacement *job) libraryManifest {
 	m := libraryManifest{Version: 1, Jobs: []libraryRecord{}, SessionID: a.sessionID, Settings: append(json.RawMessage(nil), a.sessionSettings...)}
 	for _, j := range a.jobs {
+		if replacement != nil && j.ID == replacement.ID {
+			j = replacement
+		}
 		j.mu.Lock()
-		m.Jobs = append(m.Jobs, libraryRecord{ID: j.ID, Revision: j.Revision, Name: j.Name, Map: j.Map, Analysis: j.Analysis, Status: j.Status, Error: j.Error, Source: j.source, OwnedSource: j.ownedSource, SourceSize: j.sourceSize, SourceModTime: j.sourceModTime, ContentSHA256: j.contentSHA256, Catalog: j.catalog, Created: j.created})
+		m.Jobs = append(m.Jobs, libraryRecord{ID: j.ID, Revision: j.Revision, Name: j.Name, Map: j.Map, Analysis: j.Analysis, Status: j.Status, Error: j.Error, Source: j.source, OwnedSource: j.ownedSource, SourceSize: j.sourceSize, SourceModTime: j.sourceModTime, ContentSHA256: j.contentSHA256, Catalog: j.catalog, Reparse: copyReparseState(j.Reparse), Created: j.created})
 		j.mu.Unlock()
 	}
 	for _, source := range a.sources {
 		m.Sources = append(m.Sources, source)
 	}
-	a.mu.Unlock()
 	sort.Slice(m.Jobs, func(i, j int) bool { return m.Jobs[i].Created.Before(m.Jobs[j].Created) })
 	sort.Slice(m.Sources, func(i, j int) bool { return sourceKey(m.Sources[i]) < sourceKey(m.Sources[j]) })
+	return m
+}
+
+// Serialize all manifest writes with persistMu, including transactional reparses.
+func (a *app) writeLibraryManifest(m libraryManifest) error {
 	f, err := os.CreateTemp(a.root, ".library-*.tmp")
 	if err != nil {
 		return err
@@ -246,6 +262,15 @@ func (a *app) loadLibrary() error {
 			j.Revision = j.ID
 		}
 		j.result, j.analysisResult = jobCachePaths(a.root, j.ID, j.Revision)
+		j.Reparse = copyReparseState(entry.Reparse)
+		if j.Reparse != nil && (j.Reparse.Status == "queued" || j.Reparse.Status == "parsing") {
+			if j.Reparse.Revision != "" && j.Reparse.Revision != j.Revision && validLibraryRevision(j.ID, j.Reparse.Revision) {
+				replay, analysis := jobCachePaths(a.root, j.ID, j.Reparse.Revision)
+				_ = os.Remove(replay)
+				_ = os.Remove(analysis)
+			}
+			j.Reparse.Status, j.Reparse.Message, j.Reparse.Error = "error", "上次重新解析已中断，旧缓存已保留", "服务退出前未完成重新解析，请重试"
+		}
 		if j.Status == "ready" && cacheExists(j.result) && cacheExists(j.analysisResult) {
 			j.Progress = 1
 			j.Message = "已从本机资料库恢复"

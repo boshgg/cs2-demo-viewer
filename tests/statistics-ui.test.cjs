@@ -29,15 +29,15 @@ async function page(options = {}) {
     replaceChildren(...children) { this.children = children; }
     addEventListener(event, callback) { (this.listeners[event] ||= []).push(callback); }
     dispatch(event) { return Promise.all((this.listeners[event] || []).map(callback => callback({ target: this }))); }
-    click() { return this.dispatch('click'); }
+    click() { return this.disabled ? Promise.resolve() : this.dispatch('click'); }
     get childElementCount() { return this.children.length; }
     querySelectorAll(tag) { return this.children.flatMap(child => [child, ...child.querySelectorAll(tag)]).filter(child => child.tagName === tag); }
     setAttribute(key, value) { this[key] = value; }
   }
-  const elements = new Map(), requests = [], payloads = [], data = new Map((options.datasets || [fixture()]).map(item => [item.id, item]));
+  const elements = new Map(), requests = [], payloads = [], reparses = [], timers = new Map(), data = new Map((options.datasets || [fixture()]).map(item => [item.id, item]));
   const catalog = options.catalog || [...data.values()].map(item => ({ id: item.id, name: item.name, map: item.map, status: 'ready', sources: [{ path: `2026/nested/${item.name}`, kind: 'dem' }], sourceCount: 1, available: true }));
   const gates = new Map(), location = { href: options.href || 'http://127.0.0.1:9999/statistics.html' };
-  let refreshError = '';
+  let refreshError = '', reparseError = '', catalogError = '', nextTimer = 0, statisticsError = options.statisticsError || '';
   for (const match of html.matchAll(/<([a-z][a-z0-9]*)\b([^>]*\bid="([^"]+)"[^>]*)>/g)) {
     const [, tag, attributes, id] = match, element = new Element(tag);
     element.hidden = /\bhidden\b/.test(attributes); element.disabled = /\bdisabled\b/.test(attributes); element.value = /\bvalue="([^"]*)"/.exec(attributes)?.[1] || '';
@@ -52,27 +52,42 @@ async function page(options = {}) {
   const fetcher = async (url, init = {}) => {
     requests.push([url, init.method || 'GET']);
     if (gates.has(url)) await gates.get(url);
-    if (url === '/api/library/demos') return good({ demos: catalog, scanning: false });
+    if (url === '/api/library/demos') return catalogError ? rejected(catalogError, 500) : good(structuredClone({ demos: catalog, scanning: false }));
     if (url === '/api/library') return good({ enabled: true, directory: 'F:\\viewer\\demo', scanning: false });
     if (url === '/api/library/refresh') return refreshError ? rejected(refreshError, 500) : good({ scanning: false });
+    if (url === '/api/library/reparse') {
+      const body = JSON.parse(init.body); reparses.push(body);
+      if (reparseError) return rejected(reparseError, 500);
+      const result = options.reparseResponse || { queued: body.ids, active: [], skipped: [] };
+      for (const id of [...(result.queued || []), ...(result.active || [])]) { const item = catalog.find(demo => demo.id === id); if (item) item.reparse = { status: 'queued', progress: 0 }; }
+      for (const skipped of result.skipped || []) { const item = catalog.find(demo => demo.id === skipped.id); if (item) item.reparse = { status: 'error', error: skipped.error }; }
+      if (options.failCatalogAfterReparse) catalogError = '暂时无法读取目录状态';
+      return good(result);
+    }
     const parse = /^\/api\/library\/demos\/([^/]+)\/parse$/.exec(url);
     if (parse) { const id = decodeURIComponent(parse[1]); payloads.push([id, JSON.parse(init.body)]); return options.parseError ? rejected(options.parseError) : good({ id, status: 'queued', cached: false }); }
     const demo = /^\/api\/demos\/([^/]+)\/(statistics|status)$/.exec(url);
     if (demo) {
       if (demo[2] === 'status') return good({ id: demo[1], status: 'ready', progress: 1 });
-      if (options.statisticsError) return rejected(options.statisticsError, 500);
+      if (statisticsError) return rejected(statisticsError, 500);
       return data.has(demo[1]) ? good(data.get(demo[1])) : rejected('录像不存在', 404);
     }
     throw new Error(`Unexpected API ${url}`);
   };
-  const app = statistics.create({ document: { getElementById: get, createElement: tag => new Element(tag) }, window: { ReplayLibrary: library, location, history: { state: null, replaceState: (_state, _title, url) => { location.href = String(url); } } }, fetch: fetcher, sleep: async () => {} });
+  const app = statistics.create({ document: { getElementById: get, createElement: tag => new Element(tag) }, window: { ReplayLibrary: library, location, history: { state: null, replaceState: (_state, _title, url) => { location.href = String(url); } } }, fetch: fetcher, sleep: async () => {}, setTimeout: callback => { const id = ++nextTimer; timers.set(id, callback); return id; }, clearTimeout: id => timers.delete(id) });
   await app.ready; await settle();
-  return { get, requests, payloads, href: () => location.href,
+  return { get, requests, payloads, reparses, timers, href: () => location.href,
     async choose(id) { const button = get('stats-library-list').querySelectorAll('button').find(button => button.dataset.demoId === id); assert.ok(button); await button.click(); await settle(); },
     async change(id, value) { get(id).value = value; await get(id).dispatch('change'); await settle(); },
     async search(query) { get('stats-library-search').value = query; await get('stats-library-search').dispatch('input'); },
     block(url) { let release; gates.set(url, new Promise(resolve => { release = () => { gates.delete(url); resolve(); }; })); return release; },
     setRefreshError(message) { refreshError = message; },
+    setStatisticsError(message) { statisticsError = message; },
+    setReparseError(message) { reparseError = message; },
+    setCatalogError(message) { catalogError = message; },
+    setDataset(item) { data.set(item.id, item); },
+    setCatalog(id, patch) { const item = catalog.find(demo => demo.id === id); assert.ok(item); Object.assign(item, patch); },
+    async poll() { const callbacks = [...timers.values()]; timers.clear(); for (const callback of callbacks) callback(); await settle(); },
   };
 }
 
@@ -219,4 +234,129 @@ test('overtime half provenance keeps the default three-round assumption visible 
     assert.match(ui.get('stats-economy-note').textContent, source.endsWith('observed') ? /加时半场按阵容换边记录推断/ : /加时按默认每半场 3 回合推断/);
     if (source.startsWith('roster_swap')) assert.match(ui.get('stats-economy-note').textContent, /常规半场按阵容换边识别/);
   }
+});
+
+function readyCatalog(...ids) { return ids.map(id => ({ id, name: `${id}.dem`, status: 'ready', revision: `${id}-old`, available: true })); }
+function detailedFixture(id = 'match', amount = 125) {
+  const data = fixture(id); data.kills = Array.from({ length: amount }, (_, index) => ({ ...data.kills[4], index })); return data;
+}
+
+test('reparse completion refreshes only the current revision and preserves every filter, detail round and page', async () => {
+  const ui = await page({ datasets: [detailedFixture()], catalog: readyCatalog('match') }); await ui.choose('match');
+  for (const [key, value] of [['team','alpha'],['player','p1'],['side','2'],['half','second'],['round','13']]) await ui.change(`stats-${key}`, value);
+  await ui.change('stats-detail-round', '1'); await ui.get('stats-kills-next').click(); await ui.get('stats-kills-next').click();
+  await ui.get('stats-reparse-current').click(); await settle();
+  assert.deepEqual(ui.reparses, [{ ids: ['match'] }]); assert.equal(ui.get('stats-content').hidden, false); assert.equal(ui.timers.size, 1);
+  assert.match(ui.get('stats-quality').textContent, /近似数据/); assert.equal(ui.get('stats-reparse-current').disabled, true);
+  const updated = detailedFixture('match', 130); for (const round of updated.rounds) for (const side of ['ct','t']) round[side].source = 'freeze_end'; for (const kill of updated.kills) { kill.approx = false; kill.weaponSource = 'death_event'; kill.score = 6; }
+  ui.setDataset(updated); ui.setCatalog('match', { revision: 'match-new', reparse: { status: 'ready', progress: 1 } }); await ui.poll();
+  for (const [key, value] of [['team','alpha'],['player','p1'],['side','2'],['half','second'],['round','13']]) assert.equal(ui.get(`stats-${key}`).value, value);
+  assert.equal(ui.get('stats-detail-round').value, '1'); assert.match(ui.get('stats-kills-page').textContent, /3 \/ 3/);
+  assert.equal(ui.get('stats-total-score').textContent, '+780'); assert.match(ui.get('stats-quality').textContent, /事件与冻结结束记录/);
+  assert.match(ui.get('stats-reparse-summary').textContent, /已更新 1 场/); assert.equal(ui.timers.size, 0);
+  await ui.get('stats-refresh-library').click(); await settle();
+  assert.equal(ui.requests.filter(([url]) => url === '/api/demos/match/statistics').length, 2, 'one automatic reload per successful revision');
+  assert.equal(ui.requests.some(([, method]) => method === 'DELETE'), false);
+});
+
+test('batch reparse submits unique ready IDs only, including playback-only caches, and reports missing sources', async () => {
+  const catalog = [...readyCatalog('one', 'played', 'one'), { id: 'new', status: 'discovered', available: true }, { id: 'broken', status: 'error' }];
+  const ui = await page({ datasets: [fixture('one'), fixture('played')], catalog, reparseResponse: { queued: ['played'], active: [], skipped: [{ id: 'one', name: 'one.dem', error: '原始文件已移动，请恢复后刷新' }] } });
+  await ui.choose('one'); await ui.get('stats-reparse-all').click(); await settle();
+  assert.deepEqual(ui.reparses, [{ ids: ['one', 'played'] }]); assert.equal(ui.get('stats-total-score').textContent, '+4');
+  assert.match(content(ui.get('stats-reparse-results')), /one.dem.*原始文件已移动.*旧缓存保留/);
+  assert.equal(ui.get('stats-content').hidden, false);
+  assert.equal(ui.requests.some(([url]) => /new.*parse|broken.*parse/.test(url)), false);
+});
+
+test('failed background reparse retains old statistics and filters without requesting a replacement report', async () => {
+  const ui = await page({ catalog: readyCatalog('match') }); await ui.choose('match'); await ui.change('stats-player', 'p1');
+  await ui.get('stats-reparse-current').click();
+  ui.setCatalog('match', { reparse: { status: 'error', progress: .4, error: 'Demo 已损坏，重新解析失败' } }); await ui.poll();
+  assert.equal(ui.get('stats-player').value, 'p1'); assert.equal(ui.get('stats-total-score').textContent, '+9'); assert.equal(ui.get('stats-content').hidden, false);
+  assert.match(content(ui.get('stats-reparse-results')), /Demo 已损坏/); assert.match(ui.get('stats-reparse-summary').textContent, /未更新 1 场.*保留旧缓存/);
+  assert.equal(ui.requests.filter(([url]) => url.endsWith('/statistics')).length, 1); assert.equal(ui.timers.size, 0); assert.equal(ui.get('stats-reparse-current').disabled, false);
+});
+
+test('a reparse submission error keeps the current report usable and allows retry', async () => {
+  const ui = await page({ catalog: readyCatalog('match') }); await ui.choose('match'); ui.setReparseError('目录被占用');
+  await ui.get('stats-reparse-current').click(); await settle();
+  assert.match(content(ui.get('stats-reparse-results')), /提交重新解析失败.*目录被占用/);
+  assert.equal(ui.get('stats-total-score').textContent, '+4'); assert.equal(ui.get('stats-reparse-current').disabled, false);
+  ui.setReparseError(''); await ui.get('stats-reparse-current').click(); await settle(); assert.equal(ui.reparses.length, 2); assert.equal(ui.timers.size, 1);
+});
+
+test('late automatic report refresh after a reparse cannot override a newer selected match', async () => {
+  const ui = await page({ datasets: [fixture('a'),fixture('b')], catalog: readyCatalog('a','b') }); await ui.choose('a');
+  await ui.get('stats-reparse-current').click(); const release = ui.block('/api/demos/a/statistics');
+  ui.setCatalog('a', { revision: 'a-new', reparse: { status: 'ready', progress: 1 } }); await ui.poll();
+  assert.equal(ui.get('stats-content').hidden, false, 'old report remains visible while its replacement loads');
+  await ui.choose('b'); release(); await settle();
+  assert.equal(ui.get('stats-match-name').textContent, 'b.dem'); assert.match(ui.href(), /demo=b/); assert.equal(ui.get('stats-content').hidden, false);
+  assert.equal(ui.requests.some(([, method]) => method === 'DELETE'), false);
+});
+
+test('filter edits made during automatic reparse refresh are preserved at commit time', async () => {
+  const ui = await page({ catalog: readyCatalog('match') }); await ui.choose('match'); await ui.get('stats-reparse-current').click();
+  const release = ui.block('/api/demos/match/statistics'); ui.setCatalog('match', { revision: 'match-new', reparse: { status: 'ready', progress: 1 } }); await ui.poll();
+  await ui.change('stats-player', 'p1'); await ui.change('stats-side', '2'); await ui.change('stats-detail-round', '13');
+  release(); await settle(); assert.equal(ui.get('stats-player').value, 'p1'); assert.equal(ui.get('stats-side').value, '2'); assert.equal(ui.get('stats-detail-round').value, '13'); assert.equal(ui.get('stats-total-score').textContent, '+3');
+});
+
+test('failed replacement report does not loop and manual reread preserves the current view', async () => {
+  const ui = await page({ datasets: [detailedFixture()], catalog: readyCatalog('match') }); await ui.choose('match'); await ui.change('stats-player', 'p1'); await ui.change('stats-detail-round', '13'); await ui.get('stats-kills-next').click();
+  await ui.get('stats-reparse-current').click(); ui.setStatisticsError('临时读取失败'); ui.setCatalog('match', { revision: 'match-new', reparse: { status: 'ready', progress: 1 } }); await ui.poll();
+  assert.match(ui.get('stats-error').textContent, /仍显示原有统计/); assert.equal(ui.get('stats-content').hidden, false);
+  await ui.get('stats-refresh-library').click(); await settle();
+  assert.equal(ui.requests.filter(([url]) => url.endsWith('/statistics')).length, 2, 'failed revision is not retried in a loop');
+  ui.setStatisticsError(''); await ui.choose('match');
+  assert.equal(ui.get('stats-player').value, 'p1'); assert.equal(ui.get('stats-detail-round').value, '13'); assert.match(ui.get('stats-kills-page').textContent, /2 \/ 3/);
+});
+
+test('same-ID reread retains explicit filters no longer in the report and clamps pagination only', async () => {
+  const ui = await page({ datasets: [detailedFixture()], catalog: readyCatalog('match') }); await ui.choose('match');
+  await ui.change('stats-player', 'p1'); await ui.change('stats-round', '13'); await ui.change('stats-detail-round', '13'); await ui.get('stats-kills-next').click();
+  const updated = fixture(); updated.rounds = updated.rounds.slice(0,1); updated.players = updated.players.filter(player => player.id !== 'p1'); updated.kills = []; ui.setDataset(updated);
+  await ui.choose('match');
+  assert.equal(ui.get('stats-player').value, 'p1'); assert.equal(ui.get('stats-round').value, '13'); assert.equal(ui.get('stats-detail-round').value, '13');
+  assert.match(ui.get('stats-kills-page').textContent, /1 \/ 1/); assert.match(content(ui.get('stats-economy-teams')), /没有可用的回合装备记录/);
+});
+
+test('accepted reparse keeps polling after a temporary catalog read failure', async () => {
+  const ui = await page({ catalog: readyCatalog('match'), failCatalogAfterReparse: true }); await ui.choose('match');
+  await ui.get('stats-reparse-current').click(); await settle();
+  assert.equal(ui.timers.size, 1); assert.equal(ui.get('stats-content').hidden, false);
+  assert.equal(ui.get('stats-reparse-current').disabled, true);
+  assert.match(ui.get('stats-library-message').textContent, /暂时无法读取目录状态/);
+  ui.setCatalogError(''); ui.setCatalog('match', { revision: 'match-new', reparse: { status: 'ready', progress: 1 } }); await ui.poll();
+  assert.equal(ui.requests.filter(([url]) => url.endsWith('/statistics')).length, 2); assert.equal(ui.timers.size, 0);
+  assert.match(ui.get('stats-reparse-summary').textContent, /已更新 1 场/);
+});
+
+test('an all-skipped reparse reports each missing recording once despite its catalog error status', async () => {
+  const ui = await page({ catalog: readyCatalog('match'), reparseResponse: { queued: [], active: [], skipped: [{ id: 'match', name: 'match.dem', error: '原始录像不存在' }] } });
+  await ui.choose('match'); await ui.get('stats-reparse-current').click(); await settle();
+  assert.match(ui.get('stats-reparse-summary').textContent, /未更新 1 场/);
+  assert.equal(ui.get('stats-reparse-results').children.length, 1);
+  assert.match(content(ui.get('stats-reparse-results')), /原始录像不存在.*旧缓存保留/);
+  assert.equal(ui.get('stats-total-score').textContent, '+4'); assert.equal(ui.timers.size, 0);
+});
+
+test('newly reparsed neighboring frames and previous ticks are approximate without being called old cache', async () => {
+  const ui = await page({ catalog: readyCatalog('match') }); await ui.choose('match'); assert.match(ui.get('stats-quality').textContent, /旧缓存采样/);
+  await ui.get('stats-reparse-current').click();
+  const updated = fixture(); for (const round of updated.rounds) for (const side of ['ct','t']) round[side].source = 'freeze_end'; updated.rounds[0].t.source = 'sampled_frame';
+  for (const kill of updated.kills) if (kill.weaponSource === 'sampled_cache') { kill.weaponSource = 'death_event'; kill.approx = false; }
+  ui.setDataset(updated); ui.setCatalog('match', { revision: 'match-new', reparse: { status: 'ready' } }); await ui.poll();
+  assert.match(ui.get('stats-quality').textContent, /近似数据.*冻结结束邻近帧推断.*前一 tick 推断/);
+  assert.doesNotMatch(ui.get('stats-quality').textContent, /旧缓存/);
+  assert.match(content(ui.get('stats-economy-teams')), /近似 · 冻结结束邻近帧/); assert.doesNotMatch(content(ui.get('stats-economy-teams')), /旧缓存/);
+});
+
+test('previous-tick-only reports name that inference without claiming legacy cache or neighboring economy frames', async () => {
+  const data = fixture(); for (const round of data.rounds) for (const side of ['ct','t']) round[side].source = 'freeze_end';
+  for (const kill of data.kills) if (kill.weaponSource === 'sampled_cache') { kill.weaponSource = 'death_event'; kill.approx = false; }
+  const ui = await page({ datasets: [data] }); await ui.choose('match');
+  assert.match(ui.get('stats-quality').textContent, /近似数据.*前一 tick 推断/);
+  assert.doesNotMatch(ui.get('stats-quality').textContent, /旧缓存|冻结结束邻近帧/);
 });
