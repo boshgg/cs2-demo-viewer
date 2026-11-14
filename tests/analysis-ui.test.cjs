@@ -83,18 +83,20 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
   const source = new Map(datasets.map(demo => [demo.id, demo]));
   const uploads = new Map((pageOptions.uploads || []).map(demo => [demo.name, demo]));
   const libraryFiles = new Map((pageOptions.libraryDemos || []).map(demo => [demo.id, demo]));
+  const libraryInfo = { enabled: true, directory: 'F:\\viewer\\demo', ...(pageOptions.library || {}) };
   const stored = new Map(pageOptions.saved ? [['cs2-analysis-v4', JSON.stringify(pageOptions.saved)]] : []);
   const fetch = async (url, options = {}) => {
     requests.push([url, options.method || 'GET']);
     if (url === '/api/session-settings') return response(pageOptions.session || { sessionId: '', settings: null });
-    if (url === '/api/library') return response({ enabled: true, directory: 'F:\\viewer\\demo', count: libraryFiles.size, ...(pageOptions.library || {}) });
+    if (url === '/api/library') return response({ count: libraryFiles.size, ...libraryInfo });
     if (url === '/api/library/refresh' && options.method === 'POST') {
       if (refreshError) return { ok: false, status: 500, json: async () => ({ error: refreshError }) };
+      if (pageOptions.asyncScan) { libraryInfo.scanning = true; return response({ scanning: true, added: 0, unchanged: 0, queued: 0, errors: [] }); }
       let added = 0;
       for (const [id, demo] of libraryFiles) if (!source.has(id)) { source.set(id, demo); added++; }
       return response({ added, unchanged: libraryFiles.size - added, queued: [...source.values()].filter(d => d.jobStatus === 'queued').length, directory: 'F:\\viewer\\demo', errors: pageOptions.libraryErrors || [] });
     }
-    if (url === '/api/analyses') return response([...source.values()].map(d => ({ id: d.id, name: d.name, map: d.map, status: d.jobStatus || 'ready', revision: d.revision })));
+    if (url === '/api/analyses') return response([...source.values()].map(d => ({ id: d.id, name: d.name, map: d.map, status: d.jobStatus || 'ready', revision: d.revision, error: d.parseError })));
     if (url === '/api/demos?mode=analysis' && options.method === 'POST') {
       const file = options.body.get('demo'), demo = uploads.get(file.name);
       assert.ok(demo, `Unexpected uploaded fixture ${file.name}`); source.set(demo.id, demo); return response({ id: demo.id });
@@ -141,6 +143,7 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
     saved: () => JSON.parse(stored.get('cs2-analysis-v4') || '{}'),
     savedWrites, analysisCalls: () => analysisCalls,
     setLibraryFiles(demos) { libraryFiles.clear(); for (const demo of demos) libraryFiles.set(demo.id, demo); },
+    setLibraryInfo(info) { Object.assign(libraryInfo, info); },
     setJob(demo) { source.set(demo.id, demo); },
     failRefresh(message) { refreshError = message; },
     async pollLibrary() { for (const [id, callback] of [...timers]) if (timerDelays.get(id) === 1200) { timers.delete(id); timerDelays.delete(id); callback(); } await settle(); },
@@ -360,6 +363,8 @@ function demoCheckbox(ui, name) {
   const input = ui.get('demo-list').querySelectorAll('input').find(input => input['aria-label'] === `叠加 ${name}`);
   assert.ok(input, `Missing demo checkbox ${name}`); return input;
 }
+function visibleDemoNames(ui, id = 'demo-list') { return ui.get(id).querySelectorAll('input').map(input => input['aria-label'].replace(/^叠加 /, '')); }
+function savedDemoChecked(ui, id) { const selected = ui.saved().selectedDemos; return selected === null || selected.includes(id); }
 async function focusDemoRow(ui, name) {
   const button = ui.get('demo-list').querySelectorAll('button').find(button => button['aria-label'] === `查看 ${name} 所在地图`);
   assert.ok(button, `Missing focus button ${name}`); await button.click(); await settle();
@@ -375,7 +380,8 @@ test('uploading Ancient after Anubis focuses the imported map and restores both 
   assert.equal(ui.get('analysis-map').value, 'de_ancient'); assert.equal(ui.get('player-search').value, ''); assert.equal(ui.get('analysis-floor').value, 'all');
   assert.equal(playerInputs(ui).length, 10); assert.equal(ui.get('team-list').querySelectorAll('input').length, 2);
   assert.deepEqual(selectedPlayerIds(ui), ancient.players.map(player => player.id).sort()); assert.equal(deaths(ui), 10);
-  assert.ok(demoCheckbox(ui, ancient.name).checked); assert.ok(demoCheckbox(ui, anubis.name).checked);
+  assert.ok(demoCheckbox(ui, ancient.name).checked); assert.ok(savedDemoChecked(ui, anubis.id));
+  assert.deepEqual(visibleDemoNames(ui), [ancient.name]);
   assert.equal(ui.saved().map, 'de_ancient'); assert.ok(ui.saved().selectedDemos.includes('ancient'));
 });
 
@@ -387,22 +393,22 @@ test('a multi-map upload batch focuses only its first successful demo even when 
   assert.match(ui.get('global-error').textContent, /Fixture parse failure/);
   assert.equal(ui.get('analysis-map').value, 'de_ancient'); assert.equal(ui.get('canvas-map-name').textContent, 'de_ancient');
   assert.deepEqual(selectedPlayerIds(ui), ancient.players.map(player => player.id).sort()); assert.equal(deaths(ui), 10);
-  assert.ok(demoCheckbox(ui, ancient.name).checked); assert.ok(demoCheckbox(ui, later.name).checked);
+  assert.ok(demoCheckbox(ui, ancient.name).checked); assert.ok(savedDemoChecked(ui, later.id));
   assert.ok(ui.requests.some(([url, method]) => url === '/api/demos/bad-upload' && method === 'DELETE'));
-  assert.equal(ui.get('demo-list').children.length, 3); assert.equal(ui.get('upload-status').hidden, true);
+  assert.deepEqual(visibleDemoNames(ui), [ancient.name]); assert.equal(ui.saved().ids.length, 3); assert.equal(ui.get('upload-status').hidden, true);
 });
 
 test('restoring stale demo selections drops expired IDs but preserves an explicit empty selection', async () => {
   const anubis = ladderDemo('new-anubis-id', 'de_anubis'), ancient = ladderDemo('new-ancient-id', 'de_ancient');
   const stale = await page([anubis, ancient], { saved: { map: 'de_anubis', selectedDemos: ['expired-server-id'] } });
   assert.equal(stale.saved().selectedDemos, null); assert.equal(deaths(stale), 10);
-  assert.ok(demoCheckbox(stale, anubis.name).checked); assert.ok(demoCheckbox(stale, ancient.name).checked);
+  assert.ok(demoCheckbox(stale, anubis.name).checked); assert.ok(savedDemoChecked(stale, ancient.id));
   const partial = await page([anubis, ancient], { saved: { map: 'de_anubis', selectedDemos: [anubis.id, 'expired-server-id'] } });
-  assert.deepEqual(partial.saved().selectedDemos, [anubis.id]); assert.ok(demoCheckbox(partial, anubis.name).checked); assert.equal(demoCheckbox(partial, ancient.name).checked, false);
+  assert.deepEqual(partial.saved().selectedDemos, [anubis.id]); assert.ok(demoCheckbox(partial, anubis.name).checked); assert.equal(savedDemoChecked(partial, ancient.id), false);
   assert.equal(deaths(partial), 10);
   const empty = await page([anubis, ancient], { saved: { map: 'de_anubis', selectedDemos: [] } });
   assert.deepEqual(empty.saved().selectedDemos, []); assert.equal(deaths(empty), 0); assert.deepEqual(selectedPlayerIds(empty), []);
-  assert.equal(demoCheckbox(empty, anubis.name).checked, false); assert.equal(demoCheckbox(empty, ancient.name).checked, false);
+  assert.equal(demoCheckbox(empty, anubis.name).checked, false); assert.equal(savedDemoChecked(empty, ancient.id), false);
 });
 
 test('a URL for an already cached demo overrides the old map and includes its roster in the selection', async () => {
@@ -410,24 +416,24 @@ test('a URL for an already cached demo overrides the old map and includes its ro
   const ui = await page([anubis, ancient], { saved: { map: 'de_anubis', selectedDemos: ['anubis'] }, href: 'http://127.0.0.1:8765/analysis.html?demo=ancient' });
   assert.equal(ui.get('analysis-map').value, 'de_ancient'); assert.equal(ui.get('canvas-map-name').textContent, 'de_ancient');
   assert.equal(deaths(ui), 10); assert.deepEqual(selectedPlayerIds(ui), ancient.players.map(player => player.id).sort());
-  assert.ok(demoCheckbox(ui, ancient.name).checked); assert.ok(demoCheckbox(ui, anubis.name).checked);
+  assert.ok(demoCheckbox(ui, ancient.name).checked); assert.ok(savedDemoChecked(ui, anubis.id)); assert.deepEqual(visibleDemoNames(ui), [ancient.name]);
   assert.equal(ui.saved().map, 'de_ancient');
 });
 
 test('viewing a demo row resets hidden player filters without discarding other selected demos on that map', async () => {
   const anubis = ladderDemo('anubis', 'de_anubis'), ancient = ladderDemo('ancient', 'de_ancient'), second = ladderDemo('ancient-two', 'de_ancient');
-  const ui = await page([anubis, ancient, second], { saved: { map: 'de_anubis', selectedDemos: ['anubis', 'ancient-two'] } });
+  const ui = await page([anubis, ancient, second], { saved: { map: 'de_ancient', selectedDemos: ['anubis', 'ancient-two'] } });
   await clickAndSettle(ui, 'players-none'); await clickAndSettle(ui, 'teams-none'); await searchPlayers(ui, 'not in this match');
   await focusDemoRow(ui, ancient.name);
   assert.equal(ui.get('analysis-map').value, 'de_ancient'); assert.equal(ui.get('player-search').value, ''); assert.equal(ui.get('analysis-floor').value, 'all');
   assert.equal(deaths(ui), 20); assert.equal(selectedPlayerIds(ui).length, 20); assert.equal(ui.get('team-list').querySelectorAll('input').length, 4);
-  assert.ok(demoCheckbox(ui, ancient.name).checked); assert.ok(demoCheckbox(ui, second.name).checked); assert.ok(demoCheckbox(ui, anubis.name).checked);
+  assert.ok(demoCheckbox(ui, ancient.name).checked); assert.ok(demoCheckbox(ui, second.name).checked); assert.ok(savedDemoChecked(ui, anubis.id));
 });
 
 test('restoring more than ten cached demos loads every summary once and computes one batch', async () => {
   const demos = Array.from({ length: 24 }, (_, index) => dataset(`cached-${index}`));
   const ui = await page(demos, { saved: { ids: demos.map(demo => demo.id), map: 'de_mirage' } });
-  assert.equal(ui.get('demo-count').textContent, '24 场'); assert.equal(deaths(ui), 24);
+  assert.equal(ui.get('demo-count').textContent, '本图 24 / 共 24 场'); assert.equal(deaths(ui), 24);
   assert.equal(ui.analysisCalls(), 1, 'restoration does not repeatedly aggregate growing datasets');
   for (const demo of demos) assert.equal(ui.requests.filter(([url]) => url === `/api/demos/${demo.id}/analysis`).length, 1);
   assert.ok(ui.savedWrites.length > 0); assert.ok(ui.savedWrites.every(saved => saved.ids.length === 24), 'no partial restore overwrites preferences');
@@ -438,7 +444,7 @@ test('manual upload accepts a batch larger than ten demos', async () => {
   const demos = Array.from({ length: 12 }, (_, index) => dataset(`upload-${index}`));
   const ui = await page([dataset('existing')], { uploads: demos });
   await ui.upload(...demos.map(demo => demo.name));
-  assert.equal(ui.get('demo-count').textContent, '13 场'); assert.equal(deaths(ui), 13);
+  assert.equal(ui.get('demo-count').textContent, '本图 13 / 共 13 场'); assert.equal(deaths(ui), 13);
   assert.equal(ui.get('global-error').textContent, ''); assert.equal(ui.get('upload-status').hidden, true);
   assert.equal(ui.requests.filter(([url, method]) => url === '/api/demos?mode=analysis' && method === 'POST').length, 12);
 });
@@ -449,10 +455,10 @@ test('folder refresh adds demos without changing an explicit subset, map, roster
   const ui = await page([old], { saved, libraryDemos: [old, incoming], mapInfo: { lowerMaxZ: 100, lowerRadar: '/maps/lower.png' } });
   const before = ui.saved();
   await clickAndSettle(ui, 'refresh-library');
-  assert.equal(ui.get('demo-count').textContent, '2 场'); assert.equal(ui.get('analysis-map').value, 'de_nuke');
+  assert.equal(ui.get('demo-count').textContent, '本图 1 / 共 2 场'); assert.equal(ui.get('analysis-map').value, 'de_nuke');
   assert.equal(ui.get('analysis-floor').value, 'lower'); assert.equal(ui.get('analysis-side').value, '3');
   assert.deepEqual(selectedPlayerIds(ui), ['p1']); assert.equal(deaths(ui), 1);
-  assert.equal(demoCheckbox(ui, incoming.name).checked, false); assert.equal(demoCheckbox(ui, old.name).checked, true);
+  assert.equal(savedDemoChecked(ui, incoming.id), false); assert.deepEqual(visibleDemoNames(ui), [old.name]); assert.equal(demoCheckbox(ui, old.name).checked, true);
   assert.match(ui.get('library-status').textContent, /新增 1 场/); assert.equal(ui.get('refresh-library').disabled, false);
   for (const key of Object.keys(before).filter(key => key !== 'ids')) assert.deepEqual(ui.saved()[key], before[key], `${key} must survive folder refresh`);
   const calls = ui.analysisCalls();
@@ -489,9 +495,9 @@ test('refresh failure keeps cached analysis and filters usable and permits retry
   ui.failRefresh('目录暂不可读取'); await clickAndSettle(ui, 'refresh-library');
   assert.match(ui.get('library-status').textContent, /刷新失败：目录暂不可读取/);
   assert.equal(ui.get('refresh-library').disabled, false); assert.equal(deaths(ui), 1);
-  assert.deepEqual(ui.saved().selectedDemos, ['old']); assert.equal(ui.get('demo-count').textContent, '1 场');
+  assert.deepEqual(ui.saved().selectedDemos, ['old']); assert.equal(ui.get('demo-count').textContent, '本图 1 / 共 1 场');
   ui.failRefresh(''); await clickAndSettle(ui, 'refresh-library');
-  assert.equal(ui.get('demo-count').textContent, '2 场'); assert.equal(deaths(ui), 1);
+  assert.equal(ui.get('demo-count').textContent, '本图 2 / 共 2 场'); assert.equal(deaths(ui), 1);
   assert.match(ui.get('library-status').textContent, /copying.dem 尚在写入/);
   assert.equal(ui.get('global-error').textContent, '');
 });
@@ -501,7 +507,7 @@ test('a ready-to-ready revision change refreshes only that demo and replaces its
   const ui = await page([old, other]);
   const updated = { ...dataset('edited'), revision: 'v2' }; updated.series[0].cells[0][5] = 9;
   ui.setJob(updated); await clickAndSettle(ui, 'refresh-library');
-  assert.equal(deaths(ui), 10); assert.equal(ui.get('demo-count').textContent, '2 场');
+  assert.equal(deaths(ui), 10); assert.equal(ui.get('demo-count').textContent, '本图 2 / 共 2 场');
   assert.equal(ui.requests.filter(([url]) => url === '/api/demos/edited/analysis').length, 2);
   assert.equal(ui.requests.filter(([url]) => url === '/api/demos/untouched/analysis').length, 1);
   await clickAndSettle(ui, 'refresh-library'); assert.equal(deaths(ui), 10);
@@ -549,4 +555,77 @@ test('reparsing the only demo on the active map preserves its filters until its 
   assert.equal(ui.get('analysis-map').value, 'de_nuke'); assert.equal(ui.get('analysis-floor').value, 'lower');
   assert.equal(ui.get('player-search').value, 'Alice'); assert.deepEqual(selectedPlayerIds(ui), ['p1']); assert.equal(deaths(ui), 9);
   assert.equal(ui.requests.filter(([url]) => url === '/api/demos/updated/analysis').length, 2);
+});
+
+test('match sources follow the selected map and preserve hidden-map checkbox choices and aliases', async () => {
+  const demos = [dataset('anubis-one', 'de_anubis'), dataset('anubis-two', 'de_anubis'), dataset('ancient-one', 'de_ancient')];
+  const ui = await page(demos, { saved: { map: 'de_anubis', selectedDemos: ['anubis-one', 'ancient-one'], aliases: { 'team-a': 'Saved squad' } } });
+  assert.deepEqual(visibleDemoNames(ui), ['anubis-one.dem', 'anubis-two.dem']);
+  assert.equal(ui.get('demo-count').textContent, '本图 2 / 共 3 场'); assert.match(ui.get('demo-scope').textContent, /de_anubis/);
+  assert.equal(demoCheckbox(ui, 'anubis-two.dem').checked, false);
+  await ui.change('analysis-map', 'de_ancient');
+  assert.deepEqual(visibleDemoNames(ui), ['ancient-one.dem']); assert.equal(ui.get('demo-count').textContent, '本图 1 / 共 3 场');
+  assert.ok(demoCheckbox(ui, 'ancient-one.dem').checked);
+  const ancient = demoCheckbox(ui, 'ancient-one.dem'); ancient.checked = false; await ancient.dispatch('change'); await settle();
+  await ui.change('analysis-map', 'de_anubis');
+  assert.ok(demoCheckbox(ui, 'anubis-one.dem').checked); assert.equal(demoCheckbox(ui, 'anubis-two.dem').checked, false);
+  assert.deepEqual(ui.saved().selectedDemos, ['anubis-one']); assert.deepEqual(ui.saved().aliases, { 'team-a': 'Saved squad' });
+  await ui.change('analysis-map', 'de_ancient'); assert.equal(demoCheckbox(ui, 'ancient-one.dem').checked, false);
+  assert.deepEqual(ui.saved().ids.sort(), demos.map(d => d.id).sort(), 'filtering the list never removes hidden library records');
+});
+
+test('unknown-map tasks stay in a separate visible queue and move to their map after parsing', async () => {
+  const current = dataset('anubis', 'de_anubis'), other = dataset('ancient', 'de_ancient');
+  const queued = { ...dataset('zip-member', ''), jobStatus: 'queued' }, failed = { ...dataset('broken', ''), jobStatus: 'error', parseError: '损坏的 Demo' };
+  const ui = await page([current, other, queued, failed], { saved: { map: 'de_anubis' } });
+  assert.deepEqual(visibleDemoNames(ui), [current.name]); assert.deepEqual(visibleDemoNames(ui, 'unmapped-demo-list'), [queued.name, failed.name]);
+  assert.equal(ui.get('unmapped-demos').hidden, false); assert.equal(ui.get('unmapped-demo-count').textContent, '待识别地图 · 2 场');
+  assert.equal(ui.get('demo-count').textContent, '本图 1 / 共 4 场');
+  assert.ok(ui.get('unmapped-demo-list').querySelectorAll('small').some(node => node.textContent === '损坏的 Demo'));
+  assert.ok(ui.get('unmapped-demo-list').querySelectorAll('input').every(input => input.disabled));
+  ui.setJob(dataset('zip-member', 'de_ancient')); await ui.pollLibrary();
+  assert.deepEqual(visibleDemoNames(ui), [current.name]); assert.deepEqual(visibleDemoNames(ui, 'unmapped-demo-list'), [failed.name]);
+  assert.equal(ui.get('analysis-map').value, 'de_anubis', 'background completion does not switch the selected map');
+  await ui.change('analysis-map', 'de_ancient'); assert.deepEqual(visibleDemoNames(ui), [other.name, queued.name]);
+});
+
+test('deleting the last match on a map renders the fallback map list without losing its matches', async () => {
+  const current = dataset('ancient', 'de_ancient'), other = dataset('anubis', 'de_anubis');
+  const ui = await page([current, other], { saved: { map: 'de_ancient' } });
+  await ui.get('demo-list').querySelectorAll('button').find(button => button.className === 'demo-remove').click(); await settle();
+  assert.equal(ui.get('analysis-map').value, 'de_anubis'); assert.deepEqual(visibleDemoNames(ui), [other.name]);
+  assert.equal(ui.get('demo-count').textContent, '本图 1 / 共 1 场'); assert.deepEqual(ui.saved().ids, [other.id]); assert.equal(deaths(ui), 1);
+});
+
+test('background ZIP scanning is polled before any jobs exist and adds the finished map automatically', async () => {
+  const ui = await page([], { library: { scanning: true } });
+  assert.equal(ui.get('refresh-library').disabled, true); assert.match(ui.get('library-status').textContent, /扫描.*ZIP/);
+  const before = ui.requests.filter(([url]) => url === '/api/library').length;
+  await ui.pollLibrary(); assert.equal(ui.requests.filter(([url]) => url === '/api/library').length, before + 1);
+  ui.setJob(dataset('from-archive', 'de_ancient')); ui.setLibraryInfo({ scanning: false, result: { added: 1, unchanged: 0, queued: 1, errors: [] } });
+  await ui.pollLibrary();
+  assert.equal(ui.get('refresh-library').disabled, false); assert.deepEqual(visibleDemoNames(ui), ['from-archive.dem']);
+  assert.equal(ui.get('analysis-map').value, 'de_ancient'); assert.equal(deaths(ui), 1); assert.match(ui.get('library-status').textContent, /新增 1 场/);
+});
+
+test('an async refresh with only duplicates or ZIP errors still finishes and shows its result', async () => {
+  const original = dataset('original', 'de_anubis');
+  const ui = await page([original], { asyncScan: true, saved: { map: 'de_anubis', selectedDemos: ['original'], side: '3' } });
+  const before = ui.saved(); await clickAndSettle(ui, 'refresh-library');
+  assert.equal(ui.get('refresh-library').disabled, true); assert.match(ui.get('library-status').textContent, /扫描/);
+  await ui.pollLibrary(); assert.equal(ui.get('refresh-library').disabled, true, 'no queued jobs does not end an active ZIP scan');
+  ui.setLibraryInfo({ scanning: false, result: { added: 0, unchanged: 2, queued: 0, errors: ['broken.zip：压缩包损坏'] } }); await ui.pollLibrary();
+  assert.equal(ui.get('refresh-library').disabled, false); assert.match(ui.get('library-status').textContent, /新增 0 场 · 2 场无需重复解析/);
+  assert.match(ui.get('library-status').textContent, /broken.zip：压缩包损坏/); assert.deepEqual(ui.saved(), before);
+  const calls = ui.requests.length; await ui.pollLibrary(); assert.equal(ui.requests.length, calls, 'idle completed scans stop polling');
+});
+
+test('a failed job whose map has no ready dataset remains accessible outside the current-map list', async () => {
+  const known = dataset('anubis', 'de_anubis'), failed = { ...dataset('failed-ancient', 'de_ancient'), jobStatus: 'error', parseError: '摘要写入失败' };
+  const ui = await page([known, failed], { saved: { map: 'de_anubis' } });
+  assert.deepEqual(visibleDemoNames(ui), [known.name]); assert.deepEqual(visibleDemoNames(ui, 'unmapped-demo-list'), [failed.name]);
+  assert.equal(ui.get('unmapped-demos').hidden, false); assert.equal(ui.get('unmapped-demo-count').textContent, '待完成分析 · 1 场');
+  assert.ok(ui.get('unmapped-demo-list').querySelectorAll('small').some(node => node.textContent === 'de_ancient · 摘要写入失败'));
+  await ui.get('unmapped-demo-list').querySelectorAll('button').find(button => button.className === 'demo-remove').click(); await settle();
+  assert.deepEqual(ui.saved().ids, [known.id]); assert.equal(ui.get('unmapped-demos').hidden, true);
 });

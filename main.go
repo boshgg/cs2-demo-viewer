@@ -103,13 +103,7 @@ func main() {
 		_ = listener.Close()
 		log.Fatal(err)
 	}
-	if result, err := a.scanLibrary(); err != nil {
-		log.Printf("Scan demo directory: %v", err)
-	} else {
-		for _, message := range result.Errors {
-			log.Print(message)
-		}
-	}
+	a.startLibraryScan()
 	server := &http.Server{Handler: a.handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt)

@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -40,6 +41,7 @@ type job struct {
 	ownedSource          bool
 	sourceSize           int64
 	sourceModTime        int64
+	contentSHA256        string
 	created              time.Time
 	ctx                  context.Context
 	cancel               context.CancelFunc
@@ -63,13 +65,15 @@ type app struct {
 	persistMu       sync.Mutex
 	scanMu          sync.Mutex
 	scanning        bool
+	scanResult      libraryScan
+	sources         map[string]librarySource
 	libraryLock     *os.File
 	closeOnce       sync.Once
 }
 
 func newApp(root string, assets fs.FS) *app {
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &app{root: root, assets: assets, jobs: map[string]*job{}, queue: make(chan struct{}, 1), slots: make(chan struct{}, 3), ctx: ctx, cancel: cancel}
+	a := &app{root: root, assets: assets, jobs: map[string]*job{}, sources: map[string]librarySource{}, queue: make(chan struct{}, 1), slots: make(chan struct{}, 3), ctx: ctx, cancel: cancel}
 	a.wg.Add(1)
 	go a.worker()
 	return a
@@ -77,7 +81,9 @@ func newApp(root string, assets fs.FS) *app {
 
 func (a *app) close() {
 	a.closeOnce.Do(func() {
+		a.mu.Lock()
 		a.cancel()
+		a.mu.Unlock()
 		a.wg.Wait()
 		if a.persistent {
 			a.saveLibrary()
@@ -182,7 +188,7 @@ func (a *app) upload(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 400, "请选择 .dem 文件")
 		return
 	}
-	var source, name string
+	var source, name, contentHash string
 	defer func() {
 		if !queued && source != "" {
 			_ = os.Remove(source)
@@ -217,7 +223,9 @@ func (a *app) upload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		source = f.Name()
-		n, copyErr := io.Copy(f, io.LimitReader(io.MultiReader(strings.NewReader(string(magic)), part), maxUploadBytes+1))
+		hash := sha256.New()
+		n, copyErr := io.Copy(io.MultiWriter(f, hash), io.LimitReader(io.MultiReader(strings.NewReader(string(magic)), part), maxUploadBytes+1))
+		contentHash = hex.EncodeToString(hash.Sum(nil))
 		closeErr := f.Close()
 		if copyErr != nil || closeErr != nil || r.Context().Err() != nil {
 			apiError(w, 400, "文件上传中断，请重新导入")
@@ -240,7 +248,7 @@ func (a *app) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	id := hex.EncodeToString(b)
 	ctx, cancel := context.WithCancel(a.ctx)
-	j := &job{ID: id, Name: name, Analysis: analysis, Status: "queued", Message: "已上传，等待解析", name: name, source: source, ownedSource: true, result: filepath.Join(a.root, id+".json.gz"), analysisResult: filepath.Join(a.root, id+".analysis.json.gz"), created: time.Now(), ctx: ctx, cancel: cancel}
+	j := &job{ID: id, Name: name, Analysis: analysis, Status: "queued", Message: "已上传，等待解析", name: name, source: source, ownedSource: true, contentSHA256: contentHash, result: filepath.Join(a.root, id+".json.gz"), analysisResult: filepath.Join(a.root, id+".analysis.json.gz"), created: time.Now(), ctx: ctx, cancel: cancel}
 	a.mu.Lock()
 	// Analysis jobs are never silently evicted. Ordinary playback keeps a small
 	// recent list; sequential parsing remains bounded independently of count.
@@ -409,11 +417,19 @@ func (a *app) remove(w http.ResponseWriter, r *http.Request) {
 	}
 	j.cancel()
 	delete(a.jobs, j.ID)
+	for key, source := range a.sources {
+		if source.JobID == j.ID {
+			delete(a.sources, key)
+		}
+	}
+	j.mu.Lock()
+	ownedSource, sourcePath := j.ownedSource, j.source
+	j.mu.Unlock()
 	a.mu.Unlock()
 	_ = os.Remove(j.result)
 	_ = os.Remove(j.analysisResult)
-	if j.ownedSource {
-		_ = os.Remove(j.source)
+	if ownedSource {
+		_ = os.Remove(sourcePath)
 	}
 	a.saveLibrary()
 	w.WriteHeader(204)

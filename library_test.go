@@ -87,7 +87,7 @@ func writeSessionManifest(t *testing.T, dir string, m sessionManifest) string {
 func writeLocalDemo(t *testing.T, dir, name string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
-	if e := os.WriteFile(path, []byte("PBDEMS2\x00invalid-payload"), 0600); e != nil {
+	if e := os.WriteFile(path, []byte("PBDEMS2\x00invalid-payload-"+name), 0600); e != nil {
 		t.Fatal(e)
 	}
 	past := time.Now().Add(-time.Hour)

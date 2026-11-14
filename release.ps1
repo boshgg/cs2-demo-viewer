@@ -1,4 +1,4 @@
-param([string]$Version = '4.0.4')
+param([string]$Version = '4.0.5')
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Use a numeric semantic version, for example 4.0.0.' }
@@ -16,7 +16,7 @@ $packageDirectory = Join-Path $stageDirectory $packageName
 $binaryDirectory = Join-Path $packageDirectory 'bin'
 New-Item -ItemType Directory -Path $binaryDirectory -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $packageDirectory 'demo') -Force | Out-Null
-[IO.File]::WriteAllText((Join-Path $packageDirectory 'demo\README.txt'), '将解压后的 .dem 放入此文件夹。启动时自动读取；网页打开后点击“刷新文件夹”添加新录像。原始文件不会因移除分析记录而删除。', [Text.UTF8Encoding]::new($true))
+[IO.File]::WriteAllText((Join-Path $packageDirectory 'demo\README.txt'), '将 .dem 或包含 .dem 的 .zip 放入此文件夹。启动时自动读取；网页打开后点击“刷新文件夹”添加新录像。ZIP 自动提取，重复内容只统计一次；原始文件不会因移除分析记录而删除。', [Text.UTF8Encoding]::new($true))
 $oldGoos, $oldGoarch, $oldCgo = $env:GOOS, $env:GOARCH, $env:CGO_ENABLED
 try {
     $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '0'
@@ -48,10 +48,10 @@ $readme = @"
 CS2 Replay v$Version - Windows x64 便携版
 
 1. 完整解压本文件夹，双击 Start Viewer.cmd。
-2. 将解压后的 .dem 放入本目录 demo 文件夹，启动后自动读取，也可在网页手动导入。
+2. 将 .dem 或包含 .dem 的 .zip 放入本目录 demo 文件夹，启动后自动读取并提取 ZIP 中的录像；也可在网页手动导入 .dem。
 3. 浏览器打开 http://127.0.0.1:8765/analysis.html，按地图、玩家ID、队伍和CT/T筛选叠加，不设10场数量上限。
-4. 网页已经打开时，点击“刷新文件夹”读取新加入或修改的 Demo，重复刷新不会重复添加。
-5. 查看移动、交火、死亡热力图，以及道具落点区域和相同投法的数量、频率与代表轨迹。
+4. 网页已经打开时，点击“刷新文件夹”读取新加入或修改的 Demo / ZIP，重复刷新不会重复添加；相同内容只分析一次。
+5. 选择地图后，比赛来源只显示本地图的录像；尚未识别地图的任务单独显示。查看移动、交火、死亡热力图，以及道具数量、频率与代表轨迹。
 
 已包含可执行程序，不需要安装 Go、Node.js 或 CS2。地图与图标内嵌，可离线使用。
 保持启动终端开启，在终端按 Ctrl+C 停止。解析记录保存在本目录 data 文件夹，重启会自动恢复，无需逐个重新导入；原始 demo 文件不会删除。

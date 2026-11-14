@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -30,11 +30,13 @@ type libraryRecord struct {
 	OwnedSource   bool      `json:"ownedSource,omitempty"`
 	SourceSize    int64     `json:"sourceSize,omitempty"`
 	SourceModTime int64     `json:"sourceModTime,omitempty"`
+	ContentSHA256 string    `json:"contentSHA256,omitempty"`
 	Created       time.Time `json:"created"`
 }
 type libraryManifest struct {
 	Version   int             `json:"version"`
 	Jobs      []libraryRecord `json:"jobs"`
+	Sources   []librarySource `json:"sources,omitempty"`
 	SessionID string          `json:"sessionId,omitempty"`
 	Settings  json.RawMessage `json:"settings,omitempty"`
 }
@@ -44,6 +46,7 @@ type libraryScan struct {
 	Unchanged int      `json:"unchanged"`
 	Queued    int      `json:"queued"`
 	Errors    []string `json:"errors"`
+	Scanning  bool     `json:"scanning"`
 }
 
 func installationDirectories(executable string) (string, string) {
@@ -164,11 +167,15 @@ func (a *app) persistLibrary() error {
 	m := libraryManifest{Version: 1, Jobs: []libraryRecord{}, SessionID: a.sessionID, Settings: append(json.RawMessage(nil), a.sessionSettings...)}
 	for _, j := range a.jobs {
 		j.mu.Lock()
-		m.Jobs = append(m.Jobs, libraryRecord{ID: j.ID, Revision: j.Revision, Name: j.Name, Map: j.Map, Analysis: j.Analysis, Status: j.Status, Error: j.Error, Source: j.source, OwnedSource: j.ownedSource, SourceSize: j.sourceSize, SourceModTime: j.sourceModTime, Created: j.created})
+		m.Jobs = append(m.Jobs, libraryRecord{ID: j.ID, Revision: j.Revision, Name: j.Name, Map: j.Map, Analysis: j.Analysis, Status: j.Status, Error: j.Error, Source: j.source, OwnedSource: j.ownedSource, SourceSize: j.sourceSize, SourceModTime: j.sourceModTime, ContentSHA256: j.contentSHA256, Created: j.created})
 		j.mu.Unlock()
+	}
+	for _, source := range a.sources {
+		m.Sources = append(m.Sources, source)
 	}
 	a.mu.Unlock()
 	sort.Slice(m.Jobs, func(i, j int) bool { return m.Jobs[i].Created.Before(m.Jobs[j].Created) })
+	sort.Slice(m.Sources, func(i, j int) bool { return sourceKey(m.Sources[i]) < sourceKey(m.Sources[j]) })
 	f, err := os.CreateTemp(a.root, ".library-*.tmp")
 	if err != nil {
 		return err
@@ -208,7 +215,7 @@ func (a *app) loadLibrary() error {
 	}
 	seen := map[string]bool{}
 	for _, entry := range m.Jobs {
-		if !validSessionID(entry.ID) || !validLibraryRevision(entry.ID, entry.Revision) || seen[entry.ID] || entry.Name == "" {
+		if !validSessionID(entry.ID) || !validLibraryRevision(entry.ID, entry.Revision) || seen[entry.ID] || entry.Name == "" || (entry.ContentSHA256 != "" && !validSessionHash(entry.ContentSHA256)) {
 			return fmt.Errorf("invalid library identity")
 		}
 		seen[entry.ID] = true
@@ -222,11 +229,17 @@ func (a *app) loadLibrary() error {
 			}
 		}
 	}
+	for _, source := range m.Sources {
+		if !validLibrarySource(a.demoDir, source) || !seen[source.JobID] {
+			return fmt.Errorf("invalid library source binding")
+		}
+		a.sources[sourceKey(source)] = source
+	}
 	a.sessionID = m.SessionID
 	a.sessionSettings = m.Settings
 	for _, entry := range m.Jobs {
 		ctx, cancel := context.WithCancel(a.ctx)
-		j := &job{ID: entry.ID, Name: entry.Name, name: entry.Name, Map: entry.Map, Analysis: entry.Analysis, Status: entry.Status, Error: entry.Error, source: entry.Source, ownedSource: entry.OwnedSource, sourceSize: entry.SourceSize, sourceModTime: entry.SourceModTime, created: entry.Created, ctx: ctx, cancel: cancel, result: filepath.Join(a.root, entry.ID+".json.gz"), analysisResult: filepath.Join(a.root, entry.ID+".analysis.json.gz")}
+		j := &job{ID: entry.ID, Name: entry.Name, name: entry.Name, Map: entry.Map, Analysis: entry.Analysis, Status: entry.Status, Error: entry.Error, source: entry.Source, ownedSource: entry.OwnedSource, sourceSize: entry.SourceSize, sourceModTime: entry.SourceModTime, contentSHA256: entry.ContentSHA256, created: entry.Created, ctx: ctx, cancel: cancel, result: filepath.Join(a.root, entry.ID+".json.gz"), analysisResult: filepath.Join(a.root, entry.ID+".analysis.json.gz")}
 		j.Revision = entry.Revision
 		if j.Revision == "" {
 			j.Revision = j.ID
@@ -281,34 +294,44 @@ func (a *app) libraryInfo(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	count := len(a.jobs)
 	scanning := a.scanning
+	result := a.scanResult
+	result.Errors = append([]string{}, result.Errors...)
 	a.mu.Unlock()
-	jsonResponse(w, 200, map[string]any{"directory": a.demoDir, "enabled": a.persistent, "scanning": scanning, "count": count, "message": "文件保留在本机；刷新后发现新 Demo，按顺序解析"})
+	jsonResponse(w, 200, map[string]any{"directory": a.demoDir, "enabled": a.persistent, "scanning": scanning, "count": count, "result": result, "message": "读取 .dem 和 ZIP 中的录像，后台校验去重并按顺序解析"})
 }
 func (a *app) refreshLibrary(w http.ResponseWriter, r *http.Request) {
 	if !a.persistent {
 		apiError(w, 409, "此实例未启用本机资料库")
 		return
 	}
-	result, err := a.scanLibrary()
-	if err != nil {
-		apiError(w, 500, err.Error())
-		return
-	}
-	jsonResponse(w, 200, result)
+	jsonResponse(w, 200, a.startLibraryScan())
 }
-func (a *app) scanLibrary() (libraryScan, error) {
+func (a *app) scanLibrary() (result libraryScan, err error) {
 	a.scanMu.Lock()
 	defer a.scanMu.Unlock()
-	result := libraryScan{Directory: a.demoDir, Errors: []string{}}
+	result = libraryScan{Directory: a.demoDir, Errors: []string{}}
 	a.mu.Lock()
 	a.scanning = true
 	a.mu.Unlock()
-	defer func() { a.mu.Lock(); a.scanning = false; a.mu.Unlock() }()
+	defer func() {
+		if err != nil && a.ctx.Err() == nil {
+			result.Errors = append(result.Errors, err.Error())
+		}
+		a.mu.Lock()
+		a.scanning = false
+		a.scanResult = result
+		a.mu.Unlock()
+	}()
 	entries, err := os.ReadDir(a.demoDir)
 	if err != nil {
 		return result, err
 	}
+	// Plain files go first so an archive alongside an existing .dem reuses its
+	// original ID and cached analysis after its content hash has been verified.
 	for _, entry := range entries {
+		if a.ctx.Err() != nil {
+			return result, a.ctx.Err()
+		}
 		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.EqualFold(filepath.Ext(entry.Name()), ".dem") {
 			continue
 		}
@@ -320,55 +343,26 @@ func (a *app) scanLibrary() (libraryScan, error) {
 			result.Errors = append(result.Errors, entry.Name()+"：文件为空或超过 2 GiB，写入完成后刷新重试")
 			continue
 		}
-		path := filepath.Join(a.demoDir, entry.Name())
-		a.mu.Lock()
-		var existing *job
-		for _, candidate := range a.jobs {
-			if !candidate.ownedSource && strings.EqualFold(candidate.source, path) {
-				existing = candidate
-				break
-			}
+		if e := a.scanPlainFile(filepath.Join(a.demoDir, entry.Name()), info, &result); e != nil {
+			result.Errors = append(result.Errors, entry.Name()+"："+e.Error())
 		}
-		if existing != nil {
-			existing.mu.Lock()
-			same := existing.sourceSize == info.Size() && existing.sourceModTime == info.ModTime().UnixNano()
-			status := existing.Status
-			existing.mu.Unlock()
-			if (same && status != "error") || status == "queued" || status == "parsing" {
-				a.mu.Unlock()
-				result.Unchanged++
-				continue
-			}
+		a.publishScanProgress(result)
+	}
+	for _, entry := range entries {
+		if a.ctx.Err() != nil {
+			return result, a.ctx.Err()
 		}
-		var id string
-		created := time.Now()
-		if existing != nil {
-			id = existing.ID
-			created = existing.created
-			existing.cancel()
-		} else {
-			b := make([]byte, 12)
-			if _, err := rand.Read(b); err != nil {
-				a.mu.Unlock()
-				return result, err
-			}
-			id = hex.EncodeToString(b)
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.EqualFold(filepath.Ext(entry.Name()), ".zip") {
+			continue
 		}
-		ctx, cancel := context.WithCancel(a.ctx)
-		j := &job{ID: id, Name: entry.Name(), name: entry.Name(), Analysis: true, Status: "queued", Message: "已发现本机 Demo，等待解析", source: path, sourceSize: info.Size(), sourceModTime: info.ModTime().UnixNano(), created: created, ctx: ctx, cancel: cancel, result: filepath.Join(a.root, id+".json.gz"), analysisResult: filepath.Join(a.root, id+".analysis.json.gz")}
-		j.Revision = fmt.Sprintf("%s-%d", id, time.Now().UnixNano())
-		j.result, j.analysisResult = jobCachePaths(a.root, j.ID, j.Revision)
-		a.jobs[id] = j
-		a.mu.Unlock()
-		if existing != nil {
-			_ = os.Remove(existing.result)
-			_ = os.Remove(existing.analysisResult)
+		info, e := entry.Info()
+		if e != nil || !info.Mode().IsRegular() {
+			continue
 		}
-		if existing == nil {
-			result.Added++
+		if e = a.scanArchive(filepath.Join(a.demoDir, entry.Name()), info, &result); e != nil {
+			result.Errors = append(result.Errors, entry.Name()+"："+e.Error())
 		}
-		result.Queued++
-		a.enqueue(j)
+		a.publishScanProgress(result)
 	}
 	if err := a.persistLibrary(); err != nil {
 		return result, err
@@ -408,13 +402,20 @@ func (a *app) snapshotDemo(j *job) (string, func(), error) {
 		return "", func() {}, err
 	}
 	cleanup := func() { _ = os.Remove(output.Name()) }
-	n, err := io.Copy(output, io.LimitReader(input, maxUploadBytes+1))
+	hash := sha256.New()
+	n, err := io.Copy(io.MultiWriter(output, hash), io.LimitReader(input, maxUploadBytes+1))
 	if e := output.Close(); err == nil {
 		err = e
 	}
 	after, statErr := os.Stat(j.source)
 	if err == nil && (statErr != nil || n != j.sourceSize || after.Size() != j.sourceSize || after.ModTime().UnixNano() != j.sourceModTime) {
 		err = fmt.Errorf("Demo 在读取期间变化，请写入完成后刷新重试")
+	}
+	j.mu.Lock()
+	expectedHash := j.contentSHA256
+	j.mu.Unlock()
+	if err == nil && expectedHash != "" && !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), expectedHash) {
+		err = fmt.Errorf("Demo 内容在校验后变化，请刷新重试")
 	}
 	if err != nil {
 		cleanup()

@@ -3,7 +3,7 @@
   const $ = id => document.getElementById(id), core = window.ReplayAnalysis, heat = window.ReplayHeatmap;
   const state = { jobs: new Map(), demos: new Map(), selectedDemos: null, selectedTeams: null, selectedPlayers: null, aliases: {}, map: '', mapInfo: null, image: null, result: null, worker: null, request: 0, mapRequest: 0, uploading: false, cancelled: false, controller: null, currentJob: null, queued: [], pendingCount: 0, selectedGroup: null, selectedThrow: null, zoom: 1, panX: 0, panY: 0, layers: new Map(), fallbackBounds: { minX: -3000, maxX: 3000, minY: -3000, maxY: 3000 } };
   const storageKey = 'cs2-analysis-v4';
-  let initializing = true, migratedSessionId = '', libraryEnabled = false, libraryRefreshing = false, syncPromise = null, libraryTimer, restoredView = null;
+  let initializing = true, migratedSessionId = '', libraryEnabled = false, libraryRefreshing = false, libraryScanning = false, syncPromise = null, libraryTimer, restoredView = null;
   const loadingJobs = new Map();
   const metricNames = { movement: '移动', engagements: '交火', deaths: '死亡', shots: '开火' };
   const heatResolution = 384;
@@ -81,24 +81,32 @@
     if (checked) state[key].add(id); else state[key].delete(id);
   }
   function renderJobs() {
-    $('demo-count').textContent = `${state.jobs.size + state.pendingCount} 场`;
-    const list = $('demo-list'); list.replaceChildren();
-    for (const job of state.jobs.values()) {
+    const activeMap = state.map || restoredView?.map || '', jobs = [...state.jobs.values()];
+    const mapOf = job => job.map || state.demos.get(job.id)?.map || '';
+    const availableMaps = new Set([...state.demos.values()].map(demo => demo.map));
+    const current = jobs.filter(job => activeMap && mapOf(job) === activeMap);
+    const unmapped = jobs.filter(job => !mapOf(job) || (mapOf(job) !== activeMap && !availableMaps.has(mapOf(job))));
+    $('demo-count').textContent = `本图 ${number(current.length)} / 共 ${number(state.jobs.size + state.pendingCount)} 场`;
+    $('demo-scope').textContent = activeMap ? `只显示 ${activeMap}；切换下方地图查看其他比赛。` : '选择下方地图查看对应比赛；地图未识别的任务列在下面。';
+    const list = $('demo-list'), pendingList = $('unmapped-demo-list'); list.replaceChildren(); pendingList.replaceChildren();
+    $('unmapped-demos').hidden = !unmapped.length;
+    $('unmapped-demo-count').textContent = `${unmapped.some(job => mapOf(job)) ? '待完成分析' : '待识别地图'} · ${number(unmapped.length)} 场`;
+    for (const job of [...current, ...unmapped]) {
       const row = node('div', null, 'check-item'), label = node('label'), check = document.createElement('input'), words = node('span');
       label.style.display = 'contents'; check.type = 'checkbox'; check.checked = !state.selectedDemos || state.selectedDemos.has(job.id); check.disabled = !state.demos.has(job.id); check.setAttribute('aria-label', `叠加 ${job.name || job.id}`);
       check.addEventListener('change', () => { toggleSet('selectedDemos', job.id, [...state.jobs.keys()], check.checked); state.selectedTeams = null; state.selectedPlayers = null; renderFilters(); requestAnalysis(); });
       const title = node('strong', job.name || '解析中的比赛'); title.title = job.name || '';
-      const info = node('small', job.status === 'ready' ? `${job.map || ''}${job.synthetic ? ' · 合成示例' : ''}` : (job.error || job.message || '正在处理…'), job.synthetic ? 'badge-synthetic' : job.status === 'error' ? 'status-error' : '');
+      const info = node('small', job.status === 'ready' ? `${job.map || ''}${job.synthetic ? ' · 合成示例' : ''}` : [mapOf(job), job.error || job.message || '正在处理…'].filter(Boolean).join(' · '), job.synthetic ? 'badge-synthetic' : job.status === 'error' ? 'status-error' : '');
       words.append(title, info);
       if (job.warnings?.length) { const warning = node('small', `⚠ ${job.warnings[0]}${job.warnings.length > 1 ? `（另有 ${job.warnings.length - 1} 条提示）` : ''}`, 'warning-inline'); warning.title = job.warnings.join('\n'); words.append(warning); }
       label.append(check, words); row.append(label);
       const focus = node('button', '查看', 'text-button demo-focus'); focus.type = 'button'; focus.disabled = !state.demos.has(job.id); focus.title = '切换到这场 Demo 的地图并显示其队伍与玩家'; focus.setAttribute('aria-label', `查看 ${job.name || '比赛'} 所在地图`);
       focus.addEventListener('click', () => { const data = state.demos.get(job.id); if (data) void focusDemo(data); }); row.append(focus);
-      const remove = node('button', '×', 'demo-remove'); remove.title = job.owned ? '移除比赛并释放回放缓存' : '从分析移除'; remove.setAttribute('aria-label', `移除 ${job.name || '比赛'}`); remove.disabled = state.uploading && state.currentJob === job.id; remove.addEventListener('click', () => removeJob(job.id)); row.append(remove); list.append(row);
+      const remove = node('button', '×', 'demo-remove'); remove.title = job.owned ? '移除比赛并释放回放缓存' : '从分析移除'; remove.setAttribute('aria-label', `移除 ${job.name || '比赛'}`); remove.disabled = state.uploading && state.currentJob === job.id; remove.addEventListener('click', () => removeJob(job.id)); row.append(remove); (mapOf(job) === activeMap && activeMap ? list : pendingList).append(row);
     }
-    if (!state.jobs.size) list.append(node('p', '导入一场或多场 .dem，建立本次分析。', 'muted'));
+    if (!current.length) list.append(node('p', activeMap ? '当前地图暂无比赛。' : jobs.length ? '等待识别地图，或在下方选择已有地图。' : '将 .dem 或 .zip 放入文件夹并刷新，建立分析。', 'muted'));
     $('sample-analysis').disabled = state.uploading;
-    $('refresh-library').disabled = !libraryEnabled || libraryRefreshing || state.uploading;
+    $('refresh-library').disabled = !libraryEnabled || libraryRefreshing || libraryScanning || state.uploading;
   }
   async function removeJob(id) {
     const job = state.jobs.get(id);
@@ -205,11 +213,13 @@
       restoredView = null;
     }
     $('map-hint').textContent = names.length > 1 ? `${names.length} 张地图已分组；只叠加当前地图。` : '不同地图分开统计，不会混合坐标。';
+    renderJobs();
   }
   async function loadMap(name) {
     const request = ++state.mapRequest;
     ++state.request; state.result = null; state.selectedGroup = state.selectedThrow = null;
     state.map = name; state.mapInfo = null; state.image = null; state.zoom = 1; state.panX = 0; state.panY = 0; clearHeat();
+    renderJobs();
     const sameMap = [...state.demos.values()].filter(d => d.map === name);
     const bounds = sameMap.map(d => d.bounds).filter(b => b && [b.minX, b.maxX, b.minY, b.maxY].every(Number.isFinite));
     if (bounds.length) state.fallbackBounds = { minX: Math.min(...bounds.map(b => b.minX)) - 256, maxX: Math.max(...bounds.map(b => b.maxX)) + 256, minY: Math.min(...bounds.map(b => b.minY)) - 256, maxY: Math.max(...bounds.map(b => b.maxY)) + 256 };
@@ -254,8 +264,11 @@
   }
   function scheduleLibraryPoll() {
     clearTimeout(libraryTimer);
-    if (!state.uploading && [...state.jobs.values()].some(job => job.owned && job.status !== 'ready' && job.status !== 'error')) {
-      libraryTimer = setTimeout(() => { void syncServerJobs().catch(error => { $('library-status').textContent = `更新解析进度失败：${error.message}。可点击刷新重试。`; }); }, 1200);
+    if (!state.uploading && (libraryScanning || [...state.jobs.values()].some(job => job.owned && job.status !== 'ready' && job.status !== 'error'))) {
+      libraryTimer = setTimeout(async () => {
+        try { await loadLibraryInfo(true); await syncServerJobs(); }
+        catch (error) { $('library-status').textContent = `更新解析进度失败：${error.message}。正在重试…`; scheduleLibraryPoll(); }
+      }, 1200);
     }
   }
   async function syncServerJobs(options = {}) {
@@ -300,29 +313,35 @@
     })();
     try { return await syncPromise; } finally { syncPromise = null; }
   }
-  async function loadLibraryInfo() {
+  function libraryResultText(result) {
+    const errors = Array.isArray(result.errors) ? result.errors.map(item => typeof item === 'string' ? item : item.message || item.error || '文件暂不可读取') : [];
+    return `新增 ${number(result.added)} 场 · ${number(result.unchanged)} 场无需重复解析${errors.length ? `。${errors.join('；')}` : '。已有筛选已保留。'}`;
+  }
+  async function loadLibraryInfo(strict = false) {
     try {
       const info = await json(await fetch('/api/library', { cache: 'no-store' }));
       libraryEnabled = info.enabled === true;
+      libraryScanning = info.scanning === true;
       $('library-directory').textContent = info.directory || '未配置 Demo 文件夹';
       $('library-directory').title = info.directory || '';
-      $('library-status').textContent = libraryEnabled ? '把 .dem 放入此文件夹；新增或修改后点击刷新。' : info.message || '此服务未启用文件夹读取。';
-    } catch { $('library-status').textContent = '无法读取文件夹信息；仍可手动导入 Demo。'; }
-    $('refresh-library').disabled = !libraryEnabled;
+      $('library-status').textContent = libraryScanning ? '正在扫描文件夹、解压 ZIP 并检查重复录像…' : info.result ? libraryResultText(info.result) : libraryEnabled ? '把 .dem 或 .zip 放入此文件夹；ZIP 会自动解压读取，新增或修改后点击刷新。' : info.message || '此服务未启用文件夹读取。';
+    } catch (error) { if (strict) throw error; $('library-status').textContent = '无法读取文件夹信息；仍可手动导入 Demo。'; }
+    $('refresh-library').disabled = !libraryEnabled || libraryRefreshing || libraryScanning || state.uploading;
   }
   async function refreshLibrary() {
-    if (!libraryEnabled || libraryRefreshing || state.uploading) return;
+    if (!libraryEnabled || libraryRefreshing || libraryScanning || state.uploading) return;
     libraryRefreshing = true; $('refresh-library').disabled = true; $('library-status').textContent = '正在检查文件夹…';
     try {
       const result = await json(await fetch('/api/library/refresh', { method: 'POST' }));
       if (result.directory) { $('library-directory').textContent = result.directory; $('library-directory').title = result.directory; }
+      libraryScanning = result.scanning === true;
+      if (libraryScanning) await loadLibraryInfo(true);
       // An earlier progress request may predate this scan; fetch a fresh snapshot.
       if (syncPromise) await syncPromise;
       await syncServerJobs();
-      const errors = Array.isArray(result.errors) ? result.errors.map(item => typeof item === 'string' ? item : item.message || item.error || '文件暂不可读取') : [];
-      $('library-status').textContent = `新增 ${number(result.added)} 场 · ${number(result.unchanged)} 场无需重复解析${errors.length ? `。${errors.join('；')}` : '。已有筛选已保留。'}`;
+      if (result.scanning !== true) $('library-status').textContent = libraryResultText(result);
     } catch (error) { $('library-status').textContent = `刷新失败：${error.message}。已有比赛仍可查看，可再次点击重试。`; }
-    finally { libraryRefreshing = false; renderJobs(); }
+    finally { libraryRefreshing = false; renderJobs(); scheduleLibraryPoll(); }
   }
   async function focusDemo(data) {
     restoredView = null;
@@ -597,7 +616,7 @@
       const currentId = new URL(location.href).searchParams.get('demo');
       if (currentId && !state.jobs.has(currentId)) await loadJob(currentId, { owned: false, focus: true });
       else if (currentId && state.demos.has(currentId)) await focusDemo(state.demos.get(currentId));
-      initializing = false; renderJobs(); renderFilters(); requestAnalysis(); save();
+      initializing = false; renderJobs(); renderFilters(); requestAnalysis(); save(); scheduleLibraryPoll();
     } catch (error) { message(`无法恢复本机分析：${error.message}。仍可尝试导入新的 Demo。`); }
     finally { initializing = false; }
   }
