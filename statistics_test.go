@@ -247,14 +247,14 @@ func TestStatisticsActualKillWeaponAndVictimActiveWeaponScoring(t *testing.T) {
 	d := statsDemo(append(statsSquad(3, "AWP", 0, 100, nil), statsSquad(2, "AWP", 0, 100, nil)...))
 	d.Events = []Event{statsKill("Glock-18", "AWP"), statsKill("AWP", "Glock-18"), statsKill("AK-47", "M4A4"), statsKill("Nova", "Negev")}
 	got := BuildStatistics(d)
-	want := []int{6, -6, 0, 0}
+	want := []int{24, -6, 0, 0}
 	for i, k := range got.Kills {
 		if k.Score == nil || *k.Score != want[i] || k.Approx || k.WeaponSource != "death_event" {
 			t.Fatalf("kill %d wrong: %+v", i, k)
 		}
 	}
-	if got.Summary.ScoredKills != 4 || got.Summary.Score != 0 || got.Summary.Average == nil || *got.Summary.Average != 0 {
-		t.Fatalf("zero net is not missing: %+v", got.Summary)
+	if got.Summary.ScoredKills != 4 || got.Summary.Score != 18 || got.Summary.Average == nil || *got.Summary.Average != 4.5 {
+		t.Fatalf("weighted totals or averages are wrong: %+v", got.Summary)
 	}
 }
 
@@ -276,12 +276,12 @@ func TestStatisticsExclusionsAreNullableAndRetainEveryEvent(t *testing.T) {
 		t.Fatalf("excluded events dropped or averaged: %+v", got.Summary)
 	}
 	for _, k := range got.Kills {
-		if k.Score != nil || k.ExcludedReason == "" {
+		if k.Score != nil || k.BaseScore != nil || k.ScoreMultiplier != nil || k.ExcludedReason == "" {
 			t.Fatalf("missing exclusion: %+v", k)
 		}
 	}
 	data, err := json.Marshal(got)
-	if err != nil || !strings.Contains(string(data), `"score":null`) {
+	if err != nil || !strings.Contains(string(data), `"score":null`) || !strings.Contains(string(data), `"baseScore":null`) || !strings.Contains(string(data), `"scoreMultiplier":null`) {
 		t.Fatal("excluded scores must serialize as null")
 	}
 }
@@ -329,7 +329,7 @@ func TestStatisticsObservedWeaponHasPriorityAndMissingNewEvidenceStaysUnknown(t 
 	e.VictimWeaponSource = "previous_tick"
 	e.VictimWeaponTime = 29.75
 	d.Events = []Event{e}
-	if k := BuildStatistics(d).Kills[0]; k.Score == nil || *k.Score != 6 || !k.Approx {
+	if k := BuildStatistics(d).Kills[0]; k.Score == nil || *k.Score != 24 || !k.Approx {
 		t.Fatal("previous tick must count with approximate provenance")
 	}
 	e.VictimWeaponTime = 29.749
@@ -348,19 +348,19 @@ func TestStatisticsPostRoundKillsAndScopeTotalsAgree(t *testing.T) {
 	e.Headshot = true
 	d.Events = []Event{e}
 	got := BuildStatistics(d)
-	if got.Summary.Score != 6 || got.Rounds[0].Summary.Score != 6 || got.Halves[0].Summary.Score != 6 {
+	if got.Summary.Score != 24 || got.Rounds[0].Summary.Score != 24 || got.Halves[0].Summary.Score != 24 {
 		t.Fatal("post-round save kill was cut off by EndedAt")
 	}
 	if len(got.Players) != 10 || len(got.Rounds[0].Players) != 10 {
 		t.Fatal("zero-event players must remain visible")
 	}
 	for _, side := range got.Sides {
-		if side.Side == 2 && (side.Summary.Score != 6 || side.Summary.Kills != 1) || side.Side == 3 && (side.Summary.Score != 0 || side.Summary.Deaths != 1) {
+		if side.Side == 2 && (side.Summary.Score != 24 || side.Summary.Kills != 1) || side.Side == 3 && (side.Summary.Score != 0 || side.Summary.Deaths != 1) {
 			t.Fatalf("side summary wrong: %+v", side)
 		}
 	}
 	for _, p := range got.Players {
-		if p.ID == e.KillerID && (p.Summary.Score != 6 || p.Summary.Headshots != 1) || p.ID == e.VictimID && (p.Summary.Deaths != 1 || p.Summary.Score != 0) {
+		if p.ID == e.KillerID && (p.Summary.Score != 24 || p.Summary.Headshots != 1) || p.ID == e.VictimID && (p.Summary.Deaths != 1 || p.Summary.Score != 0) {
 			t.Fatalf("player attribution wrong: %+v", p)
 		}
 	}

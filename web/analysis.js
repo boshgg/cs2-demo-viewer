@@ -23,7 +23,7 @@
   async function json(response) { const body = await response.json().catch(() => ({})); if (!response.ok) throw new Error(body.error || body.message || `请求失败（${response.status}）`); return body; }
   function save() {
     if (initializing) return;
-    const settings = { ids: [...state.jobs.keys()], selectedDemos: state.selectedDemos && [...state.selectedDemos], selectedTeams: state.selectedTeams && [...state.selectedTeams], selectedPlayers: state.selectedPlayers && [...state.selectedPlayers], map: state.map, aliases: state.aliases, side: $('analysis-side').value, floor: $('analysis-floor').value, utilityType: $('analysis-utility-type').value, utilitySort: $('utility-sort').value, query: $('player-search').value, layers: metrics.filter(name => $(`layer-${name}`).checked), radius: Number($('heat-radius').value), opacity: Number($('heat-opacity').value), scale: heatMode(), landingDistance: Number($('landing-distance').value), throwDistance: Number($('throw-distance').value), migratedSessionId };
+    const settings = { ids: [...state.jobs.keys()], selectedDemos: state.selectedDemos && [...state.selectedDemos], selectedTeams: state.selectedTeams && [...state.selectedTeams], selectedPlayers: state.selectedPlayers && [...state.selectedPlayers], map: state.map, aliases: state.aliases, side: $('analysis-side').value, floor: $('analysis-floor').value, utilityType: $('analysis-utility-type').value, utilityTime: $('analysis-utility-time').value, utilitySort: $('utility-sort').value, query: $('player-search').value, layers: metrics.filter(name => $(`layer-${name}`).checked), radius: Number($('heat-radius').value), opacity: Number($('heat-opacity').value), scale: heatMode(), landingDistance: Number($('landing-distance').value), throwDistance: Number($('throw-distance').value), migratedSessionId };
     if (restoredView) { settings.map = restoredView.map; settings.floor = restoredView.floor; }
     try { localStorage.setItem(storageKey, JSON.stringify(settings)); } catch { /* Private browsing may not offer localStorage. */ }
   }
@@ -32,7 +32,7 @@
     state.aliases = saved.aliases && typeof saved.aliases === 'object' && !Array.isArray(saved.aliases) ? Object.fromEntries(Object.entries(saved.aliases).filter(([, value]) => typeof value === 'string')) : {};
     state.map = typeof saved.map === 'string' ? saved.map : '';
     for (const key of ['selectedDemos', 'selectedTeams', 'selectedPlayers']) state[key] = Array.isArray(saved[key]) ? new Set(saved[key].filter(id => typeof id === 'string')) : null;
-    for (const [key, id, choices] of [['side', 'analysis-side', ['all', '2', '3']], ['floor', 'analysis-floor', ['all', 'upper', 'lower']], ['utilityType', 'analysis-utility-type', ['all', ...Object.keys(utilityNames)]], ['utilitySort', 'utility-sort', ['common', 'rare']], ['scale', 'heat-scale', ['log', 'linear']]]) if (choices.includes(saved[key])) $(id).value = saved[key];
+    for (const [key, id, choices] of [['side', 'analysis-side', ['all', '2', '3']], ['floor', 'analysis-floor', ['all', 'upper', 'lower']], ['utilityType', 'analysis-utility-type', ['all', ...Object.keys(utilityNames)]], ['utilityTime', 'analysis-utility-time', ['all', ...core.utilityTimeBuckets.map(bucket => bucket.key)]], ['utilitySort', 'utility-sort', ['common', 'rare']], ['scale', 'heat-scale', ['log', 'linear']]]) if (choices.includes(saved[key])) $(id).value = saved[key];
     if (typeof saved.query === 'string') $('player-search').value = saved.query;
     if (Array.isArray(saved.layers)) for (const name of metrics) $(`layer-${name}`).checked = saved.layers.includes(name);
     for (const [key, id, min, max] of [['radius', 'heat-radius', 64, 384], ['opacity', 'heat-opacity', 15, 100], ['landingDistance', 'landing-distance', 16, 512], ['throwDistance', 'throw-distance', 16, 256]]) if (Number.isFinite(saved[key])) $(id).value = String(Math.max(min, Math.min(max, saved[key])));
@@ -49,10 +49,11 @@
       for (const id of ['metric-movement', 'metric-engagements', 'metric-deaths', 'metric-utilities']) $(id).textContent = '—';
       $('export-image').disabled = $('export-csv').disabled = true; renderUtilityGroups(); draw(); save(); return;
     }
-    const filter = { map: state.map, demoIds: state.selectedDemos && [...state.selectedDemos], teamIds: state.selectedTeams && [...state.selectedTeams], playerIds: state.selectedPlayers && [...state.selectedPlayers], sides: $('analysis-side').value === 'all' ? [2, 3] : [Number($('analysis-side').value)], floor: $('analysis-floor').value, lowerMaxZ: state.mapInfo?.lowerMaxZ, teamAliases: state.aliases, utilityType: $('analysis-utility-type').value };
+    const filter = { map: state.map, demoIds: state.selectedDemos && [...state.selectedDemos], teamIds: state.selectedTeams && [...state.selectedTeams], playerIds: state.selectedPlayers && [...state.selectedPlayers], sides: $('analysis-side').value === 'all' ? [2, 3] : [Number($('analysis-side').value)], floor: $('analysis-floor').value, lowerMaxZ: state.mapInfo?.lowerMaxZ, teamAliases: state.aliases, utilityType: $('analysis-utility-type').value, utilityTime: $('analysis-utility-time').value };
     const cluster = { landing: Number($('landing-distance').value) || 128, throwing: Number($('throw-distance').value) || 64, lowerMaxZ: state.mapInfo?.lowerMaxZ };
     const id = ++state.request;
     $('computing').hidden = false;
+    $('export-csv').disabled = true;
     state.selectedGroup = null; state.selectedThrow = null;
     if (state.worker) state.worker.postMessage({ type: 'compute', id, filter, cluster });
     else {
@@ -626,7 +627,25 @@
     const label = toScreen(group.end); ctx.font = '10px "Segoe UI",sans-serif'; ctx.fillStyle = '#ffdc9b'; ctx.fillText(`${utilityNames[group.type] || group.type} · ${items.length} 次`, label.x + 10, label.y - 9);
     $('map-status').textContent = '青色：出手点 · 金色：落点 · 虚线：一条观测轨迹';
   }
+  function renderUtilityTimeCounts() {
+    const counts = state.result?.utilityTimeCounts || {}, selected = $('analysis-utility-time').value;
+    const all = core.utilityTimeBuckets.reduce((sum, bucket) => sum + (counts[bucket.key] || 0), 0);
+    const list = $('utility-time-counts'); list.replaceChildren();
+    for (const { key, label } of [{ key: 'all', label: core.utilityTimeLabel('all') }, ...core.utilityTimeBuckets]) {
+      const count = key === 'all' ? all : counts[key] || 0;
+      const button = node('button', null, `utility-time-count${selected === key ? ' selected' : ''}`);
+      button.type = 'button'; button.dataset.timeBucket = key; button.dataset.count = String(count); button.setAttribute('aria-pressed', String(selected === key));
+      button.setAttribute('aria-label', `${label}，${number(count)} 次投掷`);
+      button.append(node('span', label), node('strong', number(count)));
+      button.addEventListener('click', () => { $('analysis-utility-time').value = key; requestAnalysis(); }); list.append(button);
+    }
+  }
+  function utilityTimeDescription(item) {
+    const bucket = item.timeBucket || core.utilityTimeBucket(item);
+    return bucket === 'unknown' ? '投掷时段未知（缺少出手或冻结结束记录）' : `开打后 ${item.roundElapsed.toFixed(2)} 秒 · ${core.utilityTimeLabel(bucket)}`;
+  }
   function renderUtilityGroups() {
+    renderUtilityTimeCounts();
     const groups = [...(state.result?.groups || [])];
     if ($('utility-sort').value === 'rare') groups.sort((a, b) => a.count - b.count || a.id.localeCompare(b.id));
     $('utility-group-count').textContent = `${groups.length} 类落点 · ${state.result?.utilities.length || 0} 次`;
@@ -635,18 +654,19 @@
     for (const group of groups.slice(0, max)) {
       const button = node('button', null, `utility-card${state.selectedGroup?.id === group.id ? ' selected' : ''}`); button.setAttribute('aria-pressed', String(state.selectedGroup?.id === group.id));
       const image = document.createElement('img'); image.src = `/icons/${utilityIcons[group.type] || 'unknown'}.svg`; image.alt = '';
-      const text = node('span'); text.append(node('strong', `${utilityNames[group.type] || group.type} · 落点 ${group.id.split('-')[1]}`), node('small', `${group.demoCount} 场 · ${group.playerCount} 人 · ${group.throws.filter(g => !g.unknown).length} 种已知投法${group.unknownStarts ? ` · ${group.unknownStarts} 次出手点未知` : ''}`));
+      const timeLabel = $('analysis-utility-time').value === 'all' ? '' : ` · ${core.utilityTimeLabel($('analysis-utility-time').value)}`;
+      const text = node('span'); text.append(node('strong', `${utilityNames[group.type] || group.type} · 落点 ${group.id.split('-')[1]}`), node('small', `${group.demoCount} 场 · ${group.playerCount} 人 · ${group.throws.filter(g => !g.unknown).length} 种已知投法${group.unknownStarts ? ` · ${group.unknownStarts} 次出手点未知` : ''}${timeLabel}`));
       const count = node('span', null, 'utility-card-count'); count.append(node('b', group.count), node('em', `${group.percent.toFixed(1)}%`));
       button.append(image, text, count); button.addEventListener('click', () => { state.selectedGroup = group; state.selectedThrow = null; renderUtilityGroups(); renderUtilityDetail(); draw(); }); list.append(button);
     }
     if (groups.length > max) { const more = node('button', `显示更多（还有 ${groups.length - max} 类）`, 'cluster-more'); more.addEventListener('click', () => { list.dataset.limit = String(max + 80); renderUtilityGroups(); }); list.append(more); }
-    if (!groups.length) list.append(node('div', '当前筛选没有已观测到落点的道具。切换道具类型或扩大筛选范围。', 'utility-empty'));
+    if (!groups.length) list.append(node('div', '当前筛选没有已观测到落点的道具。切换投掷时段、道具类型或扩大筛选范围。', 'utility-empty'));
     $('clear-utility').hidden = !state.selectedGroup;
     if (!state.selectedGroup) { $('utility-detail').hidden = true; $('map-status').textContent = '滚轮缩放 · 拖拽平移 · 点击右侧落点定位'; }
   }
   function renderUtilityDetail() {
     const group = state.selectedGroup, detail = $('utility-detail'); detail.replaceChildren(); detail.hidden = !group; if (!group) return;
-    detail.append(node('h3', `${utilityNames[group.type] || group.type} · ${group.count} 次观测`), node('p', `占当前道具筛选 ${group.percent.toFixed(1)}%。下列投法同时比较出手点和落点；位置接近不代表视角、速度与按键完全相同。`));
+    detail.append(node('h3', `${utilityNames[group.type] || group.type} · ${group.count} 次观测`), node('p', `${core.utilityTimeLabel($('analysis-utility-time').value)} · 占当前道具筛选 ${group.percent.toFixed(1)}%。下列投法同时比较出手点和落点；位置接近不代表视角、速度与按键完全相同。`));
     for (const [index, subgroup] of group.throws.entries()) {
       const block = node('div', null, 'throw-group'), button = node('button', `${subgroup.unknown ? '出手点未知（不归并投法）' : `投法 ${index + 1}`} · ${subgroup.count} 次`, state.selectedThrow?.id === subgroup.id ? 'selected' : '');
       button.addEventListener('click', () => { state.selectedThrow = subgroup; renderUtilityDetail(); draw(); }); block.append(button);
@@ -654,6 +674,7 @@
       const details = document.createElement('details'); details.append(node('summary', `查看 ${subgroup.count} 次投掷与回放`)); const list = document.createElement('ul');
       for (const item of subgroup.items) {
         const li = document.createElement('li'); li.append(node('span', `${item.owner || item.playerId || '未知投掷者'} · ${item.demoName} · R${item.round} `));
+        li.append(node('small', utilityTimeDescription(item), 'throw-time'));
         if (!state.demos.get(item.demoId)?.synthetic) { const link = node('a', '回放 ↗'); link.href = `/?demo=${encodeURIComponent(item.demoId)}&t=${Math.max(0, Number(item.time) || 0).toFixed(2)}`; link.target = '_blank'; link.rel = 'noopener'; li.append(link); }
         else li.append(node('span', '合成示例'));
         list.append(li);
@@ -681,6 +702,7 @@
   $('analysis-side').addEventListener('change', requestAnalysis);
   $('analysis-floor').addEventListener('change', async () => { await loadMapImage(); requestAnalysis(); });
   $('analysis-utility-type').addEventListener('change', requestAnalysis);
+  $('analysis-utility-time').addEventListener('change', requestAnalysis);
   $('utility-sort').addEventListener('change', () => { renderUtilityGroups(); save(); });
   for (const id of ['landing-distance', 'throw-distance']) $(id).addEventListener('change', event => { const input = event.target; input.value = String(Math.max(Number(input.min), Math.min(Number(input.max), Number(input.value) || Number(input.defaultValue)))); requestAnalysis(); });
   $('teams-all').addEventListener('click', () => { state.selectedTeams = null; renderFilters(); requestAnalysis(); });
@@ -691,7 +713,7 @@
   $('players-invert').addEventListener('click', () => { state.selectedPlayers = new Set(availablePlayers().map(p => p.id).filter(id => state.selectedPlayers && !state.selectedPlayers.has(id))); renderPlayers(); requestAnalysis(); });
   $('player-search').addEventListener('input', () => { renderPlayers(); save(); });
   $('apply-aliases').addEventListener('click', () => { $('team-aliases').querySelectorAll('input').forEach(input => { const value = input.value.trim(); if (value) state.aliases[input.dataset.teamId] = value; else delete state.aliases[input.dataset.teamId]; }); state.selectedTeams = null; renderFilters(); requestAnalysis(); });
-  $('clear-selection').addEventListener('click', () => { state.selectedDemos = state.selectedTeams = state.selectedPlayers = null; $('analysis-side').value = 'all'; $('analysis-floor').value = 'all'; $('analysis-utility-type').value = 'all'; $('player-search').value = ''; renderJobs(); renderFilters(); void loadMapImage(); requestAnalysis(); });
+  $('clear-selection').addEventListener('click', () => { state.selectedDemos = state.selectedTeams = state.selectedPlayers = null; $('analysis-side').value = 'all'; $('analysis-floor').value = 'all'; $('analysis-utility-type').value = 'all'; $('analysis-utility-time').value = 'all'; $('player-search').value = ''; renderJobs(); renderFilters(); void loadMapImage(); requestAnalysis(); });
   $('clear-utility').addEventListener('click', () => { state.selectedGroup = state.selectedThrow = null; renderUtilityGroups(); draw(); });
   for (const name of metrics) $(`layer-${name}`).addEventListener('change', () => { rebuildHeat(); save(); });
   let radiusTimer;
@@ -743,8 +765,8 @@
     output.toBlob(blob => { if (blob) download(blob, `${state.map}-analysis.png`); });
   });
   $('export-csv').addEventListener('click', () => {
-    const rows = [['地图', '落点分类', '投法分类', '道具', '落点次数', '占当前道具百分比', '比赛', '玩家', '玩家ID', '队伍分组', '阵营', '回合', '秒', '出手X', '出手Y', '出手Z', '落点X', '落点Y', '落点Z']];
-    for (const g of state.result?.groups || []) for (const t of g.throws) for (const u of t.items) rows.push([u.map, g.id, t.unknown ? '未知出手点' : t.id, utilityNames[u.type] || u.type, g.count, g.percent.toFixed(2), u.demoName, u.owner, u.playerId, u.teamId, u.side === 3 ? 'CT' : 'T', u.round, u.time, u.start?.x ?? '', u.start?.y ?? '', u.start?.z ?? '', u.end.x, u.end.y, u.end.z]);
+    const rows = [['地图', '落点分类', '投法分类', '道具', '落点次数', '占当前道具百分比', '比赛', '玩家', '玩家ID', '队伍分组', '阵营', '回合', '秒', '回合开打后秒数', '投掷时段', '出手X', '出手Y', '出手Z', '落点X', '落点Y', '落点Z']];
+    for (const g of state.result?.groups || []) for (const t of g.throws) for (const u of t.items) rows.push([u.map, g.id, t.unknown ? '未知出手点' : t.id, utilityNames[u.type] || u.type, g.count, g.percent.toFixed(2), u.demoName, u.owner, u.playerId, u.teamId, u.side === 3 ? 'CT' : 'T', u.round, u.time, u.timeBucket === 'unknown' ? '' : u.roundElapsed, core.utilityTimeLabel(u.timeBucket), u.start?.x ?? '', u.start?.y ?? '', u.start?.z ?? '', u.end.x, u.end.y, u.end.z]);
     download(new Blob([core.csv(rows)], { type: 'text/csv;charset=utf-8' }), `${state.map}-utilities.csv`);
   });
   document.addEventListener('dragover', event => { if (event.dataTransfer?.types.includes('Files')) event.preventDefault(); });

@@ -22,6 +22,23 @@
   const asSet = x => x == null ? null : new Set(x);
   const chosen = (set, value) => !set || set.has(value);
   const distance2 = (a, b) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+  const utilityTimeBuckets = Object.freeze([
+    { key: '0-5', label: '开局 0–5 秒' }, { key: '5-20', label: '5–20 秒' },
+    { key: '20-50', label: '20–50 秒' }, { key: '50+', label: '50 秒以后' },
+    { key: 'unknown', label: '时间未知' },
+  ].map(Object.freeze));
+  function utilityTimeBucket(utility) {
+    const elapsed = utility?.roundElapsed;
+    // Absolute replay time and a detonation time are not release-time evidence.
+    // Legacy summaries remain unknown until timing evidence is added from replay data.
+    if (utility?.throwObserved !== true || utility?.timeSource !== 'freeze_end' || !valid(elapsed) || elapsed < 0) return 'unknown';
+    const epsilon = 1e-7;
+    if (elapsed <= 5 + epsilon) return '0-5';
+    if (elapsed <= 20 + epsilon) return '5-20';
+    if (elapsed <= 50 + epsilon) return '20-50';
+    return '50+';
+  }
+  function utilityTimeLabel(key) { return key === 'all' ? '全部时间' : utilityTimeBuckets.find(bucket => bucket.key === key)?.label || '时间未知'; }
   function uniqueDemos(demos) {
     const result = [], ids = new Set();
     for (const d of demos || []) if (d && d.id && !ids.has(d.id)) { ids.add(d.id); result.push(d); }
@@ -36,6 +53,8 @@
     const demos = uniqueDemos(input), map = filter.map || demos[0]?.map || '';
     const ids = asSet(filter.demoIds), players = asSet(filter.playerIds), teams = asSet(filter.teamIds), sides = asSet(filter.sides?.map(Number));
     const cells = new Map(), utilities = [], seenUtilities = new Set(), includedPlayers = new Set(), includedTeams = new Set(), includedDemos = new Set();
+    const utilityTimeCounts = Object.fromEntries(utilityTimeBuckets.map(bucket => [bucket.key, 0]));
+    const selectedTime = utilityTimeBuckets.some(bucket => bucket.key === filter.utilityTime) ? filter.utilityTime : 'all';
     const totals = { movementSeconds: 0, engagements: 0, deaths: 0, shots: 0, utilities: 0, players: 0, teams: 0, demos: 0, rounds: 0 };
     const selectedFloor = filter.floor || 'all';
     const includeFloor = z => selectedFloor === 'all' || floorOf(z, filter.lowerMaxZ) === selectedFloor;
@@ -65,14 +84,17 @@
         if (seenUtilities.has(key) || !u.detonated || !position(u.end) || !includeFloor(u.end.z) || !chosen(players, playerId) || !chosen(teams, teamId) || !chosen(sides, Number(u.side))) continue;
         if (filter.utilityType && filter.utilityType !== 'all' && u.type !== filter.utilityType) continue;
         seenUtilities.add(key);
-        utilities.push({ ...u, start: u.throwObserved && position(u.start) ? u.start : null, demoId: d.id, demoName: d.name, map: d.map, playerId, teamId, key });
+        const timeBucket = utilityTimeBucket(u);
+        utilityTimeCounts[timeBucket]++;
         if (playerId) includedPlayers.add(playerId);
         includedTeams.add(teamId); contributed = true;
+        if (selectedTime !== 'all' && timeBucket !== selectedTime) continue;
+        utilities.push({ ...u, start: u.throwObserved && position(u.start) ? u.start : null, demoId: d.id, demoName: d.name, map: d.map, playerId, teamId, key, timeBucket });
       }
       if (contributed) { includedDemos.add(d.id); totals.rounds += Number(d.roundCount) || 0; }
     }
     totals.utilities = utilities.length; totals.players = includedPlayers.size; totals.teams = includedTeams.size; totals.demos = includedDemos.size;
-    return { map, cells: [...cells.values()], utilities, totals };
+    return { map, cells: [...cells.values()], utilities, utilityTimeCounts, totals };
   }
   function clusterUtilities(input, options = {}) {
     const landing = Math.max(1, Math.min(1024, Number(options.landing) || 128));
@@ -131,5 +153,5 @@
       return `"${safe.replace(/"/g, '""')}"`;
     }).join(',')).join('\r\n');
   }
-  return { aggregate, clusterUtilities, uniqueDemos, teamKey, floorOf, csv };
+  return { aggregate, clusterUtilities, uniqueDemos, teamKey, floorOf, csv, utilityTimeBucket, utilityTimeLabel, utilityTimeBuckets };
 });

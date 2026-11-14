@@ -7,13 +7,15 @@
   'use strict';
   const pageSize = 60;
   const isNumber = value => typeof value === 'number' && Number.isFinite(value);
-  const emptySummary = () => ({ kills: 0, scoredKills: 0, excludedKills: 0, score: 0, deaths: 0, headshots: 0 });
+  const emptySummary = () => ({ kills: 0, scoredKills: 0, excludedKills: 0, score: 0, deaths: 0, headshots: 0, pistolMismatchKills: 0 });
+  const isPistolMismatch = kill => !kill.excludedReason && isNumber(kill.score) && [2, 5].includes(kill.killerValue) && kill.victimValue === 1;
   const scopeMatches = (kill, filter) => (!filter.round || String(kill.round) === String(filter.round)) && (!filter.half || String(kill.half) === String(filter.half));
   const participantMatches = (kill, role, filter) => (!filter.side || String(kill[`${role}Side`]) === String(filter.side)) && (!filter.player || kill[`${role}Id`] === filter.player) && (!filter.team || kill[`${role}TeamKey`] === filter.team);
   function scoreKill(summary, kill) {
     summary.kills++;
     if (kill.excludedReason || !isNumber(kill.score)) summary.excludedKills++;
     else { summary.scoredKills++; summary.score += kill.score; }
+    if (isPistolMismatch(kill)) summary.pistolMismatchKills++;
     if (kill.headshot) summary.headshots++;
   }
   function summarize(kills, filter = {}) {
@@ -105,6 +107,7 @@
     function option(select, value, label) { const item = make('option', label); item.value = String(value); select.append(item); }
     function emptyRow(body, columns, text = '当前筛选没有记录。') { const row = make('tr'), cell = make('td', text, 'empty-row'); cell.colSpan = columns; row.append(cell); body.append(row); }
     function cell(row, text, className) { const td = make('td', text, className); row.append(td); return td; }
+    function mismatchCell(row, count) { const td = cell(row, format(count), count > 0 ? 'pistol-mismatch-value' : 'value-zero'); td.dataset.metric = 'pistol-mismatch'; return td; }
     function linkCell(row, time, text = '回放 ↗') { const td = cell(row), link = make('a', text, 'text-button'); link.href = replayLink(time); td.append(link); }
     function setOptions(id, items, allLabel) { const select = $(id); select.replaceChildren(); if (allLabel) option(select, 'all', allLabel); for (const [value, label] of items) option(select, value, label); select.value = allLabel ? 'all' : String(items[0]?.[0] ?? ''); }
     const reparseActive = demo => ['queued', 'parsing'].includes(demo?.reparse?.status);
@@ -251,10 +254,12 @@
       $('stats-total-score').textContent = signed(total.score); $('stats-total-score').className = valueClass(total.score);
       $('stats-scored-kills').textContent = format(total.scoredKills); $('stats-all-kills').textContent = `${total.kills} 次击杀记录`;
       $('stats-excluded-kills').textContent = format(total.excludedKills); $('stats-deaths').textContent = format(total.deaths);
-      $('stats-filter-note').textContent = '累计净值、排行与击杀明细按击杀者筛选；死亡按受害者筛选。队伍通过阵容身份关联，回合双方装备明细始终保留双方。';
+      $('stats-pistol-mismatch-kills').textContent = format(total.pistolMismatchKills);
+      $('stats-pistol-mismatch-card').className = `pistol-mismatch-card${total.pistolMismatchKills > 0 ? ' has-mismatch' : ''}`;
+      $('stats-filter-note').textContent = '累计净值、特了几个、排行与击杀明细按击杀者筛选；死亡按受害者筛选。队伍通过阵容身份关联，回合双方装备明细始终保留双方。';
       const body = $('stats-player-rows'); body.replaceChildren();
-      players.forEach((player, index) => { const row = make('tr'); cell(row, index + 1); const name = cell(row, player.name); name.append(make('small', player.id)); cell(row, signed(player.summary.score), valueClass(player.summary.score)); cell(row, player.summary.scoredKills); cell(row, player.summary.excludedKills); cell(row, player.summary.deaths); body.append(row); });
-      if (!players.length) emptyRow(body, 6);
+      players.forEach((player, index) => { const row = make('tr'); row.dataset.playerId = player.id; cell(row, index + 1); const name = cell(row, player.name); name.append(make('small', player.id)); cell(row, signed(player.summary.score), valueClass(player.summary.score)); mismatchCell(row, player.summary.pistolMismatchKills); cell(row, player.summary.scoredKills); cell(row, player.summary.excludedKills); cell(row, player.summary.deaths); body.append(row); });
+      if (!players.length) emptyRow(body, 7);
       renderSplits('stats-side-rows', [{ key: 3, label: 'CT' }, { key: 2, label: 'T' }], 'side', selected);
       renderSplits('stats-half-rows', (data.halves || []).map(half => ({ key: half.half, label: half.label })), 'half', selected);
       const rounds = $('stats-round-rows'); rounds.replaceChildren();
@@ -262,9 +267,10 @@
         if (!scopeMatches({ round: round.number, half: round.half }, selected)) continue;
         const summary = summarize(data.kills, { ...selected, round: String(round.number) }), row = make('tr'), first = cell(row), button = make('button', `第 ${round.number} 回合`, 'text-button');
         button.type = 'button'; button.addEventListener('click', () => { state.detailRound = String(round.number); renderEconomy(); $('stats-economy-teams').scrollIntoView?.({ behavior: 'smooth', block: 'nearest' }); }); first.append(button);
-        cell(row, halfLabel(round.half)); cell(row, round.ct?.label || '未知'); cell(row, round.t?.label || '未知'); cell(row, signed(summary.score), valueClass(summary.score)); cell(row, `${summary.scoredKills} / ${summary.excludedKills}`); linkCell(row, round.start); rounds.append(row);
+        row.dataset.round = String(round.number);
+        cell(row, halfLabel(round.half)); cell(row, round.ct?.label || '未知'); cell(row, round.t?.label || '未知'); cell(row, signed(summary.score), valueClass(summary.score)); mismatchCell(row, summary.pistolMismatchKills); cell(row, `${summary.scoredKills} / ${summary.excludedKills}`); linkCell(row, round.start); rounds.append(row);
       }
-      if (!rounds.childElementCount) emptyRow(rounds, 7);
+      if (!rounds.childElementCount) emptyRow(rounds, 8);
       renderEconomy(); renderKills();
     }
     function renderSplits(id, entries, key, selected) {
@@ -272,9 +278,10 @@
       for (const entry of entries) {
         if (selected[key] && String(selected[key]) !== String(entry.key)) continue;
         const summary = summarize(state.data.kills, { ...selected, [key]: String(entry.key) }), row = make('tr');
-        cell(row, entry.label); cell(row, signed(summary.score), valueClass(summary.score)); cell(row, `${summary.scoredKills} / ${summary.excludedKills}`); cell(row, summary.deaths); body.append(row);
+        row.dataset[key] = String(entry.key);
+        cell(row, entry.label); cell(row, signed(summary.score), valueClass(summary.score)); mismatchCell(row, summary.pistolMismatchKills); cell(row, `${summary.scoredKills} / ${summary.excludedKills}`); cell(row, summary.deaths); body.append(row);
       }
-      if (!body.childElementCount) emptyRow(body, 4);
+      if (!body.childElementCount) emptyRow(body, 5);
     }
     function renderEconomy() {
       const rounds = state.data?.rounds || [], index = rounds.findIndex(round => String(round.number) === state.detailRound), round = rounds[index], teams = $('stats-economy-teams'); teams.replaceChildren();
@@ -320,10 +327,21 @@
       $('stats-kills-prev').disabled = state.page <= 0; $('stats-kills-next').disabled = state.page >= pages - 1;
       const body = $('stats-kill-rows'); body.replaceChildren();
       for (const kill of kills.slice(state.page * pageSize, (state.page + 1) * pageSize)) {
-        const row = make('tr'); cell(row, `R${kill.round} · ${clock(kill.time)}`); const names = cell(row, `${kill.killer || '世界 / 未知'} → ${kill.victim || '未知'}`); names.append(make('small', `${kill.killerSide === 3 ? 'CT' : kill.killerSide === 2 ? 'T' : '未知阵营'}${kill.headshot ? ' · 爆头' : ''}`));
+        const mismatch = isPistolMismatch(kill), row = make('tr', null, mismatch ? 'pistol-mismatch-row' : '');
+        row.dataset.pistolMismatch = String(mismatch); row.dataset.killIndex = String(kill.index);
+        cell(row, `R${kill.round} · ${clock(kill.time)}`); const names = cell(row, `${kill.killer || '世界 / 未知'} → ${kill.victim || '未知'}`); names.append(make('small', `${kill.killerSide === 3 ? 'CT' : kill.killerSide === 2 ? 'T' : '未知阵营'}${kill.headshot ? ' · 爆头' : ''}`));
+        if (mismatch) names.append(make('span', '特了1个', 'pistol-mismatch-badge'));
         cell(row, `${kill.weapon || '未知'} / ${format(kill.killerValue)}`); cell(row, `${kill.victimWeapon || '未知'} / ${format(kill.victimValue)}`);
         cell(row, kill.excludedReason ? '不计分' : signed(kill.score), kill.excludedReason ? '' : valueClass(kill.score));
-        const reason = cell(row, kill.excludedReason || '计入累计净值', 'reason'); reason.append(make('small', `${sourceLabels[kill.weaponSource] || '来源未知'}${isNumber(kill.weaponTime) ? ` · ${clock(kill.weaponTime)}` : ''}`));
+        const scored = !kill.excludedReason && isNumber(kill.score);
+        const reason = cell(row, kill.excludedReason || (scored ? '计入累计净值' : '缺少有效分数，不计分'), 'reason');
+        if (scored) {
+          if (isNumber(kill.baseScore) && Number.isInteger(kill.scoreMultiplier) && kill.scoreMultiplier >= 1 && kill.scoreMultiplier <= 4) {
+            const formula = make('span', `基础 ${signed(kill.baseScore)} × ${format(kill.scoreMultiplier)} = ${signed(kill.score)}`, 'score-formula');
+            formula.title = '基础分 × 奖励倍数 = 最终净值'; formula.dataset.scoreFormula = 'true'; reason.append(formula);
+          } else reason.append(make('small', '未提供基础分或倍数明细，沿用现有得分。', 'score-detail-unavailable'));
+        }
+        reason.append(make('small', `${sourceLabels[kill.weaponSource] || '来源未知'}${isNumber(kill.weaponTime) ? ` · ${clock(kill.weaponTime)}` : ''}`));
         if (kill.approx || ['sampled_cache', 'sampled_frame'].includes(kill.weaponSource)) reason.append(make('span', kill.weaponSource === 'previous_tick' ? '近似 · 前一 tick' : kill.weaponSource === 'sampled_frame' ? '近似 · 邻近帧' : '近似 · 采样推断', 'approx-badge'));
         linkCell(row, Math.max(0, (kill.time || 0) - 2)); body.append(row);
       }
@@ -343,5 +361,5 @@
     const ready = reloadLibrary().then(async () => { const id = new URL(win.location.href).searchParams.get('demo'); if (id) { const demo = state.catalog.find(item => item.id === id); if (demo) await selectDemo(demo); else setError('链接中的录像不在本地资料库，请刷新后重新选择。'); } });
     return { ready };
   }
-  return { summarize, rankPlayers, visibleKills, loadStatistics, create };
+  return { summarize, rankPlayers, visibleKills, isPistolMismatch, loadStatistics, create };
 });

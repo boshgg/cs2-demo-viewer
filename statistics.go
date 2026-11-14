@@ -12,7 +12,7 @@ import (
 
 // Bump when scoring or classification rules change; persisted replay bytes do
 // not need to be rewritten to rebuild this derived, compact report.
-const StatisticsVersion = "1"
+const StatisticsVersion = "2"
 
 type EconomySnapshot struct {
 	Time       float64       `json:"time"`
@@ -62,13 +62,14 @@ type TeamEconomy struct {
 	Players        []EquipmentEvidence `json:"players"`
 }
 type StatisticsSummary struct {
-	Kills         int      `json:"kills"`
-	ScoredKills   int      `json:"scoredKills"`
-	ExcludedKills int      `json:"excludedKills"`
-	Score         int      `json:"score"`
-	Average       *float64 `json:"average"`
-	Headshots     int      `json:"headshots"`
-	Deaths        int      `json:"deaths"`
+	Kills               int      `json:"kills"`
+	ScoredKills         int      `json:"scoredKills"`
+	ExcludedKills       int      `json:"excludedKills"`
+	Score               int      `json:"score"`
+	Average             *float64 `json:"average"`
+	Headshots           int      `json:"headshots"`
+	Deaths              int      `json:"deaths"`
+	PistolMismatchKills int      `json:"pistolMismatchKills"`
 }
 type StatisticsPlayer struct {
 	ID      string            `json:"id"`
@@ -97,28 +98,31 @@ type StatisticsRound struct {
 	Players    []StatisticsPlayer `json:"players"`
 }
 type KillScore struct {
-	Index          int     `json:"index"`
-	Time           float64 `json:"time"`
-	Round          int     `json:"round"`
-	Half           int     `json:"half"`
-	KillerID       string  `json:"killerId"`
-	Killer         string  `json:"killer"`
-	VictimID       string  `json:"victimId"`
-	Victim         string  `json:"victim"`
-	KillerSide     int     `json:"killerSide"`
-	VictimSide     int     `json:"victimSide"`
-	KillerTeamKey  string  `json:"killerTeamKey"`
-	VictimTeamKey  string  `json:"victimTeamKey"`
-	Weapon         string  `json:"weapon"`
-	VictimWeapon   string  `json:"victimWeapon"`
-	KillerValue    *int    `json:"killerValue"`
-	VictimValue    *int    `json:"victimValue"`
-	Score          *int    `json:"score"`
-	WeaponSource   string  `json:"weaponSource"`
-	WeaponTime     float64 `json:"weaponTime"`
-	Approx         bool    `json:"approx"`
-	ExcludedReason string  `json:"excludedReason"`
-	Headshot       bool    `json:"headshot"`
+	Index           int     `json:"index"`
+	Time            float64 `json:"time"`
+	Round           int     `json:"round"`
+	Half            int     `json:"half"`
+	KillerID        string  `json:"killerId"`
+	Killer          string  `json:"killer"`
+	VictimID        string  `json:"victimId"`
+	Victim          string  `json:"victim"`
+	KillerSide      int     `json:"killerSide"`
+	VictimSide      int     `json:"victimSide"`
+	KillerTeamKey   string  `json:"killerTeamKey"`
+	VictimTeamKey   string  `json:"victimTeamKey"`
+	Weapon          string  `json:"weapon"`
+	VictimWeapon    string  `json:"victimWeapon"`
+	KillerValue     *int    `json:"killerValue"`
+	VictimValue     *int    `json:"victimValue"`
+	BaseScore       *int    `json:"baseScore"`
+	ScoreMultiplier *int    `json:"scoreMultiplier"`
+	Score           *int    `json:"score"`
+	WeaponSource    string  `json:"weaponSource"`
+	WeaponTime      float64 `json:"weaponTime"`
+	Approx          bool    `json:"approx"`
+	ExcludedReason  string  `json:"excludedReason"`
+	Headshot        bool    `json:"headshot"`
+	PistolMismatch  bool    `json:"pistolMismatch"`
 }
 type StatisticsDemo struct {
 	ID          string             `json:"id"`
@@ -163,6 +167,7 @@ func statisticsWeaponKey(name string) string {
 type statisticsGun struct {
 	class string
 	value int
+	rank  int
 }
 
 var statisticsGuns = func() map[string]statisticsGun {
@@ -170,15 +175,16 @@ var statisticsGuns = func() map[string]statisticsGun {
 	for _, group := range []struct {
 		class string
 		value int
+		rank  int
 		guns  []common.EquipmentType
 	}{
-		{"pistol", 1, []common.EquipmentType{common.EqP2000, common.EqGlock, common.EqP250, common.EqDeagle, common.EqFiveSeven, common.EqDualBerettas, common.EqTec9, common.EqCZ, common.EqUSP, common.EqRevolver}},
-		{"smg", 2, []common.EquipmentType{common.EqMP7, common.EqMP9, common.EqBizon, common.EqMac10, common.EqUMP, common.EqP90, common.EqMP5}},
-		{"rifle", 5, []common.EquipmentType{common.EqGalil, common.EqFamas, common.EqAK47, common.EqM4A4, common.EqM4A1, common.EqSG553, common.EqAUG, common.EqSawedOff, common.EqNova, common.EqMag7, common.EqXM1014, common.EqM249, common.EqNegev}},
-		{"sniper", 7, []common.EquipmentType{common.EqSSG08, common.EqAWP, common.EqScar20, common.EqG3SG1}},
+		{"pistol", 1, 1, []common.EquipmentType{common.EqP2000, common.EqGlock, common.EqP250, common.EqDeagle, common.EqFiveSeven, common.EqDualBerettas, common.EqTec9, common.EqCZ, common.EqUSP, common.EqRevolver}},
+		{"smg", 2, 2, []common.EquipmentType{common.EqMP7, common.EqMP9, common.EqBizon, common.EqMac10, common.EqUMP, common.EqP90, common.EqMP5}},
+		{"rifle", 5, 3, []common.EquipmentType{common.EqGalil, common.EqFamas, common.EqAK47, common.EqM4A4, common.EqM4A1, common.EqSG553, common.EqAUG, common.EqSawedOff, common.EqNova, common.EqMag7, common.EqXM1014, common.EqM249, common.EqNegev}},
+		{"sniper", 7, 4, []common.EquipmentType{common.EqSSG08, common.EqAWP, common.EqScar20, common.EqG3SG1}},
 	} {
 		for _, gun := range group.guns {
-			m[statisticsWeaponKey(gun.String())] = statisticsGun{group.class, group.value}
+			m[statisticsWeaponKey(gun.String())] = statisticsGun{group.class, group.value, group.rank}
 		}
 	}
 	for alias, target := range map[string]string{"glock": "Glock-18", "hkp2000": "P2000", "deagle": "Desert Eagle", "elite": "Dual Berettas", "cz75a": "CZ75-Auto", "usp_silencer": "USP-S", "usps": "USP-S", "m4a1_silencer": "M4A1", "m4a1s": "M4A1", "galilar": "Galil AR", "sg556": "SG 553", "ssg08": "SSG 08", "scout": "SSG 08", "bizon": "PP-Bizon", "ump45": "UMP-45", "mp5sd": "MP5-SD"} {
@@ -547,13 +553,16 @@ func statisticsScore(d *DemoData, e Event, index int, r *StatisticsRound, frames
 	if r != nil && k.VictimWeapon != "" && k.WeaponTime < r.Start {
 		k.VictimWeapon, k.WeaponSource, k.WeaponTime, k.Approx = "", "unknown", 0, false
 	}
+	killerRank, victimRank := 0, 0
 	if gun, ok := statisticsGuns[statisticsWeaponKey(k.Weapon)]; ok {
 		value := gun.value
 		k.KillerValue = &value
+		killerRank = gun.rank
 	}
 	if gun, ok := statisticsGuns[statisticsWeaponKey(k.VictimWeapon)]; ok {
 		value := gun.value
 		k.VictimValue = &value
+		victimRank = gun.rank
 	}
 	switch {
 	case r == nil || e.Round < 1:
@@ -579,16 +588,31 @@ func statisticsScore(d *DemoData, e Event, index int, r *StatisticsRound, frames
 	case k.VictimValue == nil:
 		k.ExcludedReason = "受害者当时手持刀、道具、电击枪或未知武器，不计分"
 	default:
-		score := *k.VictimValue - *k.KillerValue
+		base, multiplier := *k.VictimValue-*k.KillerValue, 1
+		if base > 0 {
+			multiplier = victimRank - killerRank + 1
+		}
+		score := base * multiplier
+		k.BaseScore, k.ScoreMultiplier = &base, &multiplier
 		k.Score = &score
 	}
+	k.PistolMismatch = statisticsPistolMismatch(k)
 	return k
+}
+
+// This count describes a specific weapon matchup, independently of the signed
+// kill score. Shotguns and machine guns share the existing long-gun value 5.
+func statisticsPistolMismatch(k KillScore) bool {
+	return k.Score != nil && k.ExcludedReason == "" && k.KillerValue != nil && k.VictimValue != nil && (*k.KillerValue == 2 || *k.KillerValue == 5) && *k.VictimValue == 1
 }
 
 func statisticsAddKill(s *StatisticsSummary, k KillScore) {
 	s.Kills++
 	if k.Headshot {
 		s.Headshots++
+	}
+	if k.PistolMismatch && statisticsPistolMismatch(k) {
+		s.PistolMismatchKills++
 	}
 	if k.Score == nil {
 		s.ExcludedKills++

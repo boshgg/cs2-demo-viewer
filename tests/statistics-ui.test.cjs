@@ -93,7 +93,7 @@ async function page(options = {}) {
 
 test('statistical totals are sums, include zero and negative scores, and retain exclusions', () => {
   const data = fixture(), total = statistics.summarize(data.kills);
-  assert.deepEqual(total, { kills: 6, scoredKills: 4, excludedKills: 2, score: 4, deaths: 6, headshots: 1 });
+  assert.deepEqual(total, { kills: 6, scoredKills: 4, excludedKills: 2, score: 4, deaths: 6, headshots: 1, pistolMismatchKills: 0 });
   assert.equal(statistics.summarize([...data.kills, { ...data.kills[0], score: 0 }]).scoredKills, 5);
   assert.equal(statistics.summarize(data.kills, { team: 'alpha' }).score, 6);
   assert.equal(statistics.summarize(data.kills, { player: 'p1' }).score, 9);
@@ -359,4 +359,152 @@ test('previous-tick-only reports name that inference without claiming legacy cac
   const ui = await page({ datasets: [data] }); await ui.choose('match');
   assert.match(ui.get('stats-quality').textContent, /近似数据.*前一 tick 推断/);
   assert.doesNotMatch(ui.get('stats-quality').textContent, /旧缓存|冻结结束邻近帧/);
+});
+
+function mismatchFixture() {
+  const data = fixture();
+  const specs = [
+    ['p1', 'v1', 1, 'AK-47', 'Glock-18', 5, 1, -4],
+    ['p2', 'v2', 1, 'MP9', 'USP-S', 2, 1, -1],
+    ['v1', 'p2', 13, 'XM1014', 'P250', 5, 1, -4],
+    ['p1', 'v2', 13, 'M249', 'Five-Seven', 5, 1, -4],
+    ['p1', 'v1', 1, 'AWP', 'Glock-18', 7, 1, -6],
+    ['p1', 'v2', 1, 'Glock-18', 'P250', 1, 1, 0],
+    ['p1', 'p2', 1, 'AK-47', 'USP-S', 5, 1, -4, '友军击杀不计分'],
+    ['p1', 'v1', 1, 'Knife', 'Glock-18', null, 1, null, '击杀武器为刀'],
+    ['p1', 'v2', 1, 'HE Grenade', 'P250', null, 1, null, '击杀武器为道具'],
+    ['p1', 'v1', 1, 'AK-47', 'Knife', 5, null, null, '受害者手持刀'],
+    ['p1', 'v2', 1, 'MP9', 'Flashbang', 2, null, null, '受害者手持道具'],
+    ['p1', 'v1', 1, 'AK-47', '', 5, null, null, '受害者手持未知'],
+  ];
+  for (const [offset, [killerId, victimId, round, weapon, victimWeapon, killerValue, victimValue, score, excludedReason = '']] of specs.entries()) {
+    const second = round === 13, alpha = id => id.startsWith('p');
+    data.kills.push({ ...data.kills[0], index: 100 + offset, killerId, victimId, killer: data.players.find(player => player.id === killerId).name, victim: data.players.find(player => player.id === victimId).name,
+      killerTeamKey: alpha(killerId) ? 'alpha' : 'beta', victimTeamKey: alpha(victimId) ? 'alpha' : 'beta', killerSide: alpha(killerId) !== second ? 3 : 2, victimSide: alpha(victimId) !== second ? 3 : 2,
+      half: second ? 'second' : 'first', round, time: (second ? 1200 : 0) + 40 + offset,
+      weapon, victimWeapon, killerValue, victimValue, score, excludedReason, approx: offset === 1, weaponSource: offset === 1 ? 'sampled_cache' : 'death_event', headshot: false,
+    });
+  }
+  return data;
+}
+function mismatchCellValue(row) { return Number(row.children.find(cell => cell.dataset.metric === 'pistol-mismatch')?.textContent); }
+function highlightedKills(ui) { return ui.get('stats-kill-rows').children.filter(row => row.dataset.pistolMismatch === 'true'); }
+
+test('pistol mismatch requires a valid SMG or five-point gun kill against an active pistol and ignores flags or negative score alone', () => {
+  const base = { killerValue: 5, victimValue: 1, score: -4, excludedReason: '' };
+  for (const killerValue of [2, 5]) assert.equal(statistics.isPistolMismatch({ ...base, killerValue, pistolMismatch: false }), true);
+  for (const changed of [
+    { killerValue: 7, score: -6 }, { killerValue: 1, score: 0 }, { killerValue: null, score: null }, { killerValue: '5' },
+    { victimValue: 2, score: -3 }, { victimValue: 5, score: -2 }, { victimValue: 7 }, { victimValue: null }, { victimValue: '1' },
+    { excludedReason: '友军击杀' }, { excludedReason: '自杀' }, { score: null }, { score: undefined }, { score: '-4' }, { score: NaN }, { score: Infinity },
+  ]) assert.equal(statistics.isPistolMismatch({ ...base, pistolMismatch: true, ...changed }), false, JSON.stringify(changed));
+  const data = mismatchFixture(), summary = statistics.summarize(data.kills);
+  assert.equal(summary.pistolMismatchKills, 4); assert.equal(summary.score, -15); assert.equal(summary.kills, data.kills.length);
+  assert.equal(summary.scoredKills + summary.excludedKills, data.kills.length);
+  assert.equal(statistics.summarize(data.kills, { team: 'alpha' }).pistolMismatchKills, 3);
+  assert.equal(statistics.summarize(data.kills, { player: 'p1' }).pistolMismatchKills, 2);
+});
+
+test('pistol mismatch card, player ranking, side, half and round columns agree while only qualifying kill rows receive a frame', async () => {
+  const data = mismatchFixture(), ui = await page({ datasets: [data] }); await ui.choose('match');
+  assert.equal(ui.get('stats-pistol-mismatch-kills').textContent, '4'); assert.match(ui.get('stats-pistol-mismatch-card').className, /has-mismatch/);
+  assert.equal(ui.get('stats-total-score').textContent, '-15');
+  const rank = Object.fromEntries(ui.get('stats-player-rows').children.map(row => [row.dataset.playerId, mismatchCellValue(row)]));
+  assert.deepEqual(rank, { p1: 2, p2: 1, v1: 1, v2: 0 });
+  assert.deepEqual(ui.get('stats-side-rows').children.map(row => [row.dataset.side, mismatchCellValue(row)]), [['3', 3], ['2', 1]]);
+  assert.deepEqual(ui.get('stats-half-rows').children.map(row => [row.dataset.half, mismatchCellValue(row)]), [['first', 2], ['second', 2]]);
+  assert.deepEqual(ui.get('stats-round-rows').children.map(row => [row.dataset.round, mismatchCellValue(row)]), [['1', 2], ['13', 2]]);
+  assert.deepEqual(highlightedKills(ui).map(row => row.dataset.killIndex), ['100', '101', '102', '103']);
+  for (const row of highlightedKills(ui)) { assert.equal(row.className, 'pistol-mismatch-row'); assert.match(content(row), /特了1个/); }
+  assert.match(content(highlightedKills(ui)[1]), /近似 · 采样推断/);
+  for (const row of ui.get('stats-kill-rows').children.filter(row => row.dataset.pistolMismatch !== 'true')) { assert.notEqual(row.className, 'pistol-mismatch-row'); assert.doesNotMatch(content(row), /特了1个/); }
+});
+
+test('every statistics filter intersects pistol mismatch counts and highlighted entries without changing score formulas', async () => {
+  const data = mismatchFixture(), ui = await page({ datasets: [data] }); await ui.choose('match');
+  const steps = [['stats-team', 'alpha', 3], ['stats-player', 'p1', 2], ['stats-side', '2', 1], ['stats-half', 'second', 1], ['stats-round', '13', 1], ['stats-round', '1', 0]];
+  for (const [id, value, expected] of steps) {
+    await ui.change(id, value); assert.equal(Number(ui.get('stats-pistol-mismatch-kills').textContent), expected);
+    assert.equal(highlightedKills(ui).length, expected);
+    for (const body of ['stats-player-rows', 'stats-side-rows', 'stats-half-rows', 'stats-round-rows']) assert.equal(ui.get(body).children.reduce((sum, row) => sum + (Number.isFinite(mismatchCellValue(row)) ? mismatchCellValue(row) : 0), 0), expected);
+    const selected = Object.fromEntries(['team','player','side','half','round'].map(key => [key, ui.get(`stats-${key}`).value === 'all' ? '' : ui.get(`stats-${key}`).value]));
+    const score = statistics.visibleKills(data.kills, selected).filter(kill => !kill.excludedReason && typeof kill.score === 'number').reduce((sum, kill) => sum + kill.score, 0);
+    assert.equal(ui.get('stats-total-score').textContent, score > 0 ? `+${score}` : String(score));
+  }
+  assert.doesNotMatch(ui.get('stats-pistol-mismatch-card').className, /has-mismatch/);
+  await ui.get('stats-reset').click(); await settle(); assert.equal(ui.get('stats-pistol-mismatch-kills').textContent, '4'); assert.equal(highlightedKills(ui).length, 4);
+});
+
+test('pistol mismatch highlight survives pagination and counts the full selected scope rather than the current page', async () => {
+  const data = fixture(); data.kills = Array.from({ length: 125 }, (_, index) => ({ ...data.kills[0], index, weapon: 'MP9', victimWeapon: 'Glock-18', killerValue: 2, victimValue: 1, score: -1 }));
+  const ui = await page({ datasets: [data] }); await ui.choose('match');
+  assert.equal(ui.get('stats-pistol-mismatch-kills').textContent, '125'); assert.equal(ui.get('stats-total-score').textContent, '-125'); assert.equal(highlightedKills(ui).length, 60);
+  await ui.get('stats-kills-next').click(); assert.equal(highlightedKills(ui).length, 60); assert.equal(highlightedKills(ui)[0].dataset.killIndex, '60');
+  await ui.get('stats-kills-next').click(); assert.equal(highlightedKills(ui).length, 5); assert.equal(highlightedKills(ui)[0].dataset.killIndex, '120'); assert.equal(ui.get('stats-pistol-mismatch-kills').textContent, '125');
+  await ui.change('stats-player', 'v1'); assert.equal(ui.get('stats-pistol-mismatch-kills').textContent, '0'); assert.equal(highlightedKills(ui).length, 0); assert.match(ui.get('stats-kills-page').textContent, /1 \/ 1/);
+});
+
+test('zero pistol mismatch counts stay neutral for normal negative scores, missing weapons and empty reports', async () => {
+  for (const data of [fixture(), { ...fixture(), kills: [] }]) {
+    const ui = await page({ datasets: [data] }); await ui.choose('match');
+    assert.equal(ui.get('stats-pistol-mismatch-kills').textContent, '0'); assert.equal(ui.get('stats-pistol-mismatch-card').className, 'pistol-mismatch-card'); assert.equal(highlightedKills(ui).length, 0);
+    for (const row of ui.get('stats-player-rows').children) { const cell = row.children.find(cell => cell.dataset.metric === 'pistol-mismatch'); assert.equal(cell.textContent, '0'); assert.equal(cell.className, 'value-zero'); }
+  }
+});
+
+function weightedFixture() {
+  const data = fixture();
+  const values = [
+    ['Glock-18', 'MP9', 1, 2, 1, 2, 2],
+    ['Glock-18', 'AK-47', 1, 5, 4, 3, 12],
+    ['Glock-18', 'AWP', 1, 7, 6, 4, 24],
+    ['AK-47', 'AWP', 5, 7, 2, 2, 4],
+    ['MP9', 'AWP', 2, 7, 5, 3, 15],
+    ['AK-47', 'M4A1-S', 5, 5, 0, 1, 0],
+    ['AK-47', 'Glock-18', 5, 1, -4, 1, -4],
+    ['AWP', 'Glock-18', 7, 1, -6, 1, -6],
+  ];
+  data.ruleVersion = '2';
+  data.kills = values.map(([weapon, victimWeapon, killerValue, victimValue, baseScore, scoreMultiplier, score], index) => ({ ...data.kills[0], index, round: index < 4 ? 1 : 13, half: index < 4 ? 'first' : 'second', killerSide: index < 4 ? 3 : 2, victimSide: index < 4 ? 2 : 3, weapon, victimWeapon, killerValue, victimValue, baseScore, scoreMultiplier, score }));
+  data.kills.push({ ...data.kills[0], index: 8, round: 13, half: 'second', killerSide: 2, victimSide: 3, score: null, baseScore: 6, scoreMultiplier: 4, excludedReason: '友军击杀不计分' });
+  data.kills.push({ ...data.kills[0], index: 9, round: 13, half: 'second', killerSide: 2, victimSide: 3, score: null, baseScore: null, scoreMultiplier: null, excludedReason: '' });
+  return data;
+}
+function formulaTexts(row) { return row.querySelectorAll('span').filter(item => item.dataset.scoreFormula === 'true').map(item => item.textContent); }
+
+test('weighted kill evidence displays backend base, multiplier and final score for two-, three- and four-tier rewards, zero and negatives', async () => {
+  const data = weightedFixture(), ui = await page({ datasets: [data] }); await ui.choose('match');
+  const rows = ui.get('stats-kill-rows').children;
+  assert.deepEqual(rows.slice(0, 8).map(row => formulaTexts(row)[0]), [
+    '基础 +1 × 2 = +2', '基础 +4 × 3 = +12', '基础 +6 × 4 = +24', '基础 +2 × 2 = +4',
+    '基础 +5 × 3 = +15', '基础 0 × 1 = 0', '基础 -4 × 1 = -4', '基础 -6 × 1 = -6',
+  ]);
+  assert.deepEqual(rows.slice(0, 8).map(row => row.children[4].textContent), ['+2', '+12', '+24', '+4', '+15', '0', '-4', '-6']);
+  assert.deepEqual(formulaTexts(rows[8]), [], 'excluded records cannot display a formula even if stray metadata exists');
+  assert.match(content(rows[8]), /友军击杀不计分/); assert.deepEqual(formulaTexts(rows[9]), []); assert.match(content(rows[9]), /缺少有效分数，不计分/);
+  assert.equal(ui.get('stats-excluded-kills').textContent, '2'); assert.equal(ui.get('stats-scored-kills').textContent, '8');
+  assert.equal(ui.get('stats-pistol-mismatch-kills').textContent, '1'); assert.deepEqual(highlightedKills(ui).map(row => row.dataset.killIndex), ['6']);
+});
+
+test('weighted final scores are summed exactly once in totals, ranking and filtered round or half summaries', async () => {
+  const data = weightedFixture(); assert.equal(statistics.summarize(data.kills).score, 47); assert.equal(statistics.rankPlayers(data).find(player => player.id === 'p1').summary.score, 47);
+  const ui = await page({ datasets: [data] }); await ui.choose('match'); assert.equal(ui.get('stats-total-score').textContent, '+47');
+  assert.equal(ui.get('stats-player-rows').children.find(row => row.dataset.playerId === 'p1').children[2].textContent, '+47');
+  assert.deepEqual(ui.get('stats-round-rows').children.map(row => row.children[4].textContent), ['+42', '+5']);
+  assert.deepEqual(ui.get('stats-half-rows').children.map(row => row.children[1].textContent), ['+42', '+5']);
+  await ui.change('stats-half', 'second'); assert.equal(ui.get('stats-total-score').textContent, '+5');
+  await ui.change('stats-round', '13'); await ui.change('stats-side', '2'); await ui.change('stats-team', 'alpha'); await ui.change('stats-player', 'p1'); assert.equal(ui.get('stats-total-score').textContent, '+5');
+  assert.equal(ui.get('stats-pistol-mismatch-kills').textContent, '1');
+  await ui.get('stats-reset').click(); await settle(); assert.equal(ui.get('stats-total-score').textContent, '+47');
+});
+
+test('legacy or partial scoring metadata does not invent a multiplier or recalculate final scores in the browser', async () => {
+  const data = fixture(); data.kills[0].baseScore = 6; data.kills[2].scoreMultiplier = 1; data.kills[4].baseScore = 3; data.kills[4].scoreMultiplier = null;
+  const ui = await page({ datasets: [data] }); await ui.choose('match');
+  assert.equal(ui.get('stats-total-score').textContent, '+4');
+  for (const row of ui.get('stats-kill-rows').children) assert.deepEqual(formulaTexts(row), []);
+  assert.match(content(ui.get('stats-kill-rows').children[0]), /未提供基础分或倍数明细，沿用现有得分/);
+  assert.equal(ui.get('stats-kill-rows').children[0].children[4].textContent, '+6', 'legacy provided score stays unchanged instead of multiplying by four');
+  assert.doesNotMatch(content(ui.get('stats-kill-rows').children[1]), /未提供基础分或倍数明细/);
+  assert.equal(ui.get('stats-pistol-mismatch-kills').textContent, '0');
 });

@@ -13,6 +13,7 @@ import (
 )
 
 const analysisCellSize = 64
+const analysisUtilityTimingVersion = 1
 
 // AnalysisCell holds a world-space grid centre followed by independent metrics:
 // x, y, z, observed living-player seconds, gunfight involvements, deaths, shots.
@@ -50,6 +51,8 @@ type AnalysisUtility struct {
 	Side          int            `json:"side"`
 	Round         int            `json:"round"`
 	Time          float64        `json:"time"`
+	RoundElapsed  *float64       `json:"roundElapsed"`
+	TimeSource    string         `json:"timeSource"`
 	Start         *Position      `json:"start"`
 	End           Position       `json:"end"`
 	Path          []UtilityPoint `json:"path"`
@@ -65,19 +68,20 @@ type AnalysisBounds struct {
 }
 
 type AnalysisDemo struct {
-	ID         string            `json:"id"`
-	Name       string            `json:"name"`
-	Map        string            `json:"map"`
-	Duration   float64           `json:"duration"`
-	RoundCount int               `json:"roundCount"`
-	Synthetic  bool              `json:"synthetic"`
-	Warnings   []string          `json:"warnings"`
-	Players    []AnalysisPlayer  `json:"players"`
-	Teams      []AnalysisTeam    `json:"teams"`
-	Series     []AnalysisSeries  `json:"series"`
-	Utilities  []AnalysisUtility `json:"utilities"`
-	Bounds     AnalysisBounds    `json:"bounds"`
-	CellSize   int               `json:"cellSize"`
+	UtilityTimingVersion int               `json:"utilityTimingVersion"`
+	ID                   string            `json:"id"`
+	Name                 string            `json:"name"`
+	Map                  string            `json:"map"`
+	Duration             float64           `json:"duration"`
+	RoundCount           int               `json:"roundCount"`
+	Synthetic            bool              `json:"synthetic"`
+	Warnings             []string          `json:"warnings"`
+	Players              []AnalysisPlayer  `json:"players"`
+	Teams                []AnalysisTeam    `json:"teams"`
+	Series               []AnalysisSeries  `json:"series"`
+	Utilities            []AnalysisUtility `json:"utilities"`
+	Bounds               AnalysisBounds    `json:"bounds"`
+	CellSize             int               `json:"cellSize"`
 }
 
 type analysisRoundWindow struct {
@@ -126,7 +130,7 @@ type analysisEngagementKey struct {
 // Gunfights require observed opponent firearm damage; empty damage data is not
 // silently substituted with missed shots or speculative lines of sight.
 func BuildAnalysis(d *DemoData) *AnalysisDemo {
-	a := &AnalysisDemo{CellSize: analysisCellSize, Players: []AnalysisPlayer{}, Teams: []AnalysisTeam{}, Series: []AnalysisSeries{}, Utilities: []AnalysisUtility{}, Warnings: []string{}}
+	a := &AnalysisDemo{UtilityTimingVersion: analysisUtilityTimingVersion, CellSize: analysisCellSize, Players: []AnalysisPlayer{}, Teams: []AnalysisTeam{}, Series: []AnalysisSeries{}, Utilities: []AnalysisUtility{}, Warnings: []string{}}
 	if d == nil {
 		return a
 	}
@@ -361,6 +365,7 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 		_, s := seriesFor(normalisePlayer(e.PlayerID, ""), e.Round, e.Team)
 		add(s, pos, 6, 1)
 	}
+	timingRounds := analysisTimingRounds(d.Rounds)
 	for _, u := range d.Utilities {
 		end := Position{u.X, u.Y, u.Z}
 		when := u.Detonate
@@ -372,6 +377,7 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 		}
 		player := normalisePlayer(u.OwnerID, u.Owner)
 		out := AnalysisUtility{ID: u.ID, Type: u.Type, PlayerID: player, Owner: u.Owner, TeamID: teamAt(u.Round, u.Team, player).team.ID, Side: u.Team, Round: u.Round, Time: when, End: end, Path: []UtilityPoint{}, ThrowObserved: u.ThrowObserved, Detonated: true}
+		out.RoundElapsed, out.TimeSource = analysisUtilityTiming(u, timingRounds)
 		if u.ThrowObserved && len(u.Path) > 0 {
 			first := u.Path[0]
 			pos := Position{first.X, first.Y, first.Z}
@@ -444,6 +450,39 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 		return a.Utilities[i].ID < a.Utilities[j].ID
 	})
 	return a
+}
+
+// Duplicate round numbers do not provide a unique timing anchor.
+func analysisTimingRounds(rounds []Round) map[int]Round {
+	indexed := map[int]Round{}
+	ambiguous := map[int]bool{}
+	for _, round := range rounds {
+		if _, exists := indexed[round.Number]; exists {
+			ambiguous[round.Number] = true
+		}
+		indexed[round.Number] = round
+	}
+	for number := range ambiguous {
+		delete(indexed, number)
+	}
+	return indexed
+}
+
+func analysisUtilityTiming(utility Utility, rounds map[int]Round) (*float64, string) {
+	round, ok := rounds[utility.Round]
+	if !ok || round.Number < 1 || !utility.ThrowObserved || !analysisFinite(utility.Start) || !analysisFinite(round.Start) || !analysisFinite(round.End) || !analysisFinite(round.FreezeEnd) || round.End < round.Start || round.FreezeEnd < round.Start || round.FreezeEnd > round.End || utility.Start < round.FreezeEnd || utility.Start > round.End {
+		return nil, "unknown"
+	}
+	// The parser historically replaced a missing FreezeEnd with Round.Start.
+	// Treat that equality as unknown unless a recorded freeze-end event proves it.
+	if round.FreezeEnd == round.Start && (round.Economy == nil || round.Economy.Source != "freeze_end" || !analysisFinite(round.Economy.Time) || round.Economy.Time != round.FreezeEnd) {
+		return nil, "unknown"
+	}
+	elapsed := utility.Start - round.FreezeEnd
+	if !analysisFinite(elapsed) || elapsed < 0 {
+		return nil, "unknown"
+	}
+	return &elapsed, "freeze_end"
 }
 
 func analysisIdentifyTeams(scope string, windows map[int]analysisRoundWindow, rosters map[int]map[int]*analysisRoster) (map[int]map[int]*analysisTeamGroup, []*analysisTeamGroup) {

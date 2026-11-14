@@ -55,36 +55,38 @@ type job struct {
 }
 
 type app struct {
-	root            string
-	assets          fs.FS
-	mu              sync.Mutex
-	jobs            map[string]*job
-	queue           chan struct{}
-	pending         []*job
-	slots           chan struct{}
-	ctx             context.Context
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
-	sessionID       string
-	sessionSettings json.RawMessage
-	persistent      bool
-	demoDir         string
-	persistMu       sync.Mutex
-	scanMu          sync.Mutex
-	scanning        bool
-	scanResult      libraryScan
-	sources         map[string]librarySource
-	libraryLock     *os.File
-	closeOnce       sync.Once
-	statisticsGate  chan struct{}
-	statisticsKey   string
-	statisticsJSON  []byte
-	reparseParser   func(context.Context, string, string, string, func(float64)) (*DemoData, error)
+	root                    string
+	assets                  fs.FS
+	mu                      sync.Mutex
+	jobs                    map[string]*job
+	queue                   chan struct{}
+	pending                 []*job
+	slots                   chan struct{}
+	ctx                     context.Context
+	cancel                  context.CancelFunc
+	wg                      sync.WaitGroup
+	sessionID               string
+	sessionSettings         json.RawMessage
+	persistent              bool
+	demoDir                 string
+	persistMu               sync.Mutex
+	scanMu                  sync.Mutex
+	scanning                bool
+	scanResult              libraryScan
+	sources                 map[string]librarySource
+	libraryLock             *os.File
+	closeOnce               sync.Once
+	statisticsGate          chan struct{}
+	statisticsKey           string
+	statisticsJSON          []byte
+	analysisUpgradeGate     chan struct{}
+	analysisUpgradeFailures map[string]analysisUpgradeFailure
+	reparseParser           func(context.Context, string, string, string, func(float64)) (*DemoData, error)
 }
 
 func newApp(root string, assets fs.FS) *app {
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &app{root: root, assets: assets, jobs: map[string]*job{}, sources: map[string]librarySource{}, queue: make(chan struct{}, 1), slots: make(chan struct{}, 3), statisticsGate: make(chan struct{}, 1), ctx: ctx, cancel: cancel}
+	a := &app{root: root, assets: assets, jobs: map[string]*job{}, sources: map[string]librarySource{}, queue: make(chan struct{}, 1), slots: make(chan struct{}, 3), statisticsGate: make(chan struct{}, 1), analysisUpgradeGate: make(chan struct{}, 1), analysisUpgradeFailures: map[string]analysisUpgradeFailure{}, ctx: ctx, cancel: cancel}
 	a.wg.Add(1)
 	go a.worker()
 	return a
@@ -393,6 +395,31 @@ func (a *app) serveResult(w http.ResponseWriter, r *http.Request, analysis bool)
 	if state != "ready" {
 		apiError(w, 409, "Demo 尚未完成解析")
 		return
+	}
+	if analysis {
+		fallback, err := a.ensureAnalysisUtilityTiming(r.Context(), j)
+		if err != nil {
+			if errors.Is(err, errAnalysisUpgradeStale) {
+				apiError(w, 409, "录像已更新或移除，请重新读取分析数据")
+			} else if r.Context().Err() == nil {
+				apiError(w, 500, "分析缓存读取失败")
+			}
+			return
+		}
+		if fallback != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Vary", "Accept-Encoding")
+			if acceptsGzip(r.Header.Get("Accept-Encoding")) {
+				w.Header().Set("Content-Encoding", "gzip")
+				gz, _ := gzip.NewWriterLevel(w, gzip.BestSpeed)
+				_, _ = gz.Write(fallback)
+				_ = gz.Close()
+			} else {
+				_, _ = w.Write(fallback)
+			}
+			return
+		}
 	}
 	f, err := os.Open(path)
 	if err != nil {

@@ -21,7 +21,7 @@ function dataset(id, map = 'de_mirage', x = 256, y = 768) {
 }
 
 async function page(datasets = [dataset('one')], pageOptions = {}) {
-  const elements = new Map(), canvases = [], downloads = [], requests = [], timers = new Map(), parseBodies = [], reparseBodies = [], summaryFailures = new Map();
+  const elements = new Map(), canvases = [], downloads = [], downloadBlobs = new Map(), requests = [], timers = new Map(), parseBodies = [], reparseBodies = [], summaryFailures = new Map();
   const mapGates = new Map(), resizeObservers = [], timerDelays = new Map(), savedWrites = [];
   let nextTimer = 0, analysisCalls = 0, refreshError = '', reparseRequestError = '';
   class Element {
@@ -35,7 +35,7 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
       const event = { target: this, currentTarget: this, preventDefault: noop, ...args };
       return Promise.all((this.listeners[type] || []).map(listener => listener(event)));
     }
-    click() { if (this.tagName === 'a') downloads.push({ href: this.href, filename: this.download }); return this.dispatch('click'); }
+    click() { if (this.tagName === 'a') downloads.push({ href: this.href, filename: this.download, blob: downloadBlobs.get(this.href) }); return this.dispatch('click'); }
     append(...children) { this.children.push(...children); }
     replaceChildren(...children) { this.children = children; }
     get childElementCount() { return this.children.length; }
@@ -162,7 +162,7 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
     throw new Error(`Unexpected fetch: ${url}`);
   };
   class PageURL extends URL {
-    static createObjectURL() { return 'blob:test-png'; }
+    static createObjectURL(blob) { const url = `blob:test-${downloadBlobs.size}`; downloadBlobs.set(url, blob); return url; }
     static revokeObjectURL() {}
   }
   const sandbox = {
@@ -957,4 +957,108 @@ test('a rejected bulk request leaves cached data and explicit empty selections u
   assert.equal(deaths(ui), 0); assert.deepEqual(ui.saved(), before); assert.match(ui.get('analysis-reparse-summary').textContent, /服务暂不可用.*旧缓存与筛选仍保留/);
   assert.equal(ui.get('reparse-analyses').disabled, false);
   ui.failReparseRequest(''); await clickAndSettle(ui, 'reparse-analyses'); assert.equal(ui.reparseBodies.length, 2); assert.deepEqual(ui.saved().selectedDemos, []);
+});
+
+function utilityDemo(id = 'timed', map = 'de_mirage') {
+  const demo = dataset(id, map);
+  demo.utilities = [0, 5, 5.5, 30, 72, null, undefined].map((elapsed, index) => ({
+    id: `grenade-${index}`, type: 'smoke', owner: 'Player', playerId: demo.players[0].id,
+    teamId: 'team-a', side: 3, round: 2, time: 400 + (elapsed ?? index),
+    ...(elapsed === undefined ? {} : { roundElapsed: elapsed, timeSource: elapsed === null ? 'unknown' : 'freeze_end' }),
+    throwObserved: true, detonated: true, start: { x: 100, y: 500, z: 0 }, end: { x: 300, y: 650, z: 0 },
+  }));
+  return demo;
+}
+function utilityCountButton(ui, key) { return ui.get('utility-time-counts').children.find(button => button.dataset.timeBucket === key); }
+function utilityCounts(ui) { return Object.fromEntries(ui.get('utility-time-counts').children.map(button => [button.dataset.timeBucket, Number(button.dataset.count)])); }
+function textWithin(element) { return [element.textContent, ...element.children.map(textWithin)].join(' '); }
+function csvRows(text) { return text.replace(/^\ufeff/, '').split('\r\n').map(row => row.slice(1, -1).split('","').map(cell => cell.replace(/""/g, '"'))); }
+
+test('utility time options and clickable distribution filter groups without altering movement, combat or death heatmaps', async () => {
+  const ui = await page([utilityDemo()]);
+  assert.deepEqual(ui.get('analysis-utility-time').children.map(option => option.value), ['all', '0-5', '5-20', '20-50', '50+', 'unknown']);
+  const counts = { all: 7, '0-5': 2, '5-20': 1, '20-50': 1, '50+': 1, unknown: 2 };
+  assert.deepEqual(utilityCounts(ui), counts);
+  const pixels = ui.renderedHeat().imageData.data.slice(), metrics = ['movement', 'engagements', 'deaths'].map(key => ui.get(`metric-${key}`).textContent);
+  const selectionSummary = ui.get('selection-summary').textContent;
+  await utilityCountButton(ui, '5-20').click(); await settle();
+  assert.equal(ui.get('analysis-utility-time').value, '5-20'); assert.equal(ui.saved().utilityTime, '5-20');
+  assert.equal(ui.get('metric-utilities').textContent, '1'); assert.equal(ui.get('utility-group-count').textContent, '1 类落点 · 1 次');
+  await ui.get('utility-groups').children[0].click(); await settle();
+  assert.match(textWithin(ui.get('utility-detail')), /开打后 5\.50 秒 · 5–20 秒/);
+  assert.equal(ui.get('utility-detail').querySelectorAll('a')[0].href, '/?demo=timed&t=405.50', 'replay uses original match time, not elapsed round time');
+  for (const key of ['0-5', '20-50', '50+', 'unknown', 'all']) {
+    await ui.change('analysis-utility-time', key);
+    assert.equal(Number(ui.get('metric-utilities').textContent), counts[key]);
+    assert.deepEqual(utilityCounts(ui), counts, 'all interval counts remain visible before the active time filter');
+    assert.equal(utilityCountButton(ui, key)['aria-pressed'], 'true');
+    assert.equal(ui.get('utility-time-counts').children.filter(button => button['aria-pressed'] === 'true').length, 1);
+    assert.deepEqual(ui.renderedHeat().imageData.data, pixels);
+    assert.deepEqual(['movement', 'engagements', 'deaths'].map(metric => ui.get(`metric-${metric}`).textContent), metrics);
+    assert.equal(ui.get('selection-summary').textContent, selectionSummary);
+  }
+});
+
+test('utility distribution follows other filters while changing and restoring time preserves every saved selection', async () => {
+  const demo = utilityDemo('selected', 'de_nuke'), playerId = demo.players[0].id;
+  const original = demo.utilities[0];
+  demo.utilities.push({ ...original, id: 'other-type', type: 'flash' }, { ...original, id: 'other-player', playerId: 'other' }, { ...original, id: 'other-side', side: 2 }, { ...original, id: 'other-team', teamId: 'other-team' }, { ...original, id: 'other-floor', end: { ...original.end, z: 200 } });
+  const otherMap = utilityDemo('ancient', 'de_ancient'), unchecked = utilityDemo('unchecked', 'de_nuke');
+  const saved = { selectedDemos: ['selected', 'ancient'], selectedTeams: ['alias:squad'], selectedPlayers: [playerId], aliases: { 'team-a': 'Squad' }, map: 'de_nuke', floor: 'lower', side: '3', query: 'Player', layers: ['deaths', 'shots'], radius: 224, opacity: 75, scale: 'linear', utilityType: 'smoke', utilitySort: 'rare', landingDistance: 192, throwDistance: 96 };
+  const mapInfo = { lowerMaxZ: 100, lowerRadar: '/maps/lower.png' };
+  const ui = await page([demo, otherMap, unchecked], { saved, mapInfo }); const before = ui.saved();
+  assert.deepEqual(utilityCounts(ui), { all: 7, '0-5': 2, '5-20': 1, '20-50': 1, '50+': 1, unknown: 2 });
+  await ui.change('analysis-utility-time', '20-50');
+  for (const [key, value] of Object.entries(before)) if (key !== 'utilityTime') assert.deepEqual(ui.saved()[key], value, `${key} is unaffected by utility time`);
+  const restored = await page([demo, otherMap, unchecked], { saved: ui.saved(), mapInfo });
+  assert.equal(restored.get('analysis-utility-time').value, '20-50'); assert.equal(restored.get('metric-utilities').textContent, '1');
+  assert.deepEqual(restored.saved(), ui.saved());
+  await ui.change('analysis-utility-type', 'flash'); assert.deepEqual(utilityCounts(ui), { all: 1, '0-5': 1, '5-20': 0, '20-50': 0, '50+': 0, unknown: 0 });
+  assert.equal(ui.get('metric-utilities').textContent, '0'); assert.equal(ui.get('export-csv').disabled, true);
+  assert.match(textWithin(ui.get('utility-groups')), /切换投掷时段/);
+  await utilityCountButton(ui, '0-5').click(); await settle(); assert.equal(ui.get('metric-utilities').textContent, '1');
+});
+
+test('unknown utility clocks are labeled separately and reset restores all times without dropping team aliases', async () => {
+  const demo = utilityDemo(); const ui = await page([demo], { saved: { utilityTime: 'unknown', aliases: { 'team-a': 'Saved squad' } } });
+  assert.equal(ui.get('metric-utilities').textContent, '2'); await ui.get('utility-groups').children[0].click(); await settle();
+  const details = textWithin(ui.get('utility-detail'));
+  assert.match(details, /时间未知/); assert.match(details, /缺少出手或冻结结束记录/); assert.doesNotMatch(details, /开打后 .* 秒/);
+  await clickAndSettle(ui, 'clear-selection');
+  assert.equal(ui.get('analysis-utility-time').value, 'all'); assert.equal(ui.saved().utilityTime, 'all'); assert.equal(ui.get('metric-utilities').textContent, '7');
+  assert.deepEqual(ui.saved().aliases, { 'team-a': 'Saved squad' });
+  const invalid = await page([demo], { saved: { utilityTime: 'invalid-bucket' } }); assert.equal(invalid.saved().utilityTime, 'all');
+  const empty = await page([]); assert.deepEqual(utilityCounts(empty), { all: 0, '0-5': 0, '5-20': 0, '20-50': 0, '50+': 0, unknown: 0 });
+  await empty.change('analysis-utility-time', 'unknown'); assert.equal(empty.saved().utilityTime, 'unknown'); assert.equal(empty.get('export-csv').disabled, true);
+});
+
+test('utility CSV uses the active time selection and exports round elapsed seconds independently of replay seconds', async () => {
+  const demo = utilityDemo(); demo.utilities[2].roundElapsed = 5.001; demo.utilities[2].time = 405.001;
+  const ui = await page([demo]); await ui.change('analysis-utility-time', '0-5'); await clickAndSettle(ui, 'export-csv');
+  assert.equal(ui.downloads[0].filename, 'de_mirage-utilities.csv');
+  let rows = csvRows(await ui.downloads[0].blob.text());
+  const headings = rows[0], at = title => headings.indexOf(title);
+  assert.ok(at('回合开打后秒数') >= 0); assert.ok(at('投掷时段') >= 0); assert.ok(at('秒') >= 0);
+  assert.equal(rows.length, 3); assert.deepEqual(rows.slice(1).map(row => row[at('回合开打后秒数')]), ['0', '5']);
+  assert.deepEqual(rows.slice(1).map(row => row[at('秒')]), ['400', '405']);
+  assert.ok(rows.slice(1).every(row => row[at('投掷时段')] === '开局 0–5 秒' && row[at('落点次数')] === '2'));
+  await ui.change('analysis-utility-time', '5-20'); await clickAndSettle(ui, 'export-csv'); rows = csvRows(await ui.downloads[1].blob.text());
+  assert.equal(rows.length, 2); assert.equal(rows[1][at('回合开打后秒数')], '5.001'); assert.equal(rows[1][at('秒')], '405.001'); assert.equal(rows[1][at('投掷时段')], '5–20 秒');
+  await ui.change('analysis-utility-time', 'unknown'); await clickAndSettle(ui, 'export-csv'); rows = csvRows(await ui.downloads[2].blob.text());
+  assert.equal(rows.length, 3); assert.ok(rows.slice(1).every(row => row[at('回合开打后秒数')] === '' && row[at('投掷时段')] === '时间未知'));
+  assert.deepEqual(rows.slice(1).map(row => row[at('秒')]), ['405', '406'], 'unknown round clock does not overwrite the replay timestamp');
+});
+
+test('utility time and all other preferences survive reparse queue, failure, success and page reload', async () => {
+  const demo = { ...utilityDemo('selected', 'de_nuke'), revision: 'old' };
+  const saved = { selectedDemos: ['selected'], selectedTeams: ['alias:squad'], selectedPlayers: [demo.players[0].id], aliases: { 'team-a': 'Squad' }, map: 'de_nuke', floor: 'lower', side: '3', query: 'Player', utilityTime: '20-50', utilityType: 'smoke', utilitySort: 'rare', layers: ['deaths'], radius: 224, opacity: 75, scale: 'linear' };
+  const mapInfo = { lowerMaxZ: 100, lowerRadar: '/maps/lower.png' }, ui = await page([demo], { saved, mapInfo }); const before = ui.saved();
+  await clickAndSettle(ui, 'reparse-analyses'); assert.deepEqual(ui.saved(), before); assert.equal(ui.get('metric-utilities').textContent, '1');
+  ui.setJob({ ...demo, reparse: { status: 'error', error: '测试解析失败' } }); await ui.pollLibrary(); assert.deepEqual(ui.saved(), before); assert.equal(ui.get('metric-utilities').textContent, '1');
+  await clickAndSettle(ui, 'retry-reparse-failures');
+  const updated = { ...demo, revision: 'new', reparse: { status: 'ready', progress: 1, revision: 'new' }, utilities: [...demo.utilities, { ...demo.utilities[3], id: 'extra', roundElapsed: 42 }] };
+  ui.setJob(updated); await ui.pollLibrary();
+  assert.deepEqual(ui.saved(), before); assert.equal(ui.get('analysis-utility-time').value, '20-50'); assert.equal(ui.get('metric-utilities').textContent, '2');
+  assert.deepEqual(utilityCounts(ui), { all: 8, '0-5': 2, '5-20': 1, '20-50': 2, '50+': 1, unknown: 2 });
+  const restored = await page([updated], { saved: ui.saved(), mapInfo }); assert.deepEqual(restored.saved(), before); assert.equal(restored.get('metric-utilities').textContent, '2');
 });
