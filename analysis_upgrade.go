@@ -209,11 +209,13 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	var version, movementVersion int
+	var version, movementVersion, eventVersion int
 	_ = json.Unmarshal(summary["utilityTimingVersion"], &version)
 	_ = json.Unmarshal(summary["movementTimingVersion"], &movementVersion)
+	_ = json.Unmarshal(summary["eventTimingVersion"], &eventVersion)
 	needUtility, needMovement := version < analysisUtilityTimingVersion, movementVersion < analysisMovementTimingVersion
-	if !needUtility && !needMovement {
+	needEvents := eventVersion < analysisEventTimingVersion
+	if !needUtility && !needMovement && !needEvents {
 		return nil, nil
 	}
 	var id string
@@ -250,6 +252,13 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 		if upgradeErr == nil && needUtility {
 			upgradeErr = patchAnalysisUtilityTiming(summary, &replay)
 		}
+		if upgradeErr == nil && needEvents {
+			var events map[analysisSeriesKey]*analysisEventAccumulator
+			events, upgradeErr = upgradeAnalysisEvents(ctx, snapshot.replay, &replay)
+			if upgradeErr == nil {
+				upgradeErr = patchAnalysisEventTiming(summary, events)
+			}
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -273,6 +282,9 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 		if needMovement {
 			delete(summary, "movementTimingVersion")
 		}
+		if needEvents {
+			delete(summary, "eventTimingVersion")
+		}
 	}
 	if !skipRetry {
 		a.analysisUpgradeFailures[snapshot.id] = analysisUpgradeFailure{Revision: snapshot.revision, Replay: replayFingerprint, Summary: before, At: time.Now()}
@@ -290,6 +302,11 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 	}
 	if needMovement {
 		if err := patchAnalysisMovementTiming(summary, nil); err != nil {
+			return nil, err
+		}
+	}
+	if needEvents {
+		if err := patchAnalysisEventTiming(summary, nil); err != nil {
 			return nil, err
 		}
 	}

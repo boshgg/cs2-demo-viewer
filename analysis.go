@@ -15,6 +15,7 @@ import (
 const analysisCellSize = 64
 const analysisUtilityTimingVersion = 1
 const analysisMovementTimingVersion = 1
+const analysisEventTimingVersion = 1
 
 // AnalysisCell holds a world-space grid centre followed by independent metrics:
 // x, y, z, observed living-player seconds, gunfight involvements, deaths, shots.
@@ -45,6 +46,8 @@ type AnalysisSeries struct {
 	MovementUntimedCells   []AnalysisMovementUntimedCell `json:"movementUntimedCells"`
 	MovementUnknownSeconds float64                       `json:"movementUnknownSeconds"`
 	MovementBeyondSeconds  float64                       `json:"movementBeyondSeconds"`
+	EventTimeline          []AnalysisEventCell           `json:"eventTimeline"`
+	EventUntimedCells      []AnalysisEventUntimedCell    `json:"eventUntimedCells"`
 }
 
 type AnalysisUtility struct {
@@ -75,6 +78,7 @@ type AnalysisBounds struct {
 type AnalysisDemo struct {
 	UtilityTimingVersion  int               `json:"utilityTimingVersion"`
 	MovementTimingVersion int               `json:"movementTimingVersion"`
+	EventTimingVersion    int               `json:"eventTimingVersion"`
 	ID                    string            `json:"id"`
 	Name                  string            `json:"name"`
 	Map                   string            `json:"map"`
@@ -123,6 +127,7 @@ type analysisSeriesValue struct {
 	cells    map[analysisGridKey]*analysisCellValue
 	rounds   map[int]bool
 	movement analysisMovementAccumulator
+	events   analysisEventAccumulator
 }
 
 type analysisEngagementKey struct {
@@ -137,7 +142,7 @@ type analysisEngagementKey struct {
 // Gunfights require observed opponent firearm damage; empty damage data is not
 // silently substituted with missed shots or speculative lines of sight.
 func BuildAnalysis(d *DemoData) *AnalysisDemo {
-	a := &AnalysisDemo{UtilityTimingVersion: analysisUtilityTimingVersion, MovementTimingVersion: analysisMovementTimingVersion, CellSize: analysisCellSize, Players: []AnalysisPlayer{}, Teams: []AnalysisTeam{}, Series: []AnalysisSeries{}, Utilities: []AnalysisUtility{}, Warnings: []string{}}
+	a := &AnalysisDemo{UtilityTimingVersion: analysisUtilityTimingVersion, MovementTimingVersion: analysisMovementTimingVersion, EventTimingVersion: analysisEventTimingVersion, CellSize: analysisCellSize, Players: []AnalysisPlayer{}, Teams: []AnalysisTeam{}, Series: []AnalysisSeries{}, Utilities: []AnalysisUtility{}, Warnings: []string{}}
 	if d == nil {
 		return a
 	}
@@ -247,45 +252,26 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 			s.movement.add(pos, start, end, anchors[f.Round])
 		})
 	}
-	seenEngagements := map[analysisEngagementKey]bool{}
-	for _, e := range d.Damage {
-		if !inside(e.Round, e.T) || e.Damage < 0 || !analysisSide(e.AttackerTeam) || !analysisSide(e.VictimTeam) || e.AttackerTeam == e.VictimTeam || e.AttackerID == "" || e.VictimID == "" || e.AttackerID == e.VictimID || !analysisFirearm(e.Weapon) {
-			continue
-		}
-		for _, p := range []struct {
-			id   string
-			side int
-			pos  *Position
-		}{{e.AttackerID, e.AttackerTeam, e.AttackerPos}, {e.VictimID, e.VictimTeam, e.VictimPos}} {
-			if !analysisPosition(p.pos) {
-				continue
-			}
-			key, s := seriesFor(normalisePlayer(p.id, ""), e.Round, p.side)
-			seen := analysisEngagementKey{series: key, grid: analysisGrid(*p.pos), round: e.Round, second: int64(math.Floor(e.T - windows[e.Round].start))}
-			if seenEngagements[seen] {
-				continue
-			}
-			seenEngagements[seen] = true
-			add(s, *p.pos, 4, 1)
-		}
+	observer := analysisEventObserver{
+		windows: windows, seen: map[analysisEngagementKey]bool{},
+		key: func(raw, name string, round, side int) analysisSeriesKey {
+			key, _ := seriesFor(normalisePlayer(raw, name), round, side)
+			return key
+		},
+		add: func(key analysisSeriesKey, pos Position, metric, round int, when float64) {
+			s := series[key]
+			add(s, pos, metric, 1)
+			s.events.add(pos, metric, when, anchors[round])
+		},
 	}
-	for _, e := range d.Events {
-		if e.Type != "kill" || !inside(e.Round, e.T) || e.VictimID == "" || !analysisSide(e.VictimTeam) || !analysisPosition(e.VictimPos) {
-			continue
-		}
-		_, s := seriesFor(normalisePlayer(e.VictimID, e.Victim), e.Round, e.VictimTeam)
-		add(s, *e.VictimPos, 5, 1)
+	for _, event := range d.Damage {
+		observer.damage(event)
 	}
-	for _, e := range d.Shots {
-		if !inside(e.Round, e.T) || e.PlayerID == "" || !analysisSide(e.Team) || !analysisFirearm(e.Weapon) {
-			continue
-		}
-		pos := Position{e.X, e.Y, e.Z}
-		if !analysisPosition(&pos) {
-			continue
-		}
-		_, s := seriesFor(normalisePlayer(e.PlayerID, ""), e.Round, e.Team)
-		add(s, pos, 6, 1)
+	for _, event := range d.Events {
+		observer.death(event)
+	}
+	for _, event := range d.Shots {
+		observer.shot(event)
 	}
 	timingRounds := analysisTimingRounds(d.Rounds)
 	for _, u := range d.Utilities {
@@ -341,6 +327,7 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 	for key, s := range series {
 		out := AnalysisSeries{PlayerID: key.player, TeamID: key.team, Side: key.side, Rounds: len(s.rounds), Cells: []AnalysisCell{}}
 		s.movement.fill(&out)
+		s.events.fill(&out)
 		for _, c := range s.cells {
 			c.cell[2] = math.Round(c.zSum/c.zWeight*100) / 100
 			c.cell[3] = math.Round(c.cell[3]*10000) / 10000

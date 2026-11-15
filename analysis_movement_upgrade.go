@@ -14,6 +14,17 @@ import (
 // neither the JSON decoder nor the caller retains an entire frame array. Every
 // pass verifies the gzip CRC/trailer, size limit, cancellation and JSON end.
 func streamAnalysisReplay(ctx context.Context, path string, metadata *analysisTimingReplay, visit func(Frame)) error {
+	return streamAnalysisReplayWithVisitor(ctx, path, metadata, analysisReplayVisitor{frame: visit})
+}
+
+type analysisReplayVisitor struct {
+	frame  func(Frame)
+	damage func(DamageEvent)
+	death  func(Event)
+	shot   func(Shot)
+}
+
+func streamAnalysisReplayWithVisitor(ctx context.Context, path string, metadata *analysisTimingReplay, visit analysisReplayVisitor) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -80,12 +91,30 @@ func streamAnalysisReplay(ctx context.Context, path string, metadata *analysisTi
 				metadata.FramesPresent = true
 			}
 			for d.More() {
-				if key == "frames" && visit != nil {
+				if key == "frames" && visit.frame != nil {
 					var frame Frame
 					if err := d.Decode(&frame); err != nil {
 						return err
 					}
-					visit(frame)
+					visit.frame(frame)
+				} else if key == "damage" && visit.damage != nil {
+					var event DamageEvent
+					if err := d.Decode(&event); err != nil {
+						return err
+					}
+					visit.damage(event)
+				} else if key == "events" && visit.death != nil {
+					var event Event
+					if err := d.Decode(&event); err != nil {
+						return err
+					}
+					visit.death(event)
+				} else if key == "shots" && visit.shot != nil {
+					var event Shot
+					if err := d.Decode(&event); err != nil {
+						return err
+					}
+					visit.shot(event)
 				} else {
 					var discard json.RawMessage
 					if err := d.Decode(&discard); err != nil {

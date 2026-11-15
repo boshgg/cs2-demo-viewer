@@ -70,18 +70,32 @@
     for (const edge of ['start', 'end']) { const input = $(`movement-time-${edge}`); input.value = String(range[edge]); input.setAttribute('aria-valuetext', `倒计时 ${countdown(range[edge])}，开局后 ${range[edge]} 秒`); $(`movement-time-${edge}-value`).textContent = countdown(range[edge]); }
     $('movement-time-fill').style.left = `${range.start / movementDuration * 100}%`; $('movement-time-fill').style.width = `${(range.end - range.start) / movementDuration * 100}%`;
     $('movement-time-label').textContent = movementRangeLabel(); $('movement-time-all').setAttribute('aria-pressed', String(!state.movementTime));
-    $('movement-time-help').textContent = state.movementTime ? `开局后 ${range.start}–${range.end} 秒，含开始、不含结束；冻结结束为 0 秒。仅筛选移动，交火、死亡、开火和道具不变。可用方向键每次调整 1 秒。` : '拖动两个手柄选择任意时段；冻结结束为开局 0 秒。当前包含全部有效回合移动（也含倒计时结束后）；仅筛选移动，其他图层和道具不变。';
+    $('movement-time-help').textContent = state.movementTime ? `开局后 ${range.start}–${range.end} 秒，含开始、不含结束；冻结结束为 0 秒。移动、交火、死亡、开火同步筛选，道具投掷时段独立。可用方向键每次调整 1 秒。` : '拖动两个手柄选择任意时段；冻结结束为开局 0 秒。当前显示移动、交火、死亡、开火的全部时段（也含倒计时结束后）；道具投掷时段独立设置。';
+  }
+  function timeCoverage(metric) { return state.result?.heatmapCoverage?.[metric] || (metric === 'movement' ? state.result?.movementCoverage : null); }
+  function missingTime(metric) { return !!state.movementTime && (!timeCoverage(metric) || timeCoverage(metric).status === 'missing'); }
+  function timeCoverageLines() {
+    return metrics.map(metric => {
+      const coverage = timeCoverage(metric), label = metricNames[metric], amount = value => metric === 'movement' ? seconds(value) : `${number(value)} 次`;
+      if (!coverage) return `${label}：缺少回合时间证据；不使用整场数据代替，需重新解析。`;
+      const unknown = metric === 'movement' ? coverage.unknownSeconds : coverage.unknownCount, beyond = metric === 'movement' ? coverage.beyondSeconds : coverage.beyondCount;
+      if (coverage.status === 'missing') return `${label}：缺少时段记录（${coverage.missingDemos > 0 ? `${number(coverage.missingDemos)} 场旧缓存` : '时间来源未知'}）；未用整场数据代替，请重新解析。`;
+      if (coverage.status === 'empty') return `${label}：当前筛选没有记录。`;
+      if (coverage.status === 'partial') return `${label}：仅显示有时间依据的记录（${number(coverage.timedDemos)} / ${number(coverage.selectedDemos)} 场${unknown > 0 ? `；${amount(unknown)}时间未知` : ''}）；缺失部分未用整场数据代替，可重新解析补齐。`;
+      return `${label}：时间记录完整（${number(coverage.timedDemos)} 场）${beyond > 0 ? `；${amount(beyond)}位于 1:55 倒计时之后，切回全部时段可查看` : ''}。`;
+    });
   }
   function renderMovementCoverage() {
-    const note = $('movement-time-coverage'), coverage = state.result?.movementCoverage;
+    const note = $('movement-time-coverage');
     note.hidden = !state.movementTime;
     if (!state.movementTime) { note.textContent = ''; return; }
-    if (movementPending) { note.textContent = '正在更新所选移动时段…'; return; }
-    if (!coverage) { note.textContent = '当前报告没有移动时间证据；区间内不使用整场移动数据，请重新解析已导入比赛。'; return; }
-    if (coverage.status === 'missing') note.textContent = `所选范围缺少移动时间记录（${coverage.missingDemos > 0 ? `${number(coverage.missingDemos)} 场旧缓存` : '时间来源未知'}）；未用整场移动代替，请重新解析已导入比赛。其他图层仍可查看。`;
-    else if (coverage.status === 'empty') note.textContent = '当前筛选没有可统计的移动记录；可调整比赛、队伍、玩家或阵营。';
-    else if (coverage.status === 'partial') note.textContent = `仅显示有时间证据的移动：${number(coverage.timedDemos)} / ${number(coverage.selectedDemos)} 场有记录${coverage.unknownSeconds > 0 ? `，${seconds(coverage.unknownSeconds)} 缺少时间依据` : ''}。缺失部分未用整场数据代替，可重新解析补齐。`;
-    else note.textContent = `时间记录完整 · 开局后 ${state.movementTime.start}–${state.movementTime.end} 秒${coverage.beyondSeconds > 0 ? `；${seconds(coverage.beyondSeconds)}位于 1:55 倒计时之后，切回全部时段可查看` : ''}。`;
+    if (movementPending) { note.textContent = '正在更新移动、交火、死亡和开火时段…'; return; }
+    note.textContent = timeCoverageLines().join('\n');
+  }
+  function invalidateHeatmapTime() {
+    ++state.request; movementPending = true; $('computing').hidden = false; $('export-image').disabled = true;
+    for (const metric of metrics) $(`metric-${metric}`).textContent = '计算中…';
+    renderMovementCoverage(); rebuildHeat();
   }
   function setMovementEdge(edge, flush = false) {
     const current = state.movementTime || { start: 0, end: movementDuration }, raw = Number($(`movement-time-${edge}`).value);
@@ -89,8 +103,7 @@
     const next = { ...current, [edge]: edge === 'start' ? Math.min(value, current.end - 1) : Math.max(value, current.start + 1) };
     const changed = !state.movementTime || next.start !== current.start || next.end !== current.end;
     if (changed) {
-      state.movementTime = next; ++state.request; movementPending = true; $('computing').hidden = false; $('metric-movement').textContent = '计算中…'; $('export-image').disabled = true;
-      renderMovementTime(); renderMovementCoverage(); rebuildHeat(); save();
+      state.movementTime = next; renderMovementTime(); invalidateHeatmapTime(); save();
     }
     else renderMovementTime();
     if (flush) { if (movementTimer || changed) requestAnalysis({ movementOnly: true }); }
@@ -106,7 +119,7 @@
       ++state.request; state.result = null; state.selectedGroup = state.selectedThrow = null; clearHeat(); renderLegend();
       $('computing').hidden = true; $('analysis-empty').hidden = false; $('selection-empty').hidden = true;
       $('selection-summary').textContent = '选择比赛、队伍或玩家，开始分析。';
-      for (const id of ['metric-movement', 'metric-engagements', 'metric-deaths', 'metric-utilities']) $(id).textContent = '—';
+      for (const id of ['metric-movement', 'metric-engagements', 'metric-deaths', 'metric-shots', 'metric-utilities']) $(id).textContent = '—';
       $('export-image').disabled = $('export-csv').disabled = true; renderMovementCoverage(); renderUtilityGroups(); draw(); save(); return;
     }
     const filter = { map: state.map, demoIds: state.selectedDemos && [...state.selectedDemos], teamIds: state.selectedTeams && [...state.selectedTeams], playerIds: state.selectedPlayers && [...state.selectedPlayers], sides: $('analysis-side').value === 'all' ? [2, 3] : [Number($('analysis-side').value)], floor: $('analysis-floor').value, lowerMaxZ: state.mapInfo?.lowerMaxZ, teamAliases: state.aliases, utilityType: $('analysis-utility-type').value, utilityTime: $('analysis-utility-time').value };
@@ -131,9 +144,8 @@
     state.result = result; $('computing').hidden = true;
     movementPending = false; renderMovementCoverage();
     const total = result.totals;
-    $('metric-movement').textContent = state.movementTime && result.movementCoverage?.status === 'missing' ? '缺少时间记录' : seconds(total.movementSeconds);
-    $('metric-engagements').textContent = number(total.engagements);
-    $('metric-deaths').textContent = number(total.deaths);
+    $('metric-movement').textContent = missingTime('movement') ? '缺少时间记录' : seconds(total.movementSeconds);
+    for (const metric of ['engagements', 'deaths', 'shots']) $(`metric-${metric}`).textContent = missingTime(metric) ? '缺少时间记录' : number(total[metric]);
     $('metric-utilities').textContent = number(total.utilities);
     const available = currentDemos();
     $('selection-summary').textContent = `${available.length} 场已选比赛 · ${total.players} 名有记录玩家 · ${total.teams} 支队伍 · ${$('analysis-side').selectedOptions[0].textContent}${available.some(d => d.synthetic) ? ' · 含合成示例' : ''}`;
@@ -735,7 +747,7 @@
     const radius = Math.max(2, Math.min(70, Number($('heat-radius').value) / worldSize() * resolution));
     for (let metric = 0; metric < metrics.length; metric++) {
       if (!$(`layer-${metrics[metric]}`).checked) continue;
-      if (metric === 0 && movementPending) continue;
+      if (movementPending || missingTime(metrics[metric])) continue;
       const points = rows.filter(row => row[metric + 3] > 0).map(row => ({ ...projection({ x: row[0], y: row[1] }), weight: row[metric + 3] }));
       state.layers.set(metrics[metric], heat.normalize(heat.density(points, resolution, radius)).values);
     }
@@ -886,7 +898,7 @@
     $(`movement-time-${edge}`).addEventListener('input', () => setMovementEdge(edge));
     $(`movement-time-${edge}`).addEventListener('change', () => setMovementEdge(edge, true));
   }
-  $('movement-time-all').addEventListener('click', () => { state.movementTime = null; renderMovementTime(); requestAnalysis({ movementOnly: true }); });
+  $('movement-time-all').addEventListener('click', () => { state.movementTime = null; renderMovementTime(); invalidateHeatmapTime(); requestAnalysis({ movementOnly: true }); });
   $('utility-sort').addEventListener('change', () => { renderUtilityGroups(); save(); });
   for (const id of ['landing-distance', 'throw-distance']) $(id).addEventListener('change', event => { const input = event.target; input.value = String(Math.max(Number(input.min), Math.min(Number(input.max), Number(input.value) || Number(input.defaultValue)))); requestAnalysis(); });
   $('teams-all').addEventListener('click', () => { state.selectedTeams = null; renderFilters(); requestAnalysis(); });
@@ -934,18 +946,20 @@
   new ResizeObserver(draw).observe($('heatmap-stage'));
   $('export-image').addEventListener('click', () => {
     const output = document.createElement('canvas'), ratio = canvas.width / canvas.getBoundingClientRect().width, width = canvas.width / ratio, height = canvas.height / ratio;
-    output.width = canvas.width; output.height = Math.round((height + 202) * ratio);
-    const c = output.getContext('2d'); c.scale(ratio, ratio); c.fillStyle = '#141b23'; c.fillRect(0, 0, width, height + 202); c.drawImage(canvas, 0, 80, width, height);
+    const coverageLines = state.movementTime ? timeCoverageLines() : [], extraHeight = 202 + coverageLines.length * 17;
+    output.width = canvas.width; output.height = Math.round((height + extraHeight) * ratio);
+    const c = output.getContext('2d'); c.scale(ratio, ratio); c.fillStyle = '#141b23'; c.fillRect(0, 0, width, height + extraHeight); c.drawImage(canvas, 0, 80, width, height);
     c.fillStyle = '#e5eef4'; c.font = '18px sans-serif'; c.fillText(`CS2 Replay · ${state.map} · ${$('analysis-side').selectedOptions[0].textContent}`, 18, 28, width - 36);
     c.fillStyle = '#91a9b8'; c.font = '12px sans-serif'; c.fillText($('selection-summary').textContent, 18, 49, width - 36);
-    c.fillText(`移动 ${$('metric-movement').textContent} [${movementRangeLabel()}] / 交火 ${$('metric-engagements').textContent} / 死亡 ${$('metric-deaths').textContent}`, 18, 68, width - 36);
+    c.fillText(`移动 ${$('metric-movement').textContent} / 交火 ${$('metric-engagements').textContent} / 死亡 ${$('metric-deaths').textContent} / 开火 ${$('metric-shots').textContent} · 热力图 ${movementRangeLabel()}`, 18, 68, width - 36);
     const y = height + 105, barWidth = Math.min(500, width - 64), gradient = c.createLinearGradient(32, 0, 32 + barWidth, 0);
     for (const [at, rgb] of heat.stops) gradient.addColorStop(at, `rgb(${rgb.join(',')})`);
     c.fillStyle = '#d8e5ed'; c.fillText(`${selectedLayers()} · ${$('heat-scale').selectedOptions[0].textContent} · 相对当前筛选峰值`, 18, y, width - 36);
     c.fillStyle = gradient; c.fillRect(32, y + 12, barWidth, 12); c.fillStyle = '#d8e5ed'; c.textAlign = 'center';
     for (const value of legendTicks()) c.fillText(`${Math.round(value * 100)}%`, 32 + heat.scaleValue(value, heatMode()) * barWidth, y + 42);
     c.textAlign = 'left'; c.fillStyle = '#91a9b8'; c.fillText('蓝 → 青 → 绿 → 黄 → 红：密度从低到高；零记录透明。', 18, y + 65, width - 36);
-    c.fillText(state.movementTime ? `移动范围：开局后 ${state.movementTime.start}–${state.movementTime.end} 秒 [含开始，不含结束]；${$('movement-time-coverage').textContent}` : '各图层独立归一化，重叠处取最高密度；百分比为相对密度，非事件占比。', 18, y + 83, width - 36);
+    c.fillText(state.movementTime ? `四图层范围：开局后 ${state.movementTime.start}–${state.movementTime.end} 秒 [含开始，不含结束]；道具时段独立。` : '各图层独立归一化，重叠处取最高密度；百分比为相对密度，非事件占比。', 18, y + 83, width - 36);
+    coverageLines.forEach((line, index) => c.fillText(line, 18, y + 100 + index * 17, width - 36));
     output.toBlob(blob => { if (blob) download(blob, `${state.map}-analysis.png`); });
   });
   $('export-csv').addEventListener('click', () => {

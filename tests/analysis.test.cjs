@@ -224,24 +224,25 @@ test('movement ranges use half-open one-second bins, sum overlapping round obser
   assert.deepEqual(d,before);
 });
 
-test('an elapsed range replaces only movement and does not change scope, combat, deaths, shots or utility-time filtering', () => {
+test('a shared elapsed range changes heatmap metrics but preserves scope and independent utility-time filtering', () => {
   const one=movementDemo(),two=movementDemo('movement-only');
   one.utilities=[timedUtility('early',3),timedUtility('late',60),timedUtility('unknown',null,{timeSource:'unknown'})];
   two.series[0].cells=[[50,0,0,2,0,0,0]];two.series[0].movementTimeline=[[50,0,0,0,2]];two.series[0].movementUntimedCells=[];
-  const otherMetrics = result => Object.fromEntries(Object.entries(result.totals).filter(([key]) => key!=='movementSeconds'));
+  const otherMetrics = result => Object.fromEntries(Object.entries(result.totals).filter(([key]) => !['movementSeconds','engagements','deaths','shots'].includes(key)));
   for(const utilityTime of ['all','0-5','50+','unknown']) {
     const full=A.aggregate([one,two],{utilityTime}),range=A.aggregate([one,two],{utilityTime,movementTime:{start:40,end:50}});
     assert.equal(range.totals.movementSeconds,0);
     assert.deepEqual(otherMetrics(range),otherMetrics(full));
     assert.deepEqual(range.utilities,full.utilities);assert.deepEqual(range.utilityTimeCounts,full.utilityTimeCounts);
-    assert.deepEqual(range.cells.map(row=>[...row.slice(0,3),...row.slice(4)]),[[0,0,0,2,1,3]]);
+    assert.deepEqual(range.cells,[]);
+    assert.equal(range.heatmapCoverage.engagements.status,'missing');
   }
 });
 
 test('old, unsupported and missing timing evidence never masquerades as whole-round movement in range mode', () => {
   const legacy=demo('legacy'),future=movementDemo('future',{movementTimingVersion:2});
   const ranged=A.aggregate([legacy,legacy,future],{movementTime:{start:0,end:115}});
-  assert.equal(ranged.totals.movementSeconds,0);assert.equal(ranged.totals.engagements,3);
+  assert.equal(ranged.totals.movementSeconds,0);assert.equal(ranged.totals.engagements,0);
   assert.deepEqual(ranged.movementCoverage,{status:'missing',selectedDemos:2,timedDemos:0,missingDemos:2,missingDemoIds:['legacy','future'],totalSeconds:18,timedSeconds:0,unknownSeconds:18,beyondSeconds:0,selectedSeconds:0,coverage:0});
   assert.equal(A.aggregate([legacy,future]).totals.movementSeconds,18);
   const absent=movementDemo('absent');delete absent.series[0].movementTimeline;delete absent.series[0].movementUntimedCells;
@@ -256,7 +257,7 @@ test('movement timings and coverage obey map, demo, player, team aliases, side a
   const two=movementDemo('two',{series:[makeSeries({teamId:'name:variant'})]}),otherMap=movementDemo('nuke',{map:'de_nuke'}),unselected=movementDemo('unselected');
   const filter={map:'de_mirage',demoIds:['one','two','nuke'],playerIds:['76561198000000001'],teamAliases:{'name:a':'Team','name:variant':'TEAM'},teamIds:['alias:team'],sides:[3],floor:'lower',lowerMaxZ:0,movementTime:{start:5,end:6}};
   const result=A.aggregate([one,two,one,otherMap,unselected],filter);
-  assert.deepEqual(result.cells,[[0,0,-500,4,2,2,2]]);
+  assert.deepEqual(result.cells,[[0,0,-500,4,0,0,0]]);
   assert.equal(result.totals.demos,2);assert.equal(result.totals.players,1);assert.equal(result.totals.teams,1);
   assert.deepEqual(result.movementCoverage,{status:'partial',selectedDemos:2,timedDemos:2,missingDemos:0,missingDemoIds:[],totalSeconds:8,timedSeconds:4,unknownSeconds:2,beyondSeconds:2,selectedSeconds:4,coverage:.75});
   assert.equal(A.aggregate([one,two],{...filter,sides:[]}).movementCoverage.status,'empty');
@@ -309,4 +310,121 @@ test('rounding of legacy per-cell movement durations does not invent unknown ela
   const result=A.aggregate([d],{movementTime:{start:0,end:115}});
   assert.equal(result.movementCoverage.unknownSeconds,0);assert.equal(result.movementCoverage.coverage,1);assert.equal(result.movementCoverage.status,'ready');
   assert.ok(Math.abs(A.aggregate([d]).totals.movementSeconds-6.0003)<1e-10);
+});
+
+function eventDemo(id='events', overrides={}) {
+  const d=movementDemo(id);
+  d.eventTimingVersion=1;
+  d.series[0].cells=[[0,0,0,16,9,6,15]];
+  d.series[0].eventTimeline=[
+    [0,0,0,0,2,0,0],[0,0,0,5,0,0,3],[0,0,0,5,0,1,0],
+    [0,0,0,19,4,0,0],[0,0,0,20,0,2,0],[0,0,0,114,0,0,5],
+  ];
+  d.series[0].eventUntimedCells=[[0,0,0,1,0,0,2,0,0],[0,0,0,0,2,0,0,1,0],[0,0,0,0,0,3,0,0,4]];
+  return {...d,...overrides};
+}
+const eventTotals = result => ['engagements','deaths','shots'].map(metric=>result.totals[metric]);
+
+test('the existing time range filters all four heatmap layers with half-open boundaries and independent event counts', () => {
+  const d=eventDemo(),before=structuredClone(d);
+  const ranges=[[0,5],[5,20],[20,115]].map(([start,end])=>A.aggregate([d],{movementTime:{start,end}}));
+  assert.deepEqual(ranges.map(eventTotals),[[2,0,0],[4,1,3],[0,2,5]]);
+  assert.deepEqual(ranges.map(r=>r.totals.movementSeconds),[2,5,5]);
+  assert.deepEqual(eventTotals(A.aggregate([d],{movementTime:{start:114,end:115}})),[0,0,5]);
+  const all=A.aggregate([d],{movementTime:{start:0,end:115}});
+  assert.deepEqual(eventTotals(all),[6,3,8]);
+  for(const metric of ['engagements','deaths','shots']) {
+    assert.equal(ranges.reduce((sum,result)=>sum+result.totals[metric],0),all.totals[metric]);
+    const coverage=all.heatmapCoverage[metric];
+    assert.equal(coverage.timedCount+coverage.unknownCount+coverage.beyondCount,A.aggregate([d]).totals[metric]);
+    assert.equal(coverage.selectedCount,coverage.timedCount);assert.equal(coverage.status,'partial');
+  }
+  assert.deepEqual(all.heatmapCoverage.engagements,{status:'partial',selectedDemos:1,timedDemos:1,missingDemos:0,missingDemoIds:[],totalCount:9,timedCount:6,unknownCount:1,beyondCount:2,selectedCount:6,coverage:8/9});
+  assert.equal(all.heatmapCoverage.movement,all.movementCoverage);
+  assert.deepEqual(d,before);
+});
+
+test('full mode keeps exact legacy cell values and movement timing evidence remains unchanged when event timing is added', () => {
+  const d=eventDemo(),legacy=structuredClone(d);delete legacy.eventTimingVersion;delete legacy.series[0].eventTimeline;delete legacy.series[0].eventUntimedCells;
+  assert.deepEqual(A.aggregate([d]),A.aggregate([legacy]));
+  assert.deepEqual(A.aggregate([d]).cells,[[0,0,0,16,9,6,15]]);
+  assert.equal(A.aggregate([d]).heatmapCoverage,null);
+  const filter={movementTime:{start:5,end:20}},modern=A.aggregate([d],filter),old=A.aggregate([legacy],filter);
+  assert.equal(modern.totals.movementSeconds,old.totals.movementSeconds);assert.deepEqual(modern.movementCoverage,old.movementCoverage);
+  assert.deepEqual(eventTotals(old),[0,0,0]);assert.equal(old.heatmapCoverage.deaths.status,'missing');
+});
+
+test('event time filtering preserves source scope and utility buckets, list and clustering under an independent utility time filter', () => {
+  const d=eventDemo();d.utilities=[timedUtility('early',3),timedUtility('middle',15),timedUtility('late',60)];
+  for(const utilityTime of ['all','0-5','5-20','50+','unknown']) {
+    const full=A.aggregate([d],{utilityTime}),range=A.aggregate([d],{utilityTime,movementTime:{start:50,end:60}});
+    assert.deepEqual(eventTotals(range),[0,0,0]);assert.equal(range.totals.movementSeconds,0);
+    for(const metric of ['demos','players','teams','rounds','utilities']) assert.equal(range.totals[metric],full.totals[metric]);
+    assert.deepEqual(range.utilities,full.utilities);assert.deepEqual(range.utilityTimeCounts,full.utilityTimeCounts);
+    assert.deepEqual(A.clusterUtilities(range.utilities),A.clusterUtilities(full.utilities));
+  }
+});
+
+test('event timelines and coverage obey map, deduplicated recordings, player IDs, team aliases, sides and floors together', () => {
+  const makeSeries=(overrides={})=>({playerId:'76561198000000001',teamId:'name:a',side:3,cells:[[0,0,-500,0,2,1,3]],movementTimeline:[],movementUntimedCells:[],eventTimeline:[[0,0,-500,5,2,0,0],[0,0,-500,5,0,1,0],[0,0,-500,5,0,0,3]],eventUntimedCells:[],...overrides});
+  const one=eventDemo('one',{series:[makeSeries(),makeSeries({playerId:'76561198000000002'}),makeSeries({side:2}),makeSeries({teamId:'name:other'}),makeSeries({cells:[[0,0,100,0,2,1,3]],eventTimeline:[[0,0,100,5,2,1,3]]})]});
+  const two=eventDemo('two',{series:[makeSeries({teamId:'name:variant'})]}),nuke=eventDemo('nuke',{map:'de_nuke'}),excluded=eventDemo('excluded');
+  const filter={map:'de_mirage',demoIds:['one','two','nuke'],playerIds:['76561198000000001'],teamAliases:{'name:a':'Team','name:variant':'TEAM'},teamIds:['alias:team'],sides:[3],floor:'lower',lowerMaxZ:0,movementTime:{start:5,end:6}};
+  const result=A.aggregate([one,two,one,nuke,excluded],filter);
+  assert.deepEqual(result.cells,[[0,0,-500,0,4,2,6]]);assert.deepEqual(eventTotals(result),[4,2,6]);
+  assert.equal(result.totals.demos,2);assert.equal(result.totals.players,1);assert.equal(result.totals.teams,1);
+  for(const metric of ['engagements','deaths','shots']) {const c=result.heatmapCoverage[metric];assert.equal(c.status,'ready');assert.equal(c.selectedDemos,2);assert.equal(c.timedDemos,2);assert.equal(c.coverage,1);}
+  for(const empty of [{sides:[]},{demoIds:[]},{playerIds:[]},{teamIds:[]}]) {
+    const result=A.aggregate([one,two],{...filter,...empty});
+    assert.deepEqual(eventTotals(result),[0,0,0]);assert.equal(result.heatmapCoverage.deaths.status,'empty');assert.equal(result.heatmapCoverage.deaths.coverage,null);
+  }
+});
+
+test('event floor evidence is independent for engagements, deaths and shots instead of inheriting mixed-metric legacy elevations', () => {
+  const d=eventDemo();d.series[0].cells=[[0,0,-490,0,3,4,6]];d.series[0].movementTimeline=[];d.series[0].movementUntimedCells=[];
+  d.series[0].eventTimeline=[[0,0,-500,5,2,0,0],[0,0,-480,5,0,3,0],[0,0,-500,5,0,0,4]];
+  d.series[0].eventUntimedCells=[[0,0,-500,1,0,0,0,0,0],[0,0,-480,0,0,0,0,1,0],[0,0,-480,0,0,2,0,0,0]];
+  const filter={lowerMaxZ:-495,movementTime:{start:5,end:6}},lower=A.aggregate([d],{...filter,floor:'lower'}),upper=A.aggregate([d],{...filter,floor:'upper'});
+  assert.deepEqual(eventTotals(lower),[2,0,4]);assert.deepEqual(eventTotals(upper),[0,3,0]);
+  assert.equal(lower.heatmapCoverage.deaths.status,'empty');assert.equal(lower.heatmapCoverage.shots.coverage,1);
+  assert.equal(upper.heatmapCoverage.shots.status,'missing');assert.equal(upper.heatmapCoverage.shots.unknownCount,2);
+  assert.equal(upper.heatmapCoverage.deaths.beyondCount,1);assert.equal(upper.heatmapCoverage.deaths.status,'ready');
+  for(const metric of ['engagements','deaths','shots']) assert.equal(lower.heatmapCoverage[metric].totalCount+upper.heatmapCoverage[metric].totalCount,A.aggregate([d]).totals[metric]);
+});
+
+test('mixed upgraded and old caches do not reuse full event counts and report only metrics with observed records', () => {
+  const modern=eventDemo('modern'),old=eventDemo('old');delete old.eventTimingVersion;
+  const future=eventDemo('future',{eventTimingVersion:2}),sparse=eventDemo('sparse');sparse.series[0].cells=[[0,0,0,0,0,0,0]];sparse.series[0].eventTimeline=[];sparse.series[0].eventUntimedCells=[];sparse.series[0].movementTimeline=[];sparse.series[0].movementUntimedCells=[];
+  const result=A.aggregate([modern,old,old,future,sparse],{movementTime:{start:5,end:20}});
+  assert.deepEqual(eventTotals(result),[4,1,3]);
+  const c=result.heatmapCoverage.deaths;assert.equal(c.selectedDemos,3);assert.equal(c.timedDemos,1);assert.equal(c.missingDemos,2);assert.deepEqual(c.missingDemoIds,['old','future']);assert.equal(c.unknownCount,14);assert.equal(c.status,'partial');
+  assert.equal(A.aggregate([sparse],{movementTime:{start:0,end:115}}).heatmapCoverage.deaths.status,'empty');
+  const missing=eventDemo('missing');delete missing.series[0].eventTimeline;delete missing.series[0].eventUntimedCells;
+  const missingResult=A.aggregate([missing],{movementTime:{start:0,end:115}});assert.deepEqual(eventTotals(missingResult),[0,0,0]);assert.equal(missingResult.heatmapCoverage.deaths.unknownCount,6);assert.equal(missingResult.heatmapCoverage.deaths.status,'missing');
+});
+
+test('known events outside the interval and after countdown are distinct from unknown timing in each layer', () => {
+  const d=eventDemo();d.series[0].cells=[[0,0,0,0,2,1,3]];d.series[0].eventTimeline=[[0,0,0,5,2,0,0]];d.series[0].eventUntimedCells=[[0,0,0,0,0,0,0,1,3]];d.series[0].movementTimeline=[];d.series[0].movementUntimedCells=[];
+  const r=A.aggregate([d],{movementTime:{start:20,end:30}});
+  assert.deepEqual(eventTotals(r),[0,0,0]);
+  for(const metric of ['engagements','deaths','shots']) {const c=r.heatmapCoverage[metric];assert.equal(c.status,'ready');assert.equal(c.coverage,1);assert.equal(c.unknownCount,0);}
+  assert.equal(r.heatmapCoverage.deaths.beyondCount,1);assert.equal(r.heatmapCoverage.deaths.timedCount,0);
+});
+
+test('invalid event bins and coordinates cannot leak counts, and missing rows remain unknown rather than falsely complete', () => {
+  const d=eventDemo();d.series[0].cells=[[0,0,0,0,8,4,6]];d.series[0].eventUntimedCells=[];d.series[0].movementTimeline=[];d.series[0].movementUntimedCells=[];
+  d.series[0].eventTimeline=[[0,0,0,0,1,0,0],[0,0,0,114,0,1,2],[0,0,0,115,1,1,1],[0,0,0,-1,1,1,1],[0,0,0,.5,1,1,1],[0,0,0,'5',1,1,1],[NaN,0,0,5,1,1,1],[0,0,0,5,NaN,-1,Infinity]];
+  const r=A.aggregate([d],{movementTime:{start:0,end:115}});
+  assert.deepEqual(eventTotals(r),[1,1,2]);assert.deepEqual(['engagements','deaths','shots'].map(metric=>r.heatmapCoverage[metric].unknownCount),[7,3,4]);
+  assert.ok(r.cells.flat().every(Number.isFinite));
+});
+
+test('worker and direct shared-range aggregation produce identical independent layer coverage', () => {
+  const messages=[],sandbox={self:{postMessage:message=>messages.push(message)},importScripts(){}};
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../web/analysis-core.js'),'utf8'),sandbox,{filename:'analysis-core.js'});
+  const datasets=[eventDemo(),eventDemo(),movementDemo('old')],filter={movementTime:{start:5,end:20}},cluster={landing:128,throwing:64};
+  sandbox.self.onmessage({data:{type:'datasets',datasets}});sandbox.self.onmessage({data:{type:'compute',id:4,filter,cluster}});
+  const expected=A.aggregate(datasets,filter);expected.groups=A.clusterUtilities(expected.utilities,cluster);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages[0].result)),JSON.parse(JSON.stringify(expected)));
+  assert.deepEqual(eventTotals(expected),[4,1,3]);assert.equal(expected.heatmapCoverage.deaths.missingDemos,1);
 });

@@ -1299,26 +1299,30 @@ function textWithin(element) { return [element.textContent, ...element.children.
 function csvRows(text) { return text.replace(/^\ufeff/, '').split('\r\n').map(row => row.slice(1, -1).split('","').map(cell => cell.replace(/""/g, '"'))); }
 
 function movementDemo(id = 'movement') {
-  const demo = utilityDemo(id); demo.movementTimingVersion = 1;
-  demo.series[0].cells = [[256, 768, 0, 7, 5, 1, 10], [384, 768, 0, 5, 0, 0, 0]];
+  const demo = utilityDemo(id); demo.movementTimingVersion = 1; demo.eventTimingVersion = 1;
+  demo.series[0].cells = [[256, 768, 0, 7, 4, 1, 7], [384, 768, 0, 5, 1, 0, 3]];
   demo.series[0].movementTimeline = [[256, 768, 0, 0, 2], [256, 768, 0, 5, 3], [384, 768, 0, 20, 4], [384, 768, 0, 114, 1]];
   demo.series[0].movementUntimedCells = [[256, 768, 0, 0, 2]];
+  demo.series[0].eventTimeline = [[256, 768, 0, 0, 1, 0, 2], [256, 768, 0, 5, 2, 1, 3], [384, 768, 0, 20, 1, 0, 2], [384, 768, 0, 114, 0, 0, 1]];
+  demo.series[0].eventUntimedCells = [[256, 768, 0, 0, 0, 0, 1, 0, 2]];
   return demo;
 }
+function heatMetrics(ui) { return ['movement', 'engagements', 'deaths', 'shots'].map(key => ui.get(`metric-${key}`).textContent); }
 
-test('movement dual range displays round countdown and changes only movement while preserving existing filters and utility detail', async () => {
+test('shared heatmap range filters all four metrics while preserving existing filters and independent utility detail', async () => {
   const demo = movementDemo(), ui = await page([demo], { saved: { selectedDemos: [demo.id], selectedTeams: ['alias:squad'], selectedPlayers: [demo.players[0].id], aliases: { 'team-a': 'Squad' }, side: '3', utilityTime: '5-20', layers: ['movement', 'deaths'] } });
-  const before = viewIndependentSettings(ui.saved()), utilities = utilityCounts(ui), metrics = ['engagements', 'deaths', 'utilities'].map(key => ui.get(`metric-${key}`).textContent);
+  const before = viewIndependentSettings(ui.saved()), utilities = utilityCounts(ui), original = heatMetrics(ui), utilityTotal = ui.get('metric-utilities').textContent;
+  assert.deepEqual(original, ['12.0 秒', '5', '1', '10']);
   assert.equal(ui.get('metric-movement').textContent, '12.0 秒'); assert.match(ui.get('movement-time-label').textContent, /全部时段/); assert.equal(ui.get('movement-time-all')['aria-pressed'], 'true');
   await ui.get('utility-groups').children[0].click(); await settle(); const detail = textWithin(ui.get('utility-detail'));
   await ui.change('movement-time-end', '20'); await ui.change('movement-time-start', '5');
   assert.equal(ui.get('movement-time-label').textContent, '1:50 → 1:35'); assert.equal(ui.get('movement-time-start-value').textContent, '1:50'); assert.equal(ui.get('movement-time-end-value').textContent, '1:35');
   assert.equal(ui.get('movement-time-start')['aria-valuetext'], '倒计时 1:50，开局后 5 秒'); assert.match(ui.get('movement-time-help').textContent, /5–20 秒，含开始、不含结束/);
-  assert.equal(ui.get('metric-movement').textContent, '3.0 秒'); assert.deepEqual(['engagements', 'deaths', 'utilities'].map(key => ui.get(`metric-${key}`).textContent), metrics); assert.deepEqual(utilityCounts(ui), utilities);
+  assert.deepEqual(heatMetrics(ui), ['3.0 秒', '2', '1', '3']); assert.equal(ui.get('metric-utilities').textContent, utilityTotal); assert.deepEqual(utilityCounts(ui), utilities); assert.match(ui.get('movement-time-help').textContent, /移动、交火、死亡、开火同步筛选，道具投掷时段独立/);
   assert.deepEqual(viewIndependentSettings(ui.saved()), before); assert.deepEqual(ui.saved().movementTime, { start: 5, end: 20 }); assert.equal(ui.get('utility-detail').hidden, false); assert.equal(textWithin(ui.get('utility-detail')), detail);
   assert.match(ui.get('movement-time-coverage').textContent, /时间记录完整/); assert.match(ui.get('movement-time-coverage').textContent, /2.0 秒位于 1:55 倒计时之后/);
   await ui.get('movement-time-all').click(); await settle(); assert.equal(ui.saved().movementTime, null); assert.equal(ui.get('metric-movement').textContent, '12.0 秒'); assert.deepEqual(viewIndependentSettings(ui.saved()), before); assert.equal(ui.get('movement-time-coverage').hidden, true);
-  await ui.change('movement-time-start', '0'); assert.equal(ui.get('metric-movement').textContent, '10.0 秒', 'explicit 1:55–0:00 excludes known after-clock movement while All retains it');
+  assert.deepEqual(heatMetrics(ui), original); await ui.change('movement-time-start', '0'); assert.deepEqual(heatMetrics(ui), ['10.0 秒', '4', '1', '8'], 'explicit 1:55–0:00 excludes known after-clock events while All retains them');
 });
 
 test('movement endpoints enforce a one-second interval, persist valid numeric preferences and safely discard malformed saved ranges', async () => {
@@ -1332,32 +1336,62 @@ test('movement endpoints enforce a one-second interval, persist valid numeric pr
   const empty = await page([], { saved: { movementTime: { start: 0, end: 5 } } }); await empty.change('movement-time-end', '6'); assert.deepEqual(empty.saved().movementTime, { start: 0, end: 6 }); assert.equal(empty.get('metric-movement').textContent, '—'); assert.equal(empty.get('export-image').disabled, true);
 });
 
-test('missing movement timing never falls back to whole-match heat and partial coverage counts only observed timed movement', async () => {
+test('legacy missing timing never falls back to full heatmaps and partial coverage independently counts each timed layer', async () => {
   const legacy = dataset('legacy'), demo = movementDemo(), ui = await page([legacy], { saved: { movementTime: { start: 5, end: 20 } } });
-  assert.equal(ui.get('metric-movement').textContent, '缺少时间记录'); assert.equal(ui.hasVisibleHeat(), false); assert.match(ui.get('movement-time-coverage').textContent, /1 场旧缓存.*未用整场移动代替/); assert.equal(deaths(ui), 1);
-  ui.get('layer-deaths').checked = true; await ui.get('layer-deaths').dispatch('change'); assert.equal(ui.hasVisibleHeat(), true, 'other heat layers remain available with no movement clock');
+  assert.deepEqual(heatMetrics(ui), Array(4).fill('缺少时间记录')); assert.equal(ui.hasVisibleHeat(), false); assert.match(ui.get('movement-time-coverage').textContent, /1 场旧缓存.*未用整场数据代替/);
+  for (const label of ['移动', '交火', '死亡', '开火']) assert.match(ui.get('movement-time-coverage').textContent, new RegExp(`${label}：缺少时段记录`));
+  ui.get('layer-deaths').checked = true; await ui.get('layer-deaths').dispatch('change'); assert.equal(ui.hasVisibleHeat(), false, 'legacy death positions must not appear as in-range events');
   await ui.get('movement-time-all').click(); await settle(); assert.equal(ui.get('metric-movement').textContent, '1.7 分钟'); assert.equal(ui.get('movement-time-coverage').hidden, true);
-  const mixed = await page([legacy, demo], { saved: { movementTime: { start: 5, end: 20 } } }); assert.equal(mixed.get('metric-movement').textContent, '3.0 秒'); assert.match(mixed.get('movement-time-coverage').textContent, /1 \/ 2 场有记录/); assert.match(mixed.get('movement-time-coverage').textContent, /缺失部分未用整场数据代替/); assert.equal(deaths(mixed), 2);
+  const mixed = await page([legacy, demo], { saved: { movementTime: { start: 5, end: 20 } } }); assert.deepEqual(heatMetrics(mixed), ['3.0 秒', '2', '1', '3']); assert.match(mixed.get('movement-time-coverage').textContent, /1 \/ 2 场/); assert.match(mixed.get('movement-time-coverage').textContent, /缺失部分未用整场数据代替/);
 });
 
-test('rapid movement drags throttle requests and keep one worker compute in flight while rejecting superseded output', async () => {
-  const ui = await page([movementDemo()], { worker: true }), initial = ui.workerMessages.filter(message => message.type === 'compute').length;
+test('v4.1.4 saved movement range applies to all layers while missing event timing stays separate from valid movement', async () => {
+  const old = movementDemo('v414'); delete old.eventTimingVersion; delete old.series[0].eventTimeline; delete old.series[0].eventUntimedCells;
+  const saved = { movementTime: { start: 5, end: 20 }, selectedDemos: ['v414'], selectedPlayers: [old.players[0].id], aliases: { 'team-a': 'Saved' }, utilityTime: '5-20', layers: ['engagements', 'deaths', 'shots'] };
+  const ui = await page([old], { saved }); assert.deepEqual(ui.saved().movementTime, saved.movementTime); assert.deepEqual(ui.saved().aliases, saved.aliases);
+  assert.deepEqual(heatMetrics(ui), ['3.0 秒', '缺少时间记录', '缺少时间记录', '缺少时间记录']); assert.equal(ui.get('metric-utilities').textContent, '1'); assert.equal(ui.hasVisibleHeat(), false);
+  assert.match(ui.get('movement-time-coverage').textContent, /移动：时间记录完整/); assert.match(ui.get('movement-time-coverage').textContent, /交火：缺少时段记录/);
+  ui.get('layer-movement').checked = true; await ui.get('layer-movement').dispatch('change'); assert.equal(ui.hasVisibleHeat(), true, 'supported movement remains usable when event timing is absent');
+  const uncertain = movementDemo('partial-event-clock'); for (const row of uncertain.series[0].eventTimeline) row[6] = 0; uncertain.series[0].eventUntimedCells[0][8] = 0;
+  const modern = await page([uncertain], { saved: { movementTime: { start: 5, end: 20 } } });
+  assert.deepEqual(heatMetrics(modern), ['3.0 秒', '2', '1', '缺少时间记录']); assert.match(modern.get('movement-time-coverage').textContent, /开火：缺少时段记录（时间来源未知）/); assert.match(modern.get('movement-time-coverage').textContent, /死亡：时间记录完整/);
+});
+
+test('shared time range intersects multiple demos, map, player and CT/T selections without altering the saved interval', async () => {
+  const a = movementDemo('ct-demo'), b = movementDemo('t-demo'), c = movementDemo('other-map'), p2 = '76561198000000002'; c.map = 'de_nuke';
+  b.players[0] = { ...b.players[0], id: p2, name: 'Second player' }; b.teams[0] = { id: 'team-b', name: 'Team B', playerIds: [p2] };
+  Object.assign(b.series[0], { playerId: p2, teamId: 'team-b', side: 2 }); for (const utility of b.utilities) Object.assign(utility, { playerId: p2, teamId: 'team-b', side: 2 });
+  for (const [key, first] of [['cells', 3], ['movementTimeline', 4], ['movementUntimedCells', 3], ['eventTimeline', 4], ['eventUntimedCells', 3]]) for (const row of b.series[0][key]) for (let i = first; i < row.length; i++) row[i] *= 2;
+  const ui = await page([a, b, c], { saved: { map: 'de_mirage', movementTime: { start: 5, end: 20 } } });
+  assert.deepEqual(heatMetrics(ui), ['9.0 秒', '6', '3', '9']); assert.equal(ui.get('metric-utilities').textContent, '14');
+  await ui.change('analysis-side', '3'); assert.deepEqual(heatMetrics(ui), ['3.0 秒', '2', '1', '3']);
+  await ui.change('analysis-side', '2'); assert.deepEqual(heatMetrics(ui), ['6.0 秒', '4', '2', '6']);
+  await selectPlayer(ui, p2, false); assert.deepEqual(heatMetrics(ui), ['0.0 秒', '0', '0', '0']); assert.equal(ui.get('metric-utilities').textContent, '0');
+  await ui.change('analysis-side', 'all'); assert.deepEqual(heatMetrics(ui), ['3.0 秒', '2', '1', '3']);
+  await ui.change('analysis-map', 'de_nuke'); assert.deepEqual(heatMetrics(ui), ['3.0 秒', '2', '1', '3']); assert.equal(ui.get('metric-utilities').textContent, '7');
+  await ui.change('analysis-map', 'de_mirage'); assert.deepEqual(heatMetrics(ui), ['9.0 秒', '6', '3', '9']); assert.deepEqual(ui.saved().movementTime, { start: 5, end: 20 });
+  assert.equal(ui.parseBodies.length, 0); assert.equal(ui.reparseBodies.length, 0);
+});
+
+test('rapid range drags invalidate all heat layers and counters, throttle requests and discard superseded worker output', async () => {
+  const ui = await page([movementDemo()], { worker: true, saved: { layers: ['movement', 'engagements', 'deaths', 'shots'] } }), initial = ui.workerMessages.filter(message => message.type === 'compute').length;
   assert.equal(ui.get('metric-movement').textContent, '12.0 秒'); ui.setWorkerDeferred(true);
   await ui.input('movement-time-start', 5); await ui.input('movement-time-start', 10); await ui.input('movement-time-end', 50);
-  assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial); assert.equal(ui.get('metric-movement').textContent, '计算中…'); assert.equal(ui.hasVisibleHeat(), false); assert.equal(ui.get('export-image').disabled, true);
+  assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial); assert.deepEqual(heatMetrics(ui), Array(4).fill('计算中…')); assert.equal(ui.get('metric-utilities').textContent, '7'); assert.equal(ui.hasVisibleHeat(), false); assert.equal(ui.get('export-image').disabled, true);
   await ui.flushMovement(); assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial + 1);
   await ui.input('movement-time-start', 20); await ui.flushMovement(); await ui.input('movement-time-end', 40); await ui.flushMovement();
   assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial + 1, 'only the most recent pending request is retained behind the in-flight compute');
-  await ui.replyWorker(); assert.equal(ui.get('metric-movement').textContent, '计算中…'); assert.equal(ui.hasVisibleHeat(), false, 'superseded worker output cannot repaint the previous range');
+  await ui.replyWorker(); assert.deepEqual(heatMetrics(ui), Array(4).fill('计算中…')); assert.equal(ui.hasVisibleHeat(), false, 'superseded worker output cannot repaint any previous range layer');
   assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial + 2); assert.deepEqual(ui.workerMessages.at(-1).filter.movementTime, { start: 20, end: 40 });
-  await ui.replyWorker(); assert.equal(ui.get('metric-movement').textContent, '4.0 秒'); assert.equal(ui.get('movement-time-label').textContent, '1:35 → 1:15'); assert.equal(ui.get('export-image').disabled, false); assert.equal(ui.hasVisibleHeat(), true);
+  await ui.replyWorker(); assert.deepEqual(heatMetrics(ui), ['4.0 秒', '1', '0', '2']); assert.equal(ui.get('movement-time-label').textContent, '1:35 → 1:15'); assert.equal(ui.get('export-image').disabled, false); assert.equal(ui.hasVisibleHeat(), true);
   ui.setWorkerDeferred(false); await ui.input('movement-time-end', 21); await ui.get('movement-time-end').dispatch('change'); await settle(); assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial + 3, 'change flushes the latest range immediately'); await ui.flushMovement(); assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial + 3);
 });
 
-test('PNG export records selected countdown, elapsed interval and movement coverage without changing CSV utility timing', async () => {
+test('PNG export records all four counts, shared countdown and per-layer coverage while CSV utility timing stays independent', async () => {
   const ui = await page([movementDemo()], { saved: { movementTime: { start: 5, end: 20 }, utilityTime: '5-20' } });
   await ui.get('export-image').click(); const output = ui.canvases.at(-1), text = output.context.texts.map(item => item[0]).join('\n');
-  assert.match(text, /移动 3.0 秒 \[1:50 → 1:35\]/); assert.match(text, /开局后 5–20 秒 \[含开始，不含结束\]/); assert.match(text, /时间记录完整/); assert.ok(output.context.texts.every(([, , y]) => y < 802));
+  assert.match(text, /移动 3.0 秒 \/ 交火 2 \/ 死亡 1 \/ 开火 3 · 热力图 1:50 → 1:35/); assert.match(text, /四图层范围：开局后 5–20 秒 \[含开始，不含结束\]/);
+  for (const label of ['移动', '交火', '死亡', '开火']) assert.match(text, new RegExp(`${label}：时间记录完整`)); assert.ok(output.context.texts.every(([, , y]) => y < output.height / 2));
   await ui.get('export-csv').click(); const csv = await ui.downloads.at(-1).blob.text(); assert.match(csv, /5–20 秒/); assert.equal(csvRows(csv).length, 2); assert.equal(ui.saved().utilityTime, '5-20');
 });
 

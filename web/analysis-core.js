@@ -23,6 +23,7 @@
   const chosen = (set, value) => !set || set.has(value);
   const distance2 = (a, b) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
   const movementDuration = 115;
+  const eventMetrics = ['engagements', 'deaths', 'shots'];
   function normalizeMovementTime(value) {
     if (!value || typeof value !== 'object' || !valid(value.start) || !valid(value.end)) return null;
     let start = Math.max(0, Math.min(movementDuration, Math.round(value.start)));
@@ -65,6 +66,7 @@
     const demos = uniqueDemos(input), map = filter.map || demos[0]?.map || '';
     const movementTime = normalizeMovementTime(filter.movementTime);
     const movementCoverage = movementTime ? { status: 'empty', selectedDemos: 0, timedDemos: 0, missingDemos: 0, missingDemoIds: [], totalSeconds: 0, timedSeconds: 0, unknownSeconds: 0, beyondSeconds: 0, selectedSeconds: 0, coverage: null } : null;
+    const heatmapCoverage = movementTime ? { movement: movementCoverage, ...Object.fromEntries(eventMetrics.map(metric => [metric, { status: 'empty', selectedDemos: 0, timedDemos: 0, missingDemos: 0, missingDemoIds: [], totalCount: 0, timedCount: 0, unknownCount: 0, beyondCount: 0, selectedCount: 0, coverage: null }])) } : null;
     const ids = asSet(filter.demoIds), players = asSet(filter.playerIds), teams = asSet(filter.teamIds), sides = asSet(filter.sides?.map(Number));
     const cells = new Map(), utilities = [], seenUtilities = new Set(), includedPlayers = new Set(), includedTeams = new Set(), includedDemos = new Set();
     const utilityTimeCounts = Object.fromEntries(utilityTimeBuckets.map(bucket => [bucket.key, 0]));
@@ -77,23 +79,25 @@
       let contributed = false;
       let movementObserved = false;
       const timingAvailable = d.movementTimingVersion === 1;
+      const eventsAvailable = d.eventTimingVersion === 1, eventsObserved = [false, false, false];
       for (const series of d.series || []) {
         const playerId = String(series.playerId), teamId = teamKey(d.id, series.teamId, filter.teamAliases);
         if (!chosen(players, playerId) || !chosen(teams, teamId) || !chosen(sides, Number(series.side))) continue;
         let populated = false;
         let fullSeconds = 0, fullCellCount = 0;
+        const fullEvents = [0, 0, 0];
         for (const row of series.cells || []) {
           if (!Array.isArray(row) || row.length < 6 || !row.slice(0, 3).every(valid) || !includeFloor(row[2])) continue;
           const values = [3, 4, 5, 6].map(i => valid(row[i]) && row[i] > 0 ? row[i] : 0);
           if (!values.some(v => v > 0)) continue;
-          // A time selection changes movement only; retain the original scope
-          // counts even when this player's movement falls outside that range.
+          // Keep original scope counts even when this player's observations
+          // fall outside the shared heatmap interval.
           populated = true;
           if (movementTime) {
             fullSeconds += values[0];
             if (values[0] > 0) fullCellCount++;
-            values[0] = 0;
-            if (!values.some(v => v > 0)) continue;
+            for (let i = 0; i < 3; i++) fullEvents[i] += values[i + 1];
+            continue;
           }
           const key = `${row[0]},${row[1]},${row[2]}`;
           if (!cells.has(key)) cells.set(key, [row[0], row[1], row[2], 0, 0, 0, 0]);
@@ -138,6 +142,41 @@
           movementCoverage.beyondSeconds += beyondSeconds;
           movementCoverage.unknownSeconds += unknownSeconds;
           if (observedSeconds > 0) movementObserved = true;
+
+          const timed = [0, 0, 0], unknown = [0, 0, 0], beyond = [0, 0, 0];
+          if (eventsAvailable) for (const row of series.eventTimeline || []) {
+            if (!Array.isArray(row) || row.length < 7 || !valid(row[0]) || !valid(row[1]) || !valid(row[2]) || !includeFloor(row[2]) || !Number.isInteger(row[3]) || row[3] < 0 || row[3] >= movementDuration) continue;
+            const inRange = row[3] >= movementTime.start && row[3] < movementTime.end;
+            let target;
+            for (let i = 0; i < 3; i++) {
+              const value = row[i + 4];
+              if (!valid(value) || value <= 0) continue;
+              timed[i] += value; populated = true;
+              if (!inRange) continue;
+              if (!target) {
+                const key = `${row[0]},${row[1]},${row[2]}`;
+                if (!cells.has(key)) cells.set(key, [row[0], row[1], row[2], 0, 0, 0, 0]);
+                target = cells.get(key);
+              }
+              target[i + 4] += value; totals[eventMetrics[i]] += value;
+            }
+          }
+          if (eventsAvailable) for (const row of series.eventUntimedCells || []) {
+            if (!Array.isArray(row) || row.length < 9 || !valid(row[0]) || !valid(row[1]) || !valid(row[2]) || !includeFloor(row[2])) continue;
+            for (let i = 0; i < 3; i++) {
+              if (valid(row[i + 3]) && row[i + 3] > 0) unknown[i] += row[i + 3];
+              if (valid(row[i + 6]) && row[i + 6] > 0) beyond[i] += row[i + 6];
+            }
+          }
+          for (let i = 0; i < 3; i++) {
+            if (!eventsAvailable || (!Array.isArray(series.eventTimeline) && !Array.isArray(series.eventUntimedCells))) unknown[i] = fullEvents[i];
+            // As with movement, each metric has independent Z evidence.
+            // Integer event counts need no per-cell rounding allowance.
+            else if (selectedFloor === 'all') unknown[i] += Math.max(0, fullEvents[i] - timed[i] - unknown[i] - beyond[i]);
+            const observed = timed[i] + unknown[i] + beyond[i], coverage = heatmapCoverage[eventMetrics[i]];
+            coverage.totalCount += observed; coverage.timedCount += timed[i]; coverage.unknownCount += unknown[i]; coverage.beyondCount += beyond[i];
+            if (observed > 0) { eventsObserved[i] = true; populated = true; }
+          }
         }
         if (populated) { includedPlayers.add(playerId); includedTeams.add(teamId); contributed = true; }
       }
@@ -145,6 +184,12 @@
         movementCoverage.selectedDemos++;
         if (timingAvailable) movementCoverage.timedDemos++;
         else { movementCoverage.missingDemos++; movementCoverage.missingDemoIds.push(d.id); }
+      }
+      if (heatmapCoverage) for (let i = 0; i < 3; i++) if (eventsObserved[i]) {
+        const coverage = heatmapCoverage[eventMetrics[i]];
+        coverage.selectedDemos++;
+        if (eventsAvailable) coverage.timedDemos++;
+        else { coverage.missingDemos++; coverage.missingDemoIds.push(d.id); }
       }
       for (const u of d.utilities || []) {
         const teamId = teamKey(d.id, u.teamId, filter.teamAliases), playerId = String(u.playerId || '');
@@ -168,8 +213,16 @@
         movementCoverage.coverage = Math.min(1, (movementCoverage.timedSeconds + movementCoverage.beyondSeconds) / movementCoverage.totalSeconds);
         movementCoverage.status = movementCoverage.unknownSeconds > 1e-6 ? (movementCoverage.timedSeconds > 0 ? 'partial' : 'missing') : 'ready';
       }
+      for (const metric of eventMetrics) {
+        const coverage = heatmapCoverage[metric];
+        coverage.selectedCount = totals[metric];
+        if (coverage.totalCount > 0) {
+          coverage.coverage = Math.min(1, (coverage.timedCount + coverage.beyondCount) / coverage.totalCount);
+          coverage.status = coverage.unknownCount > 0 ? (coverage.timedCount > 0 ? 'partial' : 'missing') : 'ready';
+        }
+      }
     }
-    return { map, cells: [...cells.values()], utilities, utilityTimeCounts, totals, movementTime, movementCoverage };
+    return { map, cells: [...cells.values()], utilities, utilityTimeCounts, totals, movementTime, movementCoverage, heatmapCoverage };
   }
   function clusterUtilities(input, options = {}) {
     const landing = Math.max(1, Math.min(1024, Number(options.landing) || 128));
