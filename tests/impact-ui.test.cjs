@@ -38,7 +38,8 @@ test('impact presentation connects signed totals, per-round denominator and full
   assert.match(text(details), /死亡时手持 → 次回合开打主武器：AWP → AK-47/); assert.match(text(details), /本回合开打 → 次回合开打携带道具：4 → 3 颗（不是购买数量）/);
   assert.equal(all(row).find(item => item.tagName === 'a').href, '/?demo=demo-a&t=50');
   assert.match(text(view.root), /不是死亡导致经济变化的因果证明/); assert.match(text(view.root), /不表示真实胜率改变/);
-  assert.match(text(view.root), /最终净值统一记 0，因此击杀贡献为 \+1,000/); assert.doesNotMatch(text(view.root), /长枪杀手枪 \+500/);
+  assert.match(text(view.root), /所有优势枪击杀低档枪，只有击杀者在同回合真实死亡才保留负净值/); assert.match(text(view.root), /长枪杀手枪后同回合死亡，净值 −4、击杀贡献 \+500/);
+  assert.match(text(view.root), /狙击枪杀长枪后同回合死亡，净值 −2、击杀贡献 \+750/); assert.match(text(view.root), /证据不足不等于确认存活/); assert.doesNotMatch(text(view.root), /不论之后是否死亡/);
 });
 
 test('unknown and ineligible deaths retain exclusions rather than displaying a raw penalty as counted', () => {

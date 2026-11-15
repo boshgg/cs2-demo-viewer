@@ -113,6 +113,30 @@ test('cross-demo legacy mismatch scores remain authoritative without a zero-adju
   assert.equal(rows[1].children[4].textContent, '-1'); assert.match(content(rows[1]), /基础 -1 × 1 = -1/); assert.doesNotMatch(content(rows[1]), /特殊规则归零/);
 });
 
+test('cross-demo advantage death adjustments include non-pistol victims and stay fixed through map, player and side filters', async () => {
+  const data = fixtures(), specs = [[5, 1, -4, true], [7, 5, -2, true], [5, 2, 0, null], [7, 2, 0, false]], names = { 1: 'Glock-18', 2: 'MP9', 5: 'AK-47', 7: 'AWP' };
+  for (const [index, demo] of data.entries()) {
+    demo.ruleVersion = '5'; const [killerValue, victimValue, score, died] = specs[index];
+    Object.assign(demo.kills[0], { weapon: names[killerValue], victimWeapon: names[victimValue], killerValue, victimValue, baseScore: victimValue - killerValue, scoreMultiplier: 1, score, scoreAdjustment: died === true ? 'advantage_kill_round_death' : 'advantage_kill_zero', killerDiedInRound: died, killerDeathTime: died ? 58 : null });
+    Object.assign(demo.kills[1], { score: index === 1 ? -1 : 0, scoreAdjustment: index === 1 ? 'advantage_kill_round_death' : 'advantage_kill_zero', killerDiedInRound: index === 1, killerDeathTime: index === 1 ? 65 : null });
+    const event = kill => ({ index: kill.index, time: kill.time, round: 1, half: 1, playerId: kill.killerId, player: kill.killer, side: kill.killerSide, teamKey: kill.killerSide === 3 ? 'ct' : 't' });
+    demo.impact = { version: '1', warnings: [], rounds: demo.kills.filter(kill => kill.killerId).map(kill => ({ ...event(kill), eligible: true })), kills: demo.kills.filter(kill => kill.killerId).map(kill => ({ ...event(kill), score: 1000 + 125 * kill.score, reason: `1,000 + 125 × 最终净值 ${kill.score}` })), deaths: demo.kills.filter(kill => kill.killerId && kill.killerDiedInRound === true).map(kill => ({ ...event(kill), time: kill.killerDeathTime, penalty: -1000, corePenalty: 1000, economyPenalty: 0 })) };
+  }
+  const before = structuredClone(data), ui = await page({ datasets: data }); await ui.click('multi-demos-all'); await ui.click('multi-analyze');
+  assert.equal(ui.get('multi-total-score').textContent, '-7'); assert.equal(ui.get('multi-pistol-mismatch').textContent, '5');
+  const rows = ui.get('multi-kill-rows').children, sniper = rows.find(row => content(row).includes('AWP（7） → AK-47（5）'));
+  assert.ok(sniper); assert.equal(sniper.children[4].textContent, '-2'); assert.match(content(sniper), /基础 -2 × 1 = -2 → 本回合死亡，保留负净值 → 最终 -2/); assert.match(content(sniper), /本回合死亡时间 00:58/); assert.notEqual(sniper.className, 'pistol-mismatch-row');
+  assert.match(content(ui.get('multi-kill-rows')), /存活证据不足，不视为确认存活/);
+  const root = ui.get('multi-impact'); assert.equal(impactNode(root, 'killContribution').textContent, '+7,125'); assert.equal(impactNode(root, 'deathPenalty').textContent, '-3,000'); assert.equal(impactNode(root, 'combined').textContent, '+4,125');
+  await ui.click('multi-players-none'); await ui.checkPlayer(p1); assert.equal(ui.get('multi-total-score').textContent, '-6'); assert.equal(ui.get('multi-pistol-mismatch').textContent, '1'); assert.equal(impactNode(root, 'combined').textContent, '+1,250');
+  assert.equal(ui.get('multi-kill-rows').children.length, 4); assert.match(content(ui.get('multi-kill-rows')), /本回合死亡时间 00:58/, 'backend death evidence remains even with enemy killer rows outside the selected players');
+  await ui.change('multi-map', 'de_anubis'); assert.equal(ui.get('multi-total-score').textContent, '-6'); assert.equal(impactNode(root, 'combined').textContent, '-750');
+  await ui.click('multi-players-all'); await ui.change('multi-side', '2'); assert.equal(ui.get('multi-total-score').textContent, '-1'); assert.equal(ui.get('multi-pistol-mismatch').textContent, '2'); assert.equal(impactNode(root, 'combined').textContent, '+875');
+  await ui.change('multi-side', 'all'); await ui.change('multi-map', 'de_ancient'); await ui.click('multi-players-none'); await ui.checkPlayer(p1); assert.equal(ui.get('multi-total-score').textContent, '0'); assert.equal(impactNode(root, 'combined').textContent, '+2,000');
+  for (const row of ui.get('multi-kill-rows').children) { assert.match(content(row), /本回合未记录死亡，净值归零 → 最终 0/); assert.doesNotMatch(content(row), /基础 -[35] × 1 = 0/); }
+  assert.equal(reportRequests(ui).length, 4); assert.deepEqual(data, before);
+});
+
 test('single mode remains separate and multi mode never parses or reads reports until an explicit selection', async () => {
   const ui = await page({ href: 'http://127.0.0.1:9999/statistics.html?demo=a&view=stats#chart' });
   assert.equal(ui.get('stats-single-view').hidden, false); assert.equal(ui.requests.length, 0);

@@ -9,6 +9,17 @@
   const isNumber = value => typeof value === 'number' && Number.isFinite(value);
   const emptySummary = () => ({ kills: 0, scoredKills: 0, excludedKills: 0, score: 0, deaths: 0, headshots: 0, pistolMismatchKills: 0 });
   const isPistolMismatch = kill => !kill.excludedReason && isNumber(kill.score) && [2, 5].includes(kill.killerValue) && kill.victimValue === 1;
+  function scoreAdjustmentEvidence(kill) {
+    if (kill.excludedReason || !isNumber(kill.score)) return null;
+    // Adjustment and round survival come from the complete backend report,
+    // never from whichever kills happen to remain visible after filtering.
+    if (kill.scoreAdjustment === 'pistol_mismatch_zero' && isPistolMismatch(kill) && kill.score === 0) return { code: kill.scoreAdjustment, suffix: ' → 特殊规则归零 → 最终 0', title: '旧版特了几个归零规则；累计沿用这份报告的最终净值', note: kill.scoreReason || '旧版特了几个规则：净值记 0；死亡由死亡影响模块计算。重新读取报告可应用新版同回合死亡规则，无需重新解析 Demo。' };
+    const advantage = [1, 2, 5, 7].includes(kill.killerValue) && [1, 2, 5, 7].includes(kill.victimValue) && kill.killerValue > kill.victimValue;
+    if (!advantage) return null;
+    if (kill.scoreAdjustment === 'advantage_kill_zero' && kill.score === 0 && kill.killerDiedInRound !== true) return { code: kill.scoreAdjustment, suffix: ' → 本回合未记录死亡，净值归零 → 最终 0', title: '优势枪击杀：未记录同回合死亡，后端最终净值为零', note: kill.scoreReason || '优势枪击杀：本回合未记录死亡，净值归零。', survival: kill.killerSurvivalReason || (kill.killerDiedInRound === false ? '本回合末段确认存活。' : '未记录到本回合死亡；存活证据不足，不视为确认存活。') };
+    if (kill.scoreAdjustment === 'advantage_kill_round_death' && kill.score < 0 && kill.killerDiedInRound === true) return { code: kill.scoreAdjustment, suffix: ' → 本回合死亡，保留负净值', title: '优势枪击杀：后端记录同回合真实死亡，保留负净值', note: kill.scoreReason || '优势枪击杀：本回合死亡，保留负净值。', survival: kill.killerSurvivalReason || '', deathTime: kill.killerDeathTime };
+    return null;
+  }
   const scopeMatches = (kill, filter) => (!filter.round || String(kill.round) === String(filter.round)) && (!filter.half || String(kill.half) === String(filter.half));
   const participantMatches = (kill, role, filter) => (!filter.side || String(kill[`${role}Side`]) === String(filter.side)) && (!filter.player || kill[`${role}Id`] === filter.player) && (!filter.team || kill[`${role}TeamKey`] === filter.team);
   function scoreKill(summary, kill) {
@@ -365,18 +376,22 @@
         const scored = !kill.excludedReason && isNumber(kill.score);
         const reason = cell(row, kill.excludedReason || (scored ? '计入累计净值' : '缺少有效分数，不计分'), 'reason');
         if (scored) {
-          const zeroAdjusted = kill.scoreAdjustment === 'pistol_mismatch_zero' && mismatch && kill.score === 0;
+          const adjustment = scoreAdjustmentEvidence(kill);
           if (isNumber(kill.baseScore) && Number.isInteger(kill.scoreMultiplier) && kill.scoreMultiplier >= 1 && kill.scoreMultiplier <= 4 && isNumber(kill.baseScore * kill.scoreMultiplier)) {
             // This product explains the original formula only. All totals use
             // the backend's final score, including explicit rule adjustments.
             const original = kill.baseScore * kill.scoreMultiplier;
             let evidence = `基础 ${signed(kill.baseScore)} × ${format(kill.scoreMultiplier)} = ${signed(original)}`;
-            if (zeroAdjusted) evidence += ' → 特殊规则归零 → 最终 0';
+            if (adjustment) evidence += adjustment.suffix + (adjustment.code === 'advantage_kill_round_death' ? ` → 最终 ${signed(kill.score)}` : '');
             else if (original !== kill.score) evidence += `；后端最终净值 ${signed(kill.score)}（调整依据未提供）`;
             const formula = make('span', evidence, 'score-formula');
-            formula.title = zeroAdjusted ? '常规公式计算结果，经特了几个规则调整为零' : original === kill.score ? '基础分 × 奖励倍数 = 最终净值' : '原公式与报告最终净值分别显示，累计使用报告最终净值'; formula.dataset.scoreFormula = 'true'; reason.append(formula);
+            formula.title = adjustment ? adjustment.title : original === kill.score ? '基础分 × 奖励倍数 = 最终净值' : '原公式与报告最终净值分别显示，累计使用报告最终净值'; formula.dataset.scoreFormula = 'true'; reason.append(formula);
           } else reason.append(make('small', '未提供基础分或倍数明细，沿用现有得分。', 'score-detail-unavailable'));
-          if (zeroAdjusted) { reason.dataset.scoreAdjustment = 'pistol_mismatch_zero'; reason.append(make('small', kill.scoreReason || '特了几个：净值记 0；死亡由死亡影响模块计算，不在此击杀中追加扣分。', 'score-adjustment-note')); }
+          if (adjustment) {
+            reason.dataset.scoreAdjustment = adjustment.code; reason.append(make('small', adjustment.note, 'score-adjustment-note'));
+            if (adjustment.code === 'advantage_kill_round_death') reason.append(make('small', isNumber(adjustment.deathTime) ? `本回合死亡时间 ${clock(adjustment.deathTime)}（Demo 时间）` : '已记录本回合死亡；死亡时间未提供。', 'score-survival-note'));
+            if (adjustment.survival) reason.append(make('small', adjustment.survival, 'score-survival-note'));
+          }
         }
         reason.append(make('small', `${sourceLabels[kill.weaponSource] || '来源未知'}${isNumber(kill.weaponTime) ? ` · ${clock(kill.weaponTime)}` : ''}`));
         if (kill.approx || ['sampled_cache', 'sampled_frame'].includes(kill.weaponSource)) reason.append(make('span', kill.weaponSource === 'previous_tick' ? '近似 · 前一 tick' : kill.weaponSource === 'sampled_frame' ? '近似 · 邻近帧' : '近似 · 采样推断', 'approx-badge'));
@@ -400,5 +415,5 @@
     const ready = reloadLibrary().then(async () => { const params = new URL(win.location.href).searchParams; if (params.get('mode') === 'multi') return; const id = params.get('demo'); if (id) { const demo = state.catalog.find(item => item.id === id); if (demo) await selectDemo(demo); else setError('链接中的录像不在本地资料库，请刷新后重新选择。'); } });
     return { ready };
   }
-  return { summarize, rankPlayers, visibleKills, isPistolMismatch, loadStatistics, create };
+  return { summarize, rankPlayers, visibleKills, isPistolMismatch, scoreAdjustmentEvidence, loadStatistics, create };
 });

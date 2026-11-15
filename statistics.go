@@ -12,7 +12,7 @@ import (
 
 // Bump when scoring or classification rules change; persisted replay bytes do
 // not need to be rewritten to rebuild this derived, compact report.
-const StatisticsVersion = "4"
+const StatisticsVersion = "5"
 
 type EconomySnapshot struct {
 	Time       float64       `json:"time"`
@@ -98,33 +98,36 @@ type StatisticsRound struct {
 	Players    []StatisticsPlayer `json:"players"`
 }
 type KillScore struct {
-	Index           int     `json:"index"`
-	Time            float64 `json:"time"`
-	Round           int     `json:"round"`
-	Half            int     `json:"half"`
-	KillerID        string  `json:"killerId"`
-	Killer          string  `json:"killer"`
-	VictimID        string  `json:"victimId"`
-	Victim          string  `json:"victim"`
-	KillerSide      int     `json:"killerSide"`
-	VictimSide      int     `json:"victimSide"`
-	KillerTeamKey   string  `json:"killerTeamKey"`
-	VictimTeamKey   string  `json:"victimTeamKey"`
-	Weapon          string  `json:"weapon"`
-	VictimWeapon    string  `json:"victimWeapon"`
-	KillerValue     *int    `json:"killerValue"`
-	VictimValue     *int    `json:"victimValue"`
-	BaseScore       *int    `json:"baseScore"`
-	ScoreMultiplier *int    `json:"scoreMultiplier"`
-	Score           *int    `json:"score"`
-	ScoreAdjustment string  `json:"scoreAdjustment"`
-	ScoreReason     string  `json:"scoreReason"`
-	WeaponSource    string  `json:"weaponSource"`
-	WeaponTime      float64 `json:"weaponTime"`
-	Approx          bool    `json:"approx"`
-	ExcludedReason  string  `json:"excludedReason"`
-	Headshot        bool    `json:"headshot"`
-	PistolMismatch  bool    `json:"pistolMismatch"`
+	Index                int      `json:"index"`
+	Time                 float64  `json:"time"`
+	Round                int      `json:"round"`
+	Half                 int      `json:"half"`
+	KillerID             string   `json:"killerId"`
+	Killer               string   `json:"killer"`
+	VictimID             string   `json:"victimId"`
+	Victim               string   `json:"victim"`
+	KillerSide           int      `json:"killerSide"`
+	VictimSide           int      `json:"victimSide"`
+	KillerTeamKey        string   `json:"killerTeamKey"`
+	VictimTeamKey        string   `json:"victimTeamKey"`
+	Weapon               string   `json:"weapon"`
+	VictimWeapon         string   `json:"victimWeapon"`
+	KillerValue          *int     `json:"killerValue"`
+	VictimValue          *int     `json:"victimValue"`
+	BaseScore            *int     `json:"baseScore"`
+	ScoreMultiplier      *int     `json:"scoreMultiplier"`
+	Score                *int     `json:"score"`
+	ScoreAdjustment      string   `json:"scoreAdjustment"`
+	ScoreReason          string   `json:"scoreReason"`
+	KillerDiedInRound    *bool    `json:"killerDiedInRound"`
+	KillerDeathTime      *float64 `json:"killerDeathTime"`
+	KillerSurvivalReason string   `json:"killerSurvivalReason"`
+	WeaponSource         string   `json:"weaponSource"`
+	WeaponTime           float64  `json:"weaponTime"`
+	Approx               bool     `json:"approx"`
+	ExcludedReason       string   `json:"excludedReason"`
+	Headshot             bool     `json:"headshot"`
+	PistolMismatch       bool     `json:"pistolMismatch"`
 }
 type StatisticsDemo struct {
 	ID          string             `json:"id"`
@@ -600,13 +603,6 @@ func statisticsScore(d *DemoData, e Event, index int, r *StatisticsRound, frames
 		k.Score = &score
 	}
 	k.PistolMismatch = statisticsPistolMismatch(k)
-	if k.PistolMismatch {
-		// Keep the weapon matchup and multiplier as audit evidence. This final
-		// exception is unconditional: a later death is charged only by impact.
-		*k.Score = 0
-		k.ScoreAdjustment = "pistol_mismatch_zero"
-		k.ScoreReason = "冲锋枪/长枪击杀手枪净值统一为 0；死亡只由死亡影响模块另行扣分"
-	}
 	return k
 }
 
@@ -855,6 +851,7 @@ func BuildStatistics(d *DemoData) *StatisticsDemo {
 		out.Kills = append(out.Kills, statisticsScore(d, e, index, r, frames[e.Round], names, teamAt[e.Round]))
 	}
 	sort.SliceStable(out.Kills, func(i, j int) bool { return out.Kills[i].Time < out.Kills[j].Time })
+	applyStatisticsRoundDeathRule(d, out.Kills, rounds, snapshots, frames)
 	out.Summary, out.Players = statisticsAggregate(out.Kills, names, func(KillScore, bool) bool { return true })
 	// Include observed players with zero events in every selected scope.
 	allIDs := map[string]bool{}

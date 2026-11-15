@@ -424,6 +424,41 @@ function mismatchFixture() {
 function mismatchCellValue(row) { return Number(row.children.find(cell => cell.dataset.metric === 'pistol-mismatch')?.textContent); }
 function highlightedKills(ui) { return ui.get('stats-kill-rows').children.filter(row => row.dataset.pistolMismatch === 'true'); }
 
+test('all six advantage matchups audit backend round death, confirmed survival and unknown evidence without changing scores', () => {
+  for (const [killerValue, victimValue] of [[2, 1], [5, 1], [5, 2], [7, 1], [7, 2], [7, 5]]) {
+    const baseScore = victimValue - killerValue, common = { killerValue, victimValue, baseScore, scoreMultiplier: 1 };
+    const dead = { ...common, score: baseScore, scoreAdjustment: 'advantage_kill_round_death', killerDiedInRound: true, killerDeathTime: 82 };
+    const audit = statistics.scoreAdjustmentEvidence(dead);
+    assert.equal(audit.code, 'advantage_kill_round_death'); assert.equal(audit.deathTime, 82); assert.match(audit.suffix, /本回合死亡，保留负净值/);
+    for (const killerDiedInRound of [false, null]) {
+      const zero = { ...common, score: 0, scoreAdjustment: 'advantage_kill_zero', killerDiedInRound, killerDeathTime: null }, before = structuredClone(zero);
+      const evidence = statistics.scoreAdjustmentEvidence(zero); assert.match(evidence.suffix, /本回合未记录死亡，净值归零/);
+      assert.match(evidence.survival, killerDiedInRound === false ? /末段确认存活/ : /存活证据不足，不视为确认存活/); assert.deepEqual(zero, before);
+      assert.equal(statistics.isPistolMismatch(zero), [2, 5].includes(killerValue) && victimValue === 1);
+    }
+    for (const invalid of [{ ...dead, killerDiedInRound: null }, { ...dead, score: 0 }, { ...dead, excludedReason: '无效事件' }, { ...dead, killerValue: null }, { ...dead, scoreAdjustment: '' }, { ...dead, score: 0, scoreAdjustment: 'advantage_kill_zero' }]) assert.equal(statistics.scoreAdjustmentEvidence(invalid), null, 'conflicting or missing adjustment evidence cannot imply a new rule');
+  }
+});
+
+test('single-demo survival-adjusted formulas, highlights and totals remain authoritative when the death event is filtered out', async () => {
+  const data = fixture(), base = data.kills[0]; data.ruleVersion = '5';
+  const kill = (index, killerId, weapon, victimWeapon, killerValue, victimValue, score, died, adjustment) => ({ ...base, index, time: 20 + index, killerId, killer: killerId === 'p1' ? 'Alice' : 'Bob', weapon, victimWeapon, killerValue, victimValue, baseScore: victimValue - killerValue, scoreMultiplier: score > 0 ? 4 : 1, score, scoreAdjustment: adjustment, killerDiedInRound: died, killerDeathTime: died ? 90 : null });
+  data.kills = [kill(1, 'p1', 'AK-47', 'Glock-18', 5, 1, -4, true, 'advantage_kill_round_death'), kill(2, 'p1', 'AWP', 'AK-47', 7, 5, -2, true, 'advantage_kill_round_death'), kill(3, 'p2', 'MP9', 'Glock-18', 2, 1, 0, false, 'advantage_kill_zero'), kill(4, 'p2', 'AK-47', 'MP9', 5, 2, 0, null, 'advantage_kill_zero'), kill(5, 'p1', 'Glock-18', 'AWP', 1, 7, 24, true, '')];
+  data.kills.push({ ...data.kills[4], index: 6, time: 90, killerId: 'v1', killer: 'Cathy', killerTeamKey: 'beta', killerSide: 2, victimId: 'p1', victim: 'Alice', victimTeamKey: 'alpha', victimSide: 3, killerDiedInRound: false, killerDeathTime: null });
+  const before = structuredClone(data), ui = await page({ datasets: [data] }); await ui.choose('match');
+  assert.equal(ui.get('stats-total-score').textContent, '+42'); assert.equal(ui.get('stats-pistol-mismatch-kills').textContent, '2');
+  const rows = ui.get('stats-kill-rows').children;
+  assert.match(content(rows[0]), /基础 -4 × 1 = -4 → 本回合死亡，保留负净值 → 最终 -4/); assert.match(content(rows[0]), /本回合死亡时间 01:30（Demo 时间）/);
+  assert.match(content(rows[1]), /基础 -2 × 1 = -2 → 本回合死亡，保留负净值 → 最终 -2/); assert.equal(rows[1].dataset.pistolMismatch, 'false', 'sniper kills remain outside the gold metric');
+  assert.match(content(rows[2]), /基础 -1 × 1 = -1 → 本回合未记录死亡，净值归零 → 最终 0/); assert.match(content(rows[2]), /末段确认存活/);
+  assert.match(content(rows[3]), /基础 -3 × 1 = -3 → 本回合未记录死亡，净值归零 → 最终 0/); assert.match(content(rows[3]), /存活证据不足，不视为确认存活/);
+  assert.match(content(rows[4]), /基础 \+6 × 4 = \+24/); assert.doesNotMatch(content(rows[4]), /保留负净值|净值归零/);
+  await ui.change('stats-team', 'alpha'); await ui.change('stats-player', 'p1'); await ui.change('stats-side', '3'); await ui.change('stats-round', '1');
+  assert.equal(ui.get('stats-total-score').textContent, '+18'); assert.equal(ui.get('stats-pistol-mismatch-kills').textContent, '1'); assert.equal(ui.get('stats-kill-rows').children.length, 3);
+  assert.match(content(ui.get('stats-kill-rows').children[0]), /本回合死亡时间 01:30/); assert.match(content(ui.get('stats-kill-rows').children[1]), /最终 -2/);
+  assert.equal(ui.get('stats-kill-rows').children.some(row => row.dataset.killIndex === '6'), false, 'the actual death event is no longer in the visible list'); assert.deepEqual(data, before);
+});
+
 test('zero-adjusted pistol mismatches keep counts and gold highlights while showing the true original calculation and final zero', async () => {
   const data = mismatchFixture(); data.ruleVersion = '4';
   for (const kill of data.kills) if (statistics.isPistolMismatch(kill)) Object.assign(kill, { baseScore: kill.victimValue - kill.killerValue, scoreMultiplier: 1, score: 0, scoreAdjustment: 'pistol_mismatch_zero', scoreReason: '特了几个：净值记 0；死亡由死亡影响模块计算。' });

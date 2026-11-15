@@ -135,16 +135,20 @@
         td(row, kill.excludedReason ? '不计分' : signed(kill.score), kill.score > 0 ? 'value-positive' : kill.score < 0 ? 'value-negative' : 'value-zero').dataset.metric = 'score';
         const reason = td(row, kill.excludedReason || (finite(kill.score) ? '计入累计净值' : '缺少有效分数'), 'reason');
         if (!kill.excludedReason && finite(kill.score)) {
-          const zeroAdjusted = kill.scoreAdjustment === 'pistol_mismatch_zero' && mismatch && kill.score === 0;
+          const adjustment = statistics.scoreAdjustmentEvidence(kill);
           if (finite(kill.baseScore) && Number.isInteger(kill.scoreMultiplier) && kill.scoreMultiplier >= 1 && kill.scoreMultiplier <= 4 && finite(kill.baseScore * kill.scoreMultiplier)) {
             const original = kill.baseScore * kill.scoreMultiplier;
             let evidence = `基础 ${signed(kill.baseScore)} × ${kill.scoreMultiplier} = ${signed(original)}`;
-            if (zeroAdjusted) evidence += ' → 特殊规则归零 → 最终 0';
+            if (adjustment) evidence += adjustment.suffix + (adjustment.code === 'advantage_kill_round_death' ? ` → 最终 ${signed(kill.score)}` : '');
             else if (original !== kill.score) evidence += `；后端最终净值 ${signed(kill.score)}（调整依据未提供）`;
             reason.append(node('span', evidence, 'score-formula'));
           }
           else reason.append(node('small', '未提供基础分或倍数明细，沿用现有得分。'));
-          if (zeroAdjusted) { reason.dataset.scoreAdjustment = 'pistol_mismatch_zero'; reason.append(node('small', kill.scoreReason || '特了几个：净值记 0；死亡由死亡影响模块计算，不在此击杀中追加扣分。', 'score-adjustment-note')); }
+          if (adjustment) {
+            reason.dataset.scoreAdjustment = adjustment.code; reason.append(node('small', adjustment.note, 'score-adjustment-note'));
+            if (adjustment.code === 'advantage_kill_round_death') reason.append(node('small', finite(adjustment.deathTime) ? `本回合死亡时间 ${Math.floor(adjustment.deathTime / 60).toString().padStart(2, '0')}:${Math.floor(adjustment.deathTime % 60).toString().padStart(2, '0')}（Demo 时间）` : '已记录本回合死亡；死亡时间未提供。', 'score-survival-note'));
+            if (adjustment.survival) reason.append(node('small', adjustment.survival, 'score-survival-note'));
+          }
         }
         reason.append(node('small', sourceLabels[kill.weaponSource] || '来源未知'));
         if (kill.approx || ['previous_tick', 'sampled_cache', 'sampled_frame'].includes(kill.weaponSource)) reason.append(node('span', `近似 · ${sourceLabels[kill.weaponSource] || '观测推断'}`, 'approx-badge'));

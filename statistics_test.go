@@ -247,13 +247,13 @@ func TestStatisticsActualKillWeaponAndVictimActiveWeaponScoring(t *testing.T) {
 	d := statsDemo(append(statsSquad(3, "AWP", 0, 100, nil), statsSquad(2, "AWP", 0, 100, nil)...))
 	d.Events = []Event{statsKill("Glock-18", "AWP"), statsKill("AWP", "Glock-18"), statsKill("AK-47", "M4A4"), statsKill("Nova", "Negev")}
 	got := BuildStatistics(d)
-	want := []int{24, -6, 0, 0}
+	want := []int{24, 0, 0, 0}
 	for i, k := range got.Kills {
 		if k.Score == nil || *k.Score != want[i] || k.Approx || k.WeaponSource != "death_event" {
 			t.Fatalf("kill %d wrong: %+v", i, k)
 		}
 	}
-	if got.Summary.ScoredKills != 4 || got.Summary.Score != 18 || got.Summary.Average == nil || *got.Summary.Average != 4.5 {
+	if got.Summary.ScoredKills != 4 || got.Summary.Score != 24 || got.Summary.Average == nil || *got.Summary.Average != 6 {
 		t.Fatalf("weighted totals or averages are wrong: %+v", got.Summary)
 	}
 }
@@ -302,7 +302,7 @@ func TestStatisticsLegacyDeathUsesNearestAliveActiveOnly(t *testing.T) {
 	dead.Weapon = "Knife"
 	d.Frames = []Frame{{Round: 2, T: 28, Players: []PlayerFrame{old}}, {Round: 2, T: 29.9, Players: []PlayerFrame{recent}}, {Round: 2, T: 30, Players: []PlayerFrame{dead}}, {Round: 2, T: 31, Players: []PlayerFrame{old}}}
 	k := BuildStatistics(d).Kills[0]
-	if k.Score == nil || *k.Score != 0 || k.BaseScore == nil || *k.BaseScore != -4 || k.ScoreAdjustment != "pistol_mismatch_zero" || k.VictimWeapon != "Glock-18" || !k.Approx || k.WeaponTime != 29.9 || k.WeaponSource != "sampled_cache" {
+	if k.Score == nil || *k.Score != 0 || k.BaseScore == nil || *k.BaseScore != -4 || k.ScoreAdjustment != "advantage_kill_zero" || k.VictimWeapon != "Glock-18" || !k.Approx || k.WeaponTime != 29.9 || k.WeaponSource != "sampled_cache" {
 		t.Fatalf("used dead/future/backpack weapon: %+v", k)
 	}
 	d.Frames = []Frame{{Round: 1, T: 29, Players: []PlayerFrame{old}}}
