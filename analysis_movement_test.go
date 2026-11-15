@@ -228,11 +228,18 @@ func TestMovementUpgradeFailureRetainsUtilityTimingAndRetries(t *testing.T) {
 			hash := fileHash(t, j.analysisResult)
 			switch variant {
 			case "missing":
-				os.Remove(j.result)
+				if err := os.Remove(j.result); err != nil {
+					t.Fatal(err)
+				}
 			case "crc":
-				b, _ := os.ReadFile(j.result)
+				b, err := os.ReadFile(j.result)
+				if err != nil {
+					t.Fatal(err)
+				}
 				b[len(b)-8] ^= 1
-				os.WriteFile(j.result, b, 0600)
+				if err := os.WriteFile(j.result, b, 0600); err != nil {
+					t.Fatal(err)
+				}
 			case "missingframes":
 				copy := *d
 				copy.Frames = nil
@@ -257,7 +264,7 @@ func TestMovementUpgradeFailureRetainsUtilityTimingAndRetries(t *testing.T) {
 					t.Fatal("missing movement evidence was guessed")
 				}
 			}
-			writeFixtureGzip(t, j.result, d)
+			restoreChangedAnalysisReplay(t, j.result, d, a.analysisUpgradeFailures[j.ID].Replay)
 			fixed := readAnalysisResponse(t, localRequest(a.handler(), "GET", "/api/demos/"+j.ID+"/analysis"))
 			if string(fixed["movementTimingVersion"]) != "1" {
 				t.Fatal("restored replay did not retry")

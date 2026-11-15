@@ -15,6 +15,26 @@ import (
 	"time"
 )
 
+// A restored same-size fixture can retain its previous modification timestamp
+// after a rapid rewrite on Windows. Immediate retry is deliberately keyed by
+// file metadata, so model an observable cache replacement instead of relying on
+// wall-clock resolution. Keep the unchanged-fingerprint throttle tests intact.
+func restoreChangedAnalysisReplay(t *testing.T, path string, value any, previous analysisCacheFingerprint) {
+	t.Helper()
+	writeFixtureGzip(t, path, value)
+	modified := time.Unix(0, previous.Modified).Add(2 * time.Second)
+	if !previous.Exists {
+		modified = time.Now().Add(2 * time.Second)
+	}
+	if err := os.Chtimes(path, modified, modified); err != nil {
+		t.Fatal(err)
+	}
+	current := analysisFingerprint(path)
+	if !current.Exists || current == previous {
+		t.Fatalf("restored replay must change its fingerprint: before=%+v after=%+v", previous, current)
+	}
+}
+
 func legacyAnalysisFixture(t *testing.T, a *app, id string) (*job, *DemoData, map[string]json.RawMessage) {
 	t.Helper()
 	j, _ := statisticsFixture(t, a, id, id, "legacy.dem")
@@ -148,13 +168,22 @@ func TestAnalysisTimingUpgradeFailureKeepsLegacySummaryReadable(t *testing.T) {
 			originalHash := fileHash(t, j.analysisResult)
 			switch variant {
 			case "missing":
-				os.Remove(j.result)
+				if err := os.Remove(j.result); err != nil {
+					t.Fatal(err)
+				}
 			case "gzip":
-				os.WriteFile(j.result, []byte("invalid gzip"), 0600)
+				if err := os.WriteFile(j.result, []byte("invalid gzip"), 0600); err != nil {
+					t.Fatal(err)
+				}
 			case "crc":
-				raw, _ := os.ReadFile(j.result)
+				raw, err := os.ReadFile(j.result)
+				if err != nil {
+					t.Fatal(err)
+				}
 				raw[len(raw)-8] ^= 1
-				os.WriteFile(j.result, raw, 0600)
+				if err := os.WriteFile(j.result, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
 			case "identity":
 				replay.ID = "wrong-demo"
 				writeFixtureGzip(t, j.result, replay)
@@ -173,7 +202,7 @@ func TestAnalysisTimingUpgradeFailureKeepsLegacySummaryReadable(t *testing.T) {
 			// Restoring the existing replay cache allows a retry without reimport,
 			// new IDs/revisions, or running the DEM parser.
 			replay.ID = j.ID
-			writeFixtureGzip(t, j.result, replay)
+			restoreChangedAnalysisReplay(t, j.result, replay, failure.Replay)
 			fixed := readAnalysisResponse(t, localRequest(a.handler(), "GET", "/api/demos/"+j.ID+"/analysis"))
 			assertAnalysisTimingOnlyPatch(t, old, fixed, true)
 		})

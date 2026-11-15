@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/common"
 )
@@ -269,11 +270,18 @@ func TestEventUpgradeFailurePreservesCacheAndRetries(t *testing.T) {
 			var lock *os.File
 			switch variant {
 			case "missing":
-				os.Remove(j.result)
+				if err := os.Remove(j.result); err != nil {
+					t.Fatal(err)
+				}
 			case "crc":
-				raw, _ := os.ReadFile(j.result)
+				raw, err := os.ReadFile(j.result)
+				if err != nil {
+					t.Fatal(err)
+				}
 				raw[len(raw)-8] ^= 1
-				os.WriteFile(j.result, raw, 0600)
+				if err := os.WriteFile(j.result, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
 			case "missingframes":
 				copy := *d
 				copy.Frames = nil
@@ -316,14 +324,55 @@ func TestEventUpgradeFailurePreservesCacheAndRetries(t *testing.T) {
 				}
 			}
 			if lock != nil {
-				lock.Close()
+				if err := lock.Close(); err != nil {
+					t.Fatal(err)
+				}
 			}
-			writeFixtureGzip(t, j.result, d)
+			restoreChangedAnalysisReplay(t, j.result, d, a.analysisUpgradeFailures[j.ID].Replay)
 			fixed := readAnalysisResponse(t, localRequest(a.handler(), "GET", "/api/demos/"+j.ID+"/analysis"))
 			if string(fixed["eventTimingVersion"]) != "1" {
 				t.Fatal("restored cache failed to retry")
 			}
 		})
+	}
+}
+
+func TestEventUpgradeRetryRequiresChangedFingerprintOrCooldown(t *testing.T) {
+	a := persistentViewer(t, t.TempDir(), t.TempDir())
+	j, d, _ := eventUpgradeFixture(t, a)
+	raw, err := os.ReadFile(j.result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[len(raw)-8] ^= 1
+	if err := os.WriteFile(j.result, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	readAnalysisResponse(t, localRequest(a.handler(), "GET", "/api/demos/"+j.ID+"/analysis"))
+	failure, found := a.analysisUpgradeFailures[j.ID]
+	if !found {
+		t.Fatal("corrupt cache failure was not tracked")
+	}
+	writeFixtureGzip(t, j.result, d)
+	unchanged := time.Unix(0, failure.Replay.Modified)
+	if err := os.Chtimes(j.result, unchanged, unchanged); err != nil {
+		t.Fatal(err)
+	}
+	if got := analysisFingerprint(j.result); got != failure.Replay {
+		t.Fatalf("same-size CRC fixture must reproduce the metadata collision: %+v != %+v", got, failure.Replay)
+	}
+	var valid analysisTimingReplay
+	if err := streamAnalysisReplay(context.Background(), j.result, &valid, nil); err != nil {
+		t.Fatalf("restored bytes must be valid despite unchanged metadata: %v", err)
+	}
+	throttled := readAnalysisResponse(t, localRequest(a.handler(), "GET", "/api/demos/"+j.ID+"/analysis"))
+	if _, upgraded := throttled["eventTimingVersion"]; upgraded || a.analysisUpgradeFailures[j.ID].At != failure.At {
+		t.Fatal("unchanged metadata must retain the existing retry cooldown")
+	}
+	restoreChangedAnalysisReplay(t, j.result, d, failure.Replay)
+	fixed := readAnalysisResponse(t, localRequest(a.handler(), "GET", "/api/demos/"+j.ID+"/analysis"))
+	if string(fixed["eventTimingVersion"]) != "1" {
+		t.Fatal("observable replacement should retry immediately")
 	}
 }
 
