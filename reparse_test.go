@@ -243,10 +243,18 @@ func TestReparseFailuresKeepBothOriginalCaches(t *testing.T) {
 				t.Fatal("changed source bypassed SHA validation")
 			}
 			if mode == "manifest-write" {
-				if err := os.Remove(manifest); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Rename(backup, manifest); err != nil {
+				// The error status is visible before processReparse's deferred
+				// save completes. Serialize fixture restoration with that writer,
+				// just as production manifest updates do, and unlock before close.
+				err := func() error {
+					a.persistMu.Lock()
+					defer a.persistMu.Unlock()
+					if err := os.Remove(manifest); err != nil {
+						return err
+					}
+					return os.Rename(backup, manifest)
+				}()
+				if err != nil {
 					t.Fatal(err)
 				}
 			}
