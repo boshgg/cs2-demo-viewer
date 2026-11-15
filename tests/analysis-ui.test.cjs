@@ -6,6 +6,7 @@ const vm = require('node:vm');
 const analysis = require('../web/analysis-core.js');
 const heatmap = require('../web/heatmap.js');
 const replayLibrary = require('../web/replay-library.js');
+const heatmapPlayback = require('../web/heatmap-playback.js');
 
 // Run the actual page script and its DOM events. Canvas records the actual
 // ImageData produced by the renderer; no private page state is exposed.
@@ -33,7 +34,8 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
   const elements = new Map(), canvases = [], downloads = [], downloadBlobs = new Map(), requests = [], timers = new Map(), parseBodies = [], reparseBodies = [], summaryFailures = new Map();
   const mapGates = new Map(), resizeObservers = [], timerDelays = new Map(), savedWrites = [];
   let nextTimer = 0, analysisCalls = 0, refreshError = '', reparseRequestError = '';
-  const workerMessages = [], workerReplies = []; let workerDeferred = false, workerDatasets = [];
+  const workerMessages = [], workerReplies = [], windowListeners = {}, documentListeners = {}; let workerDeferred = false, workerDatasets = [], lastWorker, now = 0, imageGate = null;
+  const timerDeadlines = new Map();
   class Element {
     constructor(tag = 'div') {
       this.tagName = tag; this.children = []; this.listeners = {}; this.style = {}; this.dataset = {};
@@ -176,22 +178,23 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
     static revokeObjectURL() {}
   }
   const sandbox = {
-    window: { ReplayAnalysis: { ...analysis, aggregate: (...args) => { analysisCalls++; return analysis.aggregate(...args); } }, ReplayHeatmap: heatmap, ReplayLibrary: replayLibrary, history: { state: null, replaceState: (_state, _title, url) => { location.href = String(url); } } }, document: { getElementById: get, createElement: create, addEventListener: noop },
+    window: { ReplayAnalysis: { ...analysis, aggregate: (...args) => { analysisCalls++; return analysis.aggregate(...args); } }, ReplayHeatmap: heatmap, ReplayLibrary: replayLibrary, ReplayHeatmapPlayback: heatmapPlayback, addEventListener: (type, listener) => { (windowListeners[type] ||= []).push(listener); }, history: { state: null, replaceState: (_state, _title, url) => { location.href = String(url); } } }, document: { getElementById: get, createElement: create, hidden: false, addEventListener: (type, listener) => { (documentListeners[type] ||= []).push(listener); } }, performance: { now: () => now },
     Option: function (text, value) { const option = new Element('option'); option.textContent = text; option.value = value; return option; },
-    Image: class { decode() { return Promise.resolve(); } },
+    Image: class { decode() { return imageGate || Promise.resolve(); } },
     ImageData: class { constructor(data, width, height) { this.data = data; this.width = width; this.height = height; } },
     ResizeObserver: class { constructor(callback) { resizeObservers.push(callback); } observe() {} },
     localStorage: { getItem: key => stored.get(key) ?? null, setItem: (key, value) => { stored.set(key, value); if (key === 'cs2-analysis-v4') savedWrites.push(JSON.parse(value)); } }, location,
     FormData: class { constructor() { this.values = new Map(); } append(key, value) { this.values.set(key, value); } get(key) { return this.values.get(key); } },
     AbortController, DOMException, devicePixelRatio: 2, URL: PageURL, Blob, fetch, console,
-    setTimeout: (callback, delay = 0) => { const id = ++nextTimer; timers.set(id, callback); timerDelays.set(id, delay); if (!delay) queueMicrotask(() => { if (timers.has(id)) { timers.delete(id); timerDelays.delete(id); callback(); } }); return id; },
-    clearTimeout: id => { timers.delete(id); timerDelays.delete(id); },
+    setTimeout: (callback, delay = 0) => { const id = ++nextTimer; timers.set(id, callback); timerDelays.set(id, delay); timerDeadlines.set(id, now + delay); if (!delay) queueMicrotask(() => { if (timers.has(id)) { timers.delete(id); timerDelays.delete(id); timerDeadlines.delete(id); callback(); } }); return id; },
+    clearTimeout: id => { timers.delete(id); timerDelays.delete(id); timerDeadlines.delete(id); },
   };
   if (pageOptions.worker) sandbox.Worker = class {
+    constructor() { lastWorker = this; }
     postMessage(input) {
       const message = structuredClone(input); workerMessages.push(message);
       if (message.type === 'datasets') { workerDatasets = message.datasets; return; }
-      const reply = () => { analysisCalls++; const result = analysis.aggregate(workerDatasets, message.filter); result.groups = analysis.clusterUtilities(result.utilities, message.cluster); this.onmessage({ data: { id: message.id, result } }); };
+      const reply = error => { if (error) { this.onmessage({ data: { id: message.id, error } }); return; } analysisCalls++; const result = analysis.aggregate(workerDatasets, message.filter); result.groups = analysis.clusterUtilities(result.utilities, message.cluster); this.onmessage({ data: { id: message.id, result } }); };
       if (workerDeferred) workerReplies.push(reply); else queueMicrotask(reply);
     }
     terminate() {}
@@ -205,7 +208,9 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
   return { get, main, canvases, downloads, requests, parseBodies, reparseBodies, renderedHeat, hasVisibleHeat, href: () => location.href,
     saved: () => JSON.parse(stored.get('cs2-analysis-v4') || '{}'),
     savedWrites, analysisCalls: () => analysisCalls,
-    workerMessages, setWorkerDeferred(value) { workerDeferred = value; }, async replyWorker() { assert.ok(workerReplies.length); workerReplies.shift()(); await settle(); },
+    workerMessages, setWorkerDeferred(value) { workerDeferred = value; }, async replyWorker(error) { assert.ok(workerReplies.length); workerReplies.shift()(error); await settle(); }, async failWorker() { lastWorker.onerror({}); await settle(); },
+    async advanceClock(ms) { const until = now + ms; let steps = 0; for (;;) { const due = [...timers.keys()].filter(id => timerDeadlines.get(id) <= until).sort((a, b) => timerDeadlines.get(a) - timerDeadlines.get(b) || a - b)[0]; if (due == null) break; assert.ok(++steps < 1000, 'timer loop must stay bounded'); now = timerDeadlines.get(due); const callback = timers.get(due); timers.delete(due); timerDelays.delete(due); timerDeadlines.delete(due); callback(); await settle(); } now = until; await settle(); },
+    async setHidden(hidden) { sandbox.document.hidden = hidden; for (const listener of documentListeners.visibilitychange || []) listener({}); await settle(); }, async pageHide() { for (const listener of windowListeners.pagehide || []) listener({}); await settle(); }, async pageShow() { for (const listener of windowListeners.pageshow || []) listener({ persisted: true }); await settle(); },
     async input(id, value) { get(id).value = String(value); await get(id).dispatch('input'); await settle(); },
     async flushMovement() { for (const [id, callback] of [...timers]) if (timerDelays.get(id) === 100) { timers.delete(id); timerDelays.delete(id); callback(); } await settle(); },
     setLibraryFiles(demos) { libraryFiles.clear(); for (const demo of demos) libraryFiles.set(demo.id, demo); },
@@ -218,6 +223,7 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
     async upload(...names) { get('analysis-files').files = names.map(name => ({ name, size: 1024 })); await get('analysis-files').dispatch('change'); await settle(); },
     async change(id, value) { get(id).value = value; await get(id).dispatch('change'); await settle(); },
     blockMap(name) { let release; mapGates.set(name, new Promise(resolve => { release = resolve; })); return release; },
+    blockImage() { let release; imageGate = new Promise(resolve => { release = () => { imageGate = null; resolve(); }; }); return release; },
     resize() { for (const callback of resizeObservers) callback(); },
   };
 }
@@ -1393,6 +1399,92 @@ test('PNG export records all four counts, shared countdown and per-layer coverag
   assert.match(text, /移动 3.0 秒 \/ 交火 2 \/ 死亡 1 \/ 开火 3 · 热力图 1:50 → 1:35/); assert.match(text, /四图层范围：开局后 5–20 秒 \[含开始，不含结束\]/);
   for (const label of ['移动', '交火', '死亡', '开火']) assert.match(text, new RegExp(`${label}：时间记录完整`)); assert.ok(output.context.texts.every(([, , y]) => y < output.height / 2));
   await ui.get('export-csv').click(); const csv = await ui.downloads.at(-1).blob.text(); assert.match(csv, /5–20 秒/); assert.equal(csvRows(csv).length, 2); assert.equal(ui.saved().utilityTime, '5-20');
+});
+
+test('heatmap autoplay starts with a ten-second window and pauses, resumes and changes speed without changing utility filters', async () => {
+  const ui = await page([movementDemo()], { saved: { utilityTime: '5-20' } });
+  assert.equal(ui.get('heatmap-time-play').disabled, false); assert.equal(ui.get('heatmap-time-window').value, '10'); assert.equal(ui.get('heatmap-time-speed').value, '1');
+  await clickAndSettle(ui, 'heatmap-time-play'); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'true'); assert.deepEqual(ui.saved().movementTime, { start: 0, end: 10 }); assert.deepEqual(heatMetrics(ui), ['5.0 秒', '3', '1', '5']);
+  assert.equal(ui.get('movement-time-label')['aria-live'], 'off'); assert.equal(ui.get('movement-time-coverage')['aria-live'], 'off');
+  await ui.advanceClock(999); assert.deepEqual(ui.saved().movementTime, { start: 0, end: 10 }); await ui.advanceClock(1); assert.deepEqual(ui.saved().movementTime, { start: 1, end: 11 }); assert.deepEqual(heatMetrics(ui), ['3.0 秒', '2', '1', '3']);
+  await clickAndSettle(ui, 'heatmap-time-play'); assert.equal(ui.get('movement-time-label')['aria-live'], 'polite'); await ui.advanceClock(5000); assert.deepEqual(ui.saved().movementTime, { start: 1, end: 11 });
+  await clickAndSettle(ui, 'heatmap-time-play'); await ui.change('heatmap-time-speed', '0.25'); await ui.advanceClock(3999); assert.equal(ui.saved().movementTime.start, 1); await ui.advanceClock(1); assert.equal(ui.saved().movementTime.start, 2);
+  await ui.change('heatmap-time-speed', '8'); await ui.advanceClock(125); assert.deepEqual(ui.saved().movementTime, { start: 3, end: 13 });
+  assert.equal(ui.get('metric-utilities').textContent, '1'); assert.equal(ui.saved().utilityTime, '5-20'); assert.deepEqual(ui.saved().heatmapPlayback, { windowLength: 10, speed: 8 });
+});
+
+test('window edits pause before drafts can be overwritten, keep the chosen span, and reload always stays paused', async () => {
+  const ui = await page([movementDemo()], { saved: { movementTime: { start: 90, end: 110 }, heatmapPlayback: { windowLength: 7, speed: 4, running: true } } });
+  assert.equal(ui.get('heatmap-time-window').value, '20'); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'false'); await ui.advanceClock(5000); assert.deepEqual(ui.saved().movementTime, { start: 90, end: 110 });
+  await ui.change('heatmap-time-window', '10'); assert.deepEqual(ui.saved().movementTime, { start: 90, end: 100 });
+  await clickAndSettle(ui, 'heatmap-time-play'); await ui.get('heatmap-time-window').dispatch('focus'); await ui.input('heatmap-time-window', '25'); await ui.advanceClock(2000);
+  assert.equal(ui.get('heatmap-time-window').value, '25'); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'false'); await ui.get('heatmap-time-window').dispatch('change'); await settle(); assert.deepEqual(ui.saved().movementTime, { start: 90, end: 115 });
+  await clickAndSettle(ui, 'heatmap-time-play'); assert.deepEqual(ui.saved().movementTime, { start: 0, end: 25 }); await ui.input('movement-time-end', 20); await ui.get('movement-time-end').dispatch('change'); await settle(); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'false'); assert.equal(ui.get('heatmap-time-window').value, '20');
+  const restored = await page([movementDemo()], { saved: { ...ui.saved(), heatmapPlayback: { ...ui.saved().heatmapPlayback, running: true } } }); assert.equal(restored.get('heatmap-time-play')['aria-pressed'], 'false'); await restored.advanceClock(5000); assert.deepEqual(restored.saved().movementTime, { start: 0, end: 20 });
+  await clickAndSettle(restored, 'heatmap-time-play'); await clickAndSettle(restored, 'movement-time-all'); await restored.advanceClock(5000); assert.equal(restored.saved().movementTime, null); assert.equal(restored.get('heatmap-time-play')['aria-pressed'], 'false'); assert.equal(restored.get('heatmap-time-window').value, '20');
+});
+
+test('the final fixed-width frame renders at 0:00, stops automatically, and both play and restart return to 1:55', async () => {
+  const ui = await page([movementDemo()], { saved: { movementTime: { start: 94, end: 114 } } });
+  await clickAndSettle(ui, 'heatmap-time-play'); await ui.advanceClock(1000); assert.deepEqual(ui.saved().movementTime, { start: 95, end: 115 }); assert.equal(ui.get('heatmap-time-window').value, '20'); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'false'); assert.match(ui.get('heatmap-playback-status').textContent, /已到 0:00/);
+  assert.deepEqual(heatMetrics(ui), ['1.0 秒', '0', '0', '1']); await ui.advanceClock(5000); assert.deepEqual(ui.saved().movementTime, { start: 95, end: 115 });
+  await clickAndSettle(ui, 'heatmap-time-play'); assert.deepEqual(ui.saved().movementTime, { start: 0, end: 20 }); await ui.advanceClock(2000); assert.deepEqual(ui.saved().movementTime, { start: 2, end: 22 });
+  await clickAndSettle(ui, 'heatmap-time-restart'); assert.deepEqual(ui.saved().movementTime, { start: 0, end: 20 }); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'true');
+  await ui.change('heatmap-time-window', '115'); assert.deepEqual(ui.saved().movementTime, { start: 0, end: 115 }); assert.equal(ui.get('heatmap-time-play').disabled, true); await ui.advanceClock(5000); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'false'); assert.match(ui.get('heatmap-playback-status').textContent, /覆盖全部 115 秒/);
+});
+
+test('autoplay retains the rendered window during slow compute and pause discards late frames without stranding resume', async () => {
+  const ui = await page([movementDemo()], { worker: true, saved: { movementTime: { start: 0, end: 10 } } }), initial = ui.workerMessages.filter(message => message.type === 'compute').length;
+  ui.setWorkerDeferred(true); await clickAndSettle(ui, 'heatmap-time-play'); await ui.advanceClock(1000);
+  assert.deepEqual(ui.saved().movementTime, { start: 0, end: 10 }); assert.equal(ui.get('movement-time-label').textContent, '1:55 → 1:45'); assert.deepEqual(heatMetrics(ui), ['5.0 秒', '3', '1', '5']); assert.equal(ui.hasVisibleHeat(), true);
+  await ui.advanceClock(10000); assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial + 1, 'slow frames cannot accumulate autoplay work');
+  await clickAndSettle(ui, 'heatmap-time-play'); await clickAndSettle(ui, 'heatmap-time-play'); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'true');
+  await ui.replyWorker(); assert.deepEqual(ui.saved().movementTime, { start: 0, end: 10 }); await ui.advanceClock(1000); assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial + 2);
+  await ui.change('heatmap-time-speed', '0.25'); await ui.replyWorker(); assert.deepEqual(ui.saved().movementTime, { start: 1, end: 11 });
+  await ui.advanceClock(3999); assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial + 2); await ui.advanceClock(1); assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial + 3);
+  await clickAndSettle(ui, 'heatmap-time-play'); const before = ui.saved().movementTime; await ui.replyWorker(); await ui.advanceClock(10000); assert.deepEqual(ui.saved().movementTime, before); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'false');
+});
+
+test('data and identity changes pause playback before async map or floor work while render-only controls can continue', async () => {
+  const other = movementDemo('other'); other.map = 'de_nuke';
+  const ui = await page([movementDemo(), other], { mapInfo: { lowerMaxZ: 100, lowerRadar: '/maps/lower.png' }, saved: { map: 'de_mirage', movementTime: { start: 0, end: 10 } } });
+  await clickAndSettle(ui, 'heatmap-time-play'); ui.get('layer-shots').checked = true; await ui.get('layer-shots').dispatch('change'); await ui.change('heat-scale', 'linear'); await clickAndSettle(ui, 'fit-map'); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'true');
+  await ui.change('analysis-side', '3'); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'false');
+  await clickAndSettle(ui, 'heatmap-time-play'); const releaseImage = ui.blockImage(); ui.get('analysis-floor').value = 'lower'; const floorChange = ui.get('analysis-floor').dispatch('change'); await settle(); await ui.advanceClock(5000); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'false'); assert.deepEqual(ui.saved().movementTime, { start: 0, end: 10 }); releaseImage(); await floorChange; await settle();
+  await clickAndSettle(ui, 'heatmap-time-play'); const releaseMap = ui.blockMap('de_nuke'); ui.get('analysis-map').value = 'de_nuke'; const mapChange = ui.get('analysis-map').dispatch('change'); await settle(); await ui.advanceClock(5000); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'false'); releaseMap(); await mapChange; await settle();
+  await clickAndSettle(ui, 'heatmap-time-play'); await clickAndSettle(ui, 'refresh-library'); await ui.advanceClock(5000); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'false');
+});
+
+test('page visibility and pagehide pause permanently until a new user play action, including an in-flight frame', async () => {
+  const ui = await page([movementDemo()], { worker: true, saved: { movementTime: { start: 0, end: 10 } } }); ui.setWorkerDeferred(true);
+  await clickAndSettle(ui, 'heatmap-time-play'); await ui.advanceClock(1000); await ui.setHidden(true); assert.equal(ui.get('heatmap-time-play').disabled, true); assert.equal(ui.get('heatmap-time-restart').disabled, true);
+  await ui.replyWorker(); await ui.setHidden(false); assert.equal(ui.get('heatmap-time-play').disabled, false, 'the actual browser button must become clickable again after returning to the foreground'); assert.equal(ui.get('heatmap-time-restart').disabled, false); await ui.advanceClock(5000);
+  assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'false'); assert.deepEqual(ui.saved().movementTime, { start: 0, end: 10 });
+  ui.setWorkerDeferred(false); await clickAndSettle(ui, 'heatmap-time-play'); await ui.advanceClock(1000); assert.equal(ui.saved().movementTime.start, 1); await ui.pageHide(); await ui.pageShow(); await ui.advanceClock(5000); assert.equal(ui.saved().movementTime.start, 1); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'false'); assert.equal(ui.get('heatmap-time-play').disabled, false); assert.equal(ui.get('heatmap-time-restart').disabled, false);
+});
+
+test('completed and failed refresh, upload and catalog operations unlock actual playback buttons without auto-resuming', async () => {
+  const assertReady = ui => { assert.equal(ui.get('heatmap-time-play').disabled, false); assert.equal(ui.get('heatmap-time-restart').disabled, false); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'false'); };
+  const original = movementDemo('refresh'), refreshed = await page([original], { worker: true });
+  await clickAndSettle(refreshed, 'heatmap-time-play'); refreshed.setJob({ ...movementDemo('refresh'), revision: 'replacement' }); await clickAndSettle(refreshed, 'refresh-library'); assertReady(refreshed);
+  refreshed.failRefresh('测试刷新失败'); await clickAndSettle(refreshed, 'refresh-library'); assertReady(refreshed);
+  const uploaded = await page([movementDemo()], { worker: true, uploads: [movementDemo('uploaded')] }); await uploaded.upload('uploaded.dem'); assertReady(uploaded);
+  const added = await page([movementDemo()], { worker: true, libraryDemos: [{ ...movementDemo('library'), jobStatus: 'ready', analysis: false }] }); await chooseLibrary(added, ['library']); assertReady(added);
+  for (const ui of [refreshed, uploaded, added]) { const range = ui.saved().movementTime; await ui.advanceClock(5000); assert.deepEqual(ui.saved().movementTime, range); await clickAndSettle(ui, 'heatmap-time-play'); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'true', 'an enabled real button can start the next playback'); }
+});
+
+test('no-data and legacy clocks cannot autoplay while a zero-event current window with valid later evidence can', async () => {
+  for (const demos of [[], [dataset('old')]]) { const ui = await page(demos); assert.equal(ui.get('heatmap-time-play').disabled, true); await clickAndSettle(ui, 'heatmap-time-play'); await ui.advanceClock(5000); assert.equal(ui.saved().movementTime, null); }
+  const unknown = movementDemo('unknown'); delete unknown.series[0].movementTimeline; delete unknown.series[0].movementUntimedCells; delete unknown.series[0].eventTimeline; delete unknown.series[0].eventUntimedCells;
+  const missing = await page([unknown]); await clickAndSettle(missing, 'heatmap-time-play'); assert.equal(missing.get('heatmap-time-play')['aria-pressed'], 'false'); assert.equal(missing.get('heatmap-time-play').disabled, true); assert.match(missing.get('heatmap-playback-status').textContent, /缺少可播放/);
+  const emptyInterval = await page([movementDemo()], { saved: { movementTime: { start: 40, end: 50 } } }); assert.deepEqual(heatMetrics(emptyInterval), ['0.0 秒', '0', '0', '0']); await clickAndSettle(emptyInterval, 'heatmap-time-play'); await emptyInterval.advanceClock(1000); assert.deepEqual(emptyInterval.saved().movementTime, { start: 41, end: 51 }); assert.equal(emptyInterval.get('heatmap-time-play')['aria-pressed'], 'true');
+});
+
+test('compute and worker errors stop autoplay without replacing the displayed frame, and fallback can play again', async () => {
+  const ui = await page([movementDemo()], { worker: true, saved: { movementTime: { start: 0, end: 10 } } }); ui.setWorkerDeferred(true);
+  await clickAndSettle(ui, 'heatmap-time-play'); await ui.advanceClock(1000); await ui.replyWorker('测试计算失败'); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'false'); assert.deepEqual(ui.saved().movementTime, { start: 0, end: 10 }); assert.match(ui.get('heatmap-playback-status').textContent, /计算失败/);
+  await clickAndSettle(ui, 'heatmap-time-play'); await ui.advanceClock(1000); await ui.failWorker(); assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'false'); assert.deepEqual(ui.saved().movementTime, { start: 0, end: 10 });
+  await ui.advanceClock(5000); assert.deepEqual(ui.saved().movementTime, { start: 0, end: 10 }); await clickAndSettle(ui, 'heatmap-time-play'); await ui.advanceClock(1000); assert.deepEqual(ui.saved().movementTime, { start: 1, end: 11 });
 });
 
 test('utility time options and clickable distribution filter groups without altering movement, combat or death heatmaps', async () => {

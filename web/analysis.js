@@ -1,10 +1,12 @@
 (() => {
   'use strict';
-  const $ = id => document.getElementById(id), core = window.ReplayAnalysis, heat = window.ReplayHeatmap, library = window.ReplayLibrary;
+  const $ = id => document.getElementById(id), core = window.ReplayAnalysis, heat = window.ReplayHeatmap, library = window.ReplayLibrary, playback = window.ReplayHeatmapPlayback;
   const state = { jobs: new Map(), demos: new Map(), selectedDemos: null, selectedTeams: null, selectedPlayers: null, aliases: {}, map: '', mapInfo: null, image: null, result: null, worker: null, request: 0, mapRequest: 0, uploading: false, cancelled: false, controller: null, currentJob: null, queued: [], pendingCount: 0, selectedGroup: null, selectedThrow: null, zoom: 1, panX: 0, panY: 0, layers: new Map(), fallbackBounds: { minX: -3000, maxX: 3000, minY: -3000, maxY: 3000 } };
   const storageKey = 'cs2-analysis-v4';
   const movementDuration = 115;
   let movementTimer, movementPending = false, workerBusy = false, workerPending = null;
+  let playbackRunning = false, playbackTimer = null, playbackGeneration = 0, playbackPending = null, playbackStartedAt = 0, analysisPending = false;
+  let playbackLength = playback.defaultWindowLength, playbackSpeed = 1, playbackMessage = '已暂停。固定窗口逐秒前进，计算完成后再更新下一帧。';
   state.movementTime = null;
   let initializing = true, migratedSessionId = '', libraryEnabled = false, libraryRefreshing = false, libraryScanning = false, syncPromise = null, libraryTimer, restoredView = null;
   const loadingJobs = new Map();
@@ -31,6 +33,7 @@
     const settings = { ids: [...state.jobs.keys()], selectedDemos: state.selectedDemos && [...state.selectedDemos], selectedTeams: state.selectedTeams && [...state.selectedTeams], selectedPlayers: state.selectedPlayers && [...state.selectedPlayers], map: state.map, aliases: state.aliases, side: $('analysis-side').value, floor: $('analysis-floor').value, utilityType: $('analysis-utility-type').value, utilityTime: $('analysis-utility-time').value, utilitySort: $('utility-sort').value, query: $('player-search').value, layers: metrics.filter(name => $(`layer-${name}`).checked), radius: Number($('heat-radius').value), opacity: Number($('heat-opacity').value), scale: heatMode(), landingDistance: Number($('landing-distance').value), throwDistance: Number($('throw-distance').value), migratedSessionId };
     settings.sourceView = { ...sourceView, folderExpansion: sourceExpansion.snapshot() }; settings.libraryView = { ...libraryView, folderExpansion: libraryExpansion.snapshot() };
     settings.movementTime = state.movementTime;
+    settings.heatmapPlayback = { windowLength: playbackLength, speed: playbackSpeed };
     if (restoredView) { settings.map = restoredView.map; settings.floor = restoredView.floor; }
     try { localStorage.setItem(storageKey, JSON.stringify(settings)); } catch { /* Private browsing may not offer localStorage. */ }
   }
@@ -56,7 +59,9 @@
     for (const [key, id, min, max] of [['radius', 'heat-radius', 64, 384], ['opacity', 'heat-opacity', 15, 100], ['landingDistance', 'landing-distance', 16, 512], ['throwDistance', 'throw-distance', 16, 256]]) if (Number.isFinite(saved[key])) $(id).value = String(Math.max(min, Math.min(max, saved[key])));
     $('radius-value').textContent = `${$('heat-radius').value} 单位`; $('opacity-value').textContent = `${$('heat-opacity').value}%`;
     migratedSessionId = typeof saved.migratedSessionId === 'string' ? saved.migratedSessionId : '';
-    state.movementTime = sanitizeMovementTime(saved.movementTime); renderMovementTime();
+    state.movementTime = sanitizeMovementTime(saved.movementTime);
+    playbackLength = state.movementTime ? state.movementTime.end - state.movementTime.start : playback.normalizeWindowLength(saved.heatmapPlayback?.windowLength);
+    playbackSpeed = playback.normalizeSpeed(saved.heatmapPlayback?.speed); renderMovementTime(); renderPlayback();
   }
   function sanitizeMovementTime(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value) || !Number.isFinite(value.start) || !Number.isFinite(value.end)) return null;
@@ -65,12 +70,69 @@
   }
   function countdown(elapsed) { const remaining = movementDuration - elapsed; return `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`; }
   function movementRangeLabel() { return state.movementTime ? `${countdown(state.movementTime.start)} → ${countdown(state.movementTime.end)}` : '全部时段（含倒计时结束后）'; }
+  const playbackNow = () => typeof performance === 'object' ? performance.now() : Date.now();
+  function hasPlaybackEvidence() {
+    if (!state.result || !state.map || state.result.map !== state.map || !currentDemos().length || !(state.result.totals?.players > 0)) return false;
+    if (state.result.heatmapCoverage) return metrics.some(metric => { const evidence = timeCoverage(metric); return evidence && (evidence.timedSeconds || evidence.timedCount || 0) > 0; });
+    return currentDemos().some(demo => demo.movementTimingVersion === 1 || demo.eventTimingVersion === 1);
+  }
+  function canStartPlayback() { return !initializing && !document.hidden && !analysisPending && !movementPending && !libraryRefreshing && !state.uploading && !catalogAdding && playbackLength < movementDuration && hasPlaybackEvidence(); }
+  function refreshPlaybackAvailability() {
+    const disabled = !playbackRunning && !canStartPlayback();
+    $('heatmap-time-play').disabled = disabled; $('heatmap-time-restart').disabled = disabled;
+  }
+  function renderPlayback() {
+    const play = $('heatmap-time-play'), atEnd = state.movementTime?.end === movementDuration;
+    refreshPlaybackAvailability(); play.textContent = playbackRunning ? '暂停' : atEnd ? '重新播放' : '播放'; play.setAttribute('aria-pressed', String(playbackRunning));
+    $('heatmap-time-window').value = String(playbackLength); $('heatmap-time-speed').value = String(playbackSpeed);
+    $('movement-time-label').setAttribute('aria-live', playbackRunning ? 'off' : 'polite'); $('movement-time-coverage').setAttribute('aria-live', playbackRunning ? 'off' : 'polite');
+    let status = playbackRunning ? `正在播放 · 固定 ${playbackLength} 秒 · ${playbackSpeed}×。每帧计算完成后推进，道具时段不变。` : playbackMessage;
+    if (!playbackRunning && !state.map) status = '选择有回合时间记录的比赛后，可播放热力图。';
+    else if (!playbackRunning && playbackLength === movementDuration) status = '窗口已覆盖全部 115 秒；缩短窗口后可播放。';
+    else if (!playbackRunning && !analysisPending && !movementPending && !hasPlaybackEvidence()) status = '所选数据缺少可播放的回合时间记录；可调整筛选或重新解析。';
+    if ($('heatmap-playback-status').textContent !== status) $('heatmap-playback-status').textContent = status;
+  }
+  function pausePlayback(reason = '已暂停。可继续播放当前窗口。', force = false) {
+    const active = playbackRunning || playbackTimer != null || playbackPending;
+    playbackRunning = false; ++playbackGeneration; clearTimeout(playbackTimer); playbackTimer = null;
+    if (playbackPending) {
+      if (playbackPending.id === state.request) { ++state.request; analysisPending = false; $('computing').hidden = true; $('export-image').disabled = !currentDemos().length; $('export-csv').disabled = !state.result?.utilities?.length; }
+      if (workerPending?.id === playbackPending.id) workerPending = null;
+      playbackPending = null;
+    }
+    if (active || force) playbackMessage = reason;
+    renderPlayback();
+  }
+  function schedulePlayback() {
+    if (!playbackRunning || playbackTimer != null || playbackPending || workerBusy || analysisPending || movementPending) return;
+    if (!hasPlaybackEvidence()) { pausePlayback('缺少可播放的时间记录，已暂停。', true); return; }
+    const generation = playbackGeneration, wait = Math.max(0, playback.stepDelay(playbackSpeed) - (playbackNow() - playbackStartedAt));
+    playbackTimer = setTimeout(() => {
+      playbackTimer = null; if (!playbackRunning || generation !== playbackGeneration) return;
+      const next = playback.advanceRange(state.movementTime);
+      if (!next) { pausePlayback('已到 0:00。再次播放将从 1:55 开始。', true); return; }
+      requestPlaybackFrame(next);
+    }, wait);
+  }
+  function requestPlaybackFrame(range) { playbackStartedAt = playbackNow(); requestAnalysis({ autoplay: true, movementOnly: true, range }); }
+  function startPlayback(restart = false) {
+    if (playbackRunning && !restart) { pausePlayback(); return; }
+    if (!canStartPlayback() && !playbackRunning) return;
+    pausePlayback('已暂停。', false);
+    const start = playback.prepareStart(restart ? null : state.movementTime, playbackLength);
+    playbackLength = start.length; if (!start.canPlay) { renderPlayback(); return; }
+    playbackRunning = true; ++playbackGeneration; playbackStartedAt = playbackNow(); renderPlayback(); save();
+    if (!state.movementTime || start.range.start !== state.movementTime.start || start.range.end !== state.movementTime.end || movementPending) requestPlaybackFrame(start.range);
+    else schedulePlayback();
+  }
   function renderMovementTime() {
     const range = state.movementTime || { start: 0, end: movementDuration };
     for (const edge of ['start', 'end']) { const input = $(`movement-time-${edge}`); input.value = String(range[edge]); input.setAttribute('aria-valuetext', `倒计时 ${countdown(range[edge])}，开局后 ${range[edge]} 秒`); $(`movement-time-${edge}-value`).textContent = countdown(range[edge]); }
     $('movement-time-fill').style.left = `${range.start / movementDuration * 100}%`; $('movement-time-fill').style.width = `${(range.end - range.start) / movementDuration * 100}%`;
     $('movement-time-label').textContent = movementRangeLabel(); $('movement-time-all').setAttribute('aria-pressed', String(!state.movementTime));
     $('movement-time-help').textContent = state.movementTime ? `开局后 ${range.start}–${range.end} 秒，含开始、不含结束；冻结结束为 0 秒。移动、交火、死亡、开火同步筛选，道具投掷时段独立。可用方向键每次调整 1 秒。` : '拖动两个手柄选择任意时段；冻结结束为开局 0 秒。当前显示移动、交火、死亡、开火的全部时段（也含倒计时结束后）；道具投掷时段独立设置。';
+    if (state.movementTime) playbackLength = range.end - range.start;
+    renderPlayback();
   }
   function timeCoverage(metric) { return state.result?.heatmapCoverage?.[metric] || (metric === 'movement' ? state.result?.movementCoverage : null); }
   function missingTime(metric) { return !!state.movementTime && (!timeCoverage(metric) || timeCoverage(metric).status === 'missing'); }
@@ -93,11 +155,12 @@
     note.textContent = timeCoverageLines().join('\n');
   }
   function invalidateHeatmapTime() {
-    ++state.request; movementPending = true; $('computing').hidden = false; $('export-image').disabled = true;
+    ++state.request; movementPending = true; analysisPending = true; $('computing').hidden = false; $('export-image').disabled = true;
     for (const metric of metrics) $(`metric-${metric}`).textContent = '计算中…';
     renderMovementCoverage(); rebuildHeat();
   }
   function setMovementEdge(edge, flush = false) {
+    pausePlayback('已暂停：已手动调整时间窗口。');
     const current = state.movementTime || { start: 0, end: movementDuration }, raw = Number($(`movement-time-${edge}`).value);
     const value = Math.max(0, Math.min(movementDuration, Math.round(Number.isFinite(raw) ? raw : current[edge])));
     const next = { ...current, [edge]: edge === 'start' ? Math.min(value, current.end - 1) : Math.max(value, current.start + 1) };
@@ -111,21 +174,24 @@
   }
   function sendWorkerRequest(job) { workerBusy = true; state.worker.postMessage(job); }
   function currentDemos() { return [...state.demos.values()].filter(d => d.map === state.map && (!state.selectedDemos || state.selectedDemos.has(d.id))); }
-  function updateWorkerData() { state.worker?.postMessage({ type: 'datasets', datasets: [...state.demos.values()] }); }
+  function updateWorkerData() { pausePlayback('已暂停：比赛数据已更新。'); state.worker?.postMessage({ type: 'datasets', datasets: [...state.demos.values()] }); }
   function requestAnalysis(options = {}) {
+    if (!options.autoplay) pausePlayback('已暂停：筛选已更新。');
     clearTimeout(movementTimer); movementTimer = null;
     if (!state.map) {
-      movementPending = false; workerPending = null;
+      movementPending = false; analysisPending = false; workerPending = null;
       ++state.request; state.result = null; state.selectedGroup = state.selectedThrow = null; clearHeat(); renderLegend();
       $('computing').hidden = true; $('analysis-empty').hidden = false; $('selection-empty').hidden = true;
       $('selection-summary').textContent = '选择比赛、队伍或玩家，开始分析。';
       for (const id of ['metric-movement', 'metric-engagements', 'metric-deaths', 'metric-shots', 'metric-utilities']) $(id).textContent = '—';
-      $('export-image').disabled = $('export-csv').disabled = true; renderMovementCoverage(); renderUtilityGroups(); draw(); save(); return;
+      $('export-image').disabled = $('export-csv').disabled = true; renderMovementCoverage(); renderUtilityGroups(); draw(); save(); renderPlayback(); return;
     }
     const filter = { map: state.map, demoIds: state.selectedDemos && [...state.selectedDemos], teamIds: state.selectedTeams && [...state.selectedTeams], playerIds: state.selectedPlayers && [...state.selectedPlayers], sides: $('analysis-side').value === 'all' ? [2, 3] : [Number($('analysis-side').value)], floor: $('analysis-floor').value, lowerMaxZ: state.mapInfo?.lowerMaxZ, teamAliases: state.aliases, utilityType: $('analysis-utility-type').value, utilityTime: $('analysis-utility-time').value };
     const cluster = { landing: Number($('landing-distance').value) || 128, throwing: Number($('throw-distance').value) || 64, lowerMaxZ: state.mapInfo?.lowerMaxZ };
-    filter.movementTime = state.movementTime;
+    filter.movementTime = options.autoplay ? options.range : state.movementTime;
     const id = ++state.request;
+    analysisPending = true;
+    if (options.autoplay) playbackPending = { id, range: { ...options.range } };
     $('computing').hidden = false;
     $('export-image').disabled = $('export-csv').disabled = true;
     if (!options.movementOnly) { state.selectedGroup = null; state.selectedThrow = null; }
@@ -134,13 +200,16 @@
       setTimeout(() => {
         if (id !== state.request) return;
         try { const result = core.aggregate([...state.demos.values()], filter); result.groups = core.clusterUtilities(result.utilities, cluster); applyAnalysis(id, result); }
-        catch (error) { message(`分析失败：${error.message}`); $('computing').hidden = true; }
+        catch (error) { analysisFailed(error.message); }
       }, 0);
     }
-    save();
+    save(); renderPlayback();
   }
+  function analysisFailed(error) { analysisPending = false; pausePlayback('计算失败，播放已暂停。可调整筛选后重试。', true); message(`分析失败：${error}`); $('computing').hidden = true; }
   function applyAnalysis(id, result) {
     if (id !== state.request) return;
+    if (playbackPending?.id === id) { state.movementTime = playbackPending.range; playbackPending = null; renderMovementTime(); save(); }
+    analysisPending = false;
     state.result = result; $('computing').hidden = true;
     movementPending = false; renderMovementCoverage();
     const total = result.totals;
@@ -154,6 +223,8 @@
     $('export-image').disabled = !available.length;
     $('export-csv').disabled = !result.utilities.length;
     renderUtilityGroups(); rebuildHeat();
+    if (playbackRunning && state.movementTime?.end === movementDuration) pausePlayback('已到 0:00。再次播放将从 1:55 开始。', true);
+    else { renderPlayback(); schedulePlayback(); }
   }
   function toggleSet(key, id, allIds, checked) {
     if (!state[key]) state[key] = new Set(allIds);
@@ -281,6 +352,9 @@
     $('refresh-library').disabled = !libraryEnabled || libraryRefreshing || libraryScanning || state.uploading || catalogAdding;
     renderCatalog();
     renderReparse();
+    // Refresh/import/catalog completion all render jobs after clearing their
+    // busy flags, even when compute finished first or the operation failed.
+    refreshPlaybackAvailability();
   }
   function importedReadyJobs() { return [...state.jobs.values()].filter(job => job.owned && !job.synthetic && job.status === 'ready'); }
   function reparseActive(job) { return ['queued', 'parsing'].includes(job.reparse?.status); }
@@ -311,6 +385,7 @@
     if (reparseSubmitting || state.uploading || catalogAdding || importedReadyJobs().some(reparseActive)) return;
     const eligible = new Set(importedReadyJobs().map(job => job.id)), selected = [...new Set(ids)].filter(id => eligible.has(id));
     if (!selected.length) return;
+    pausePlayback('已暂停：正在更新比赛解析数据。');
     reparseSubmitting = true; reparseRequestError = ''; renderReparse();
     try {
       const result = await json(await fetch('/api/library/reparse', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: selected }) }));
@@ -325,6 +400,7 @@
     finally { reparseSubmitting = false; renderReparse(); scheduleLibraryPoll(); }
   }
   async function removeJob(id) {
+    pausePlayback('已暂停：比赛选择已更新。');
     const job = state.jobs.get(id);
     if (!job) return;
     if (job.owned) {
@@ -433,6 +509,7 @@
     renderJobs();
   }
   async function loadMap(name) {
+    pausePlayback('已暂停：地图已切换。');
     const request = ++state.mapRequest;
     ++state.request; state.result = null; state.selectedGroup = state.selectedThrow = null;
     state.map = name; state.mapInfo = null; state.image = null; state.zoom = 1; state.panX = 0; state.panY = 0; clearHeat();
@@ -452,6 +529,7 @@
     if (request === state.mapRequest) draw();
   }
   async function loadMapImage() {
+    pausePlayback('已暂停：地图楼层已更新。');
     const map = state.mapInfo; if (!map) return;
     const request = state.mapRequest, floor = $('analysis-floor').value, image = new Image();
     image.src = floor === 'lower' && map.lowerRadar ? map.lowerRadar : map.radar;
@@ -517,6 +595,7 @@
         else if (!state.demos.has(job.id) || (job.revision && job.revision !== existing?.loadedRevision)) ready.push(job.id);
       }
       // Bound browser fetch/decode work; recompute once for the complete batch.
+      if (changed || ready.length) pausePlayback('已暂停：比赛数据已更新。');
       for (let offset = 0; offset < ready.length; offset += 3) {
         await Promise.all(ready.slice(offset, offset + 3).map(async id => {
           try { await loadJob(id, { owned: true, batch: true }); changed = true; }
@@ -556,7 +635,8 @@
   }
   async function refreshLibrary() {
     if (!libraryEnabled || libraryRefreshing || libraryScanning || state.uploading || catalogAdding) return;
-    libraryRefreshing = true; $('refresh-library').disabled = true; $('library-status').textContent = '正在检查文件夹…';
+    pausePlayback('已暂停：正在刷新比赛数据。');
+    libraryRefreshing = true; refreshPlaybackAvailability(); $('refresh-library').disabled = true; $('library-status').textContent = '正在检查文件夹…';
     try {
       const result = await json(await fetch('/api/library/refresh', { method: 'POST' }));
       if (result.directory) { $('library-directory').textContent = result.directory; $('library-directory').title = result.directory; }
@@ -630,6 +710,7 @@
     const dialog = $('analysis-library-dialog'); dialog.close?.(); dialog.hidden = true; catalogOpener?.focus?.();
   }
   async function addCatalogDemos(ids = [...catalogSelection], options = {}) {
+    pausePlayback('已暂停：比赛选择已更新。');
     if (catalogAdding || state.uploading || !ids.length) return;
     catalogAdding = true; $('analysis-library-error').hidden = true; renderJobs();
     const errors = []; let added = 0;
@@ -657,6 +738,7 @@
     }
   }
   async function focusDemo(data) {
+    pausePlayback('已暂停：比赛选择已更新。');
     restoredView = null;
     state.selectedDemos?.add(data.id); state.selectedTeams = state.selectedPlayers = null;
     $('player-search').value = ''; $('analysis-floor').value = 'all';
@@ -685,6 +767,7 @@
     }
   }
   async function importFiles(files) {
+    pausePlayback('已暂停：正在导入比赛。');
     if (state.uploading || catalogAdding) { message('正在加入这一批比赛，请完成后再添加文件。'); return; }
     const list = [...files]; if (!list.length) return;
     const invalid = list.find(f => !/\.dem$/i.test(f.name) || f.size === 0 || f.size > 2 * 1024 ** 3);
@@ -724,6 +807,7 @@
     else if (state.cancelled) message(hadShared ? '已停止等待并取消后续导入；共享录像的后台任务与已有分析仍保留。' : '已取消剩余导入；已经完成的比赛仍保留。', false);
   }
   async function sample() {
+    pausePlayback('已暂停：正在载入示例。');
     if (state.uploading) return;
     try {
       message(''); const data = await json(await fetch('/api/sample/analysis'));
@@ -898,7 +982,24 @@
     $(`movement-time-${edge}`).addEventListener('input', () => setMovementEdge(edge));
     $(`movement-time-${edge}`).addEventListener('change', () => setMovementEdge(edge, true));
   }
-  $('movement-time-all').addEventListener('click', () => { state.movementTime = null; renderMovementTime(); invalidateHeatmapTime(); requestAnalysis({ movementOnly: true }); });
+  $('movement-time-all').addEventListener('click', () => { pausePlayback('已暂停：已切回全部时段。'); state.movementTime = null; renderMovementTime(); invalidateHeatmapTime(); requestAnalysis({ movementOnly: true }); });
+  $('heatmap-time-play').addEventListener('click', () => startPlayback());
+  $('heatmap-time-restart').addEventListener('click', () => startPlayback(true));
+  $('heatmap-time-window').addEventListener('focus', () => pausePlayback('已暂停：正在调整窗口跨度。'));
+  $('heatmap-time-window').addEventListener('input', () => { const draft = $('heatmap-time-window').value; pausePlayback('已暂停：正在调整窗口跨度。'); $('heatmap-time-window').value = draft; });
+  $('heatmap-time-window').addEventListener('change', () => {
+    const requestedLength = Number($('heatmap-time-window').value);
+    pausePlayback('已暂停：窗口跨度已更新。', true);
+    playbackLength = playback.normalizeWindowLength(requestedLength);
+    state.movementTime = playback.rangeForStart(state.movementTime?.start || 0, playbackLength); renderMovementTime(); invalidateHeatmapTime(); requestAnalysis({ movementOnly: true });
+  });
+  $('heatmap-time-speed').addEventListener('change', () => {
+    playbackSpeed = playback.normalizeSpeed(Number($('heatmap-time-speed').value)); ++playbackGeneration; clearTimeout(playbackTimer); playbackTimer = null; playbackStartedAt = playbackNow();
+    renderPlayback(); save(); schedulePlayback();
+  });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) pausePlayback('已暂停：页面已转到后台。'); else renderPlayback(); });
+  window.addEventListener('pagehide', () => pausePlayback('已暂停：已离开当前页面。'));
+  window.addEventListener('pageshow', renderPlayback);
   $('utility-sort').addEventListener('change', () => { renderUtilityGroups(); save(); });
   for (const id of ['landing-distance', 'throw-distance']) $(id).addEventListener('change', event => { const input = event.target; input.value = String(Math.max(Number(input.min), Math.min(Number(input.max), Number(input.value) || Number(input.defaultValue)))); requestAnalysis(); });
   $('teams-all').addEventListener('click', () => { state.selectedTeams = null; renderFilters(); requestAnalysis(); });
@@ -982,12 +1083,13 @@
       state.worker = new Worker('/analysis-core.js');
       state.worker.onmessage = ({ data }) => {
         workerBusy = false;
-        if (data.error) { if (data.id === state.request) { message(`分析失败：${data.error}`); $('computing').hidden = true; } }
+        if (data.error) { if (data.id === state.request) analysisFailed(data.error); }
         else applyAnalysis(data.id, data.result);
         const pending = workerPending; workerPending = null;
         if (pending?.id === state.request) sendWorkerRequest(pending);
+        else schedulePlayback();
       };
-      state.worker.onerror = () => { state.worker.terminate(); state.worker = null; workerBusy = false; workerPending = null; requestAnalysis(); };
+      state.worker.onerror = () => { pausePlayback('计算进程中断，播放已暂停。', true); state.worker.terminate(); state.worker = null; workerBusy = false; workerPending = null; requestAnalysis(); };
     } catch { state.worker = null; }
     try {
       await Promise.all([syncServerJobs({ render: false, pruneSelection: true }), loadLibraryInfo()]);
