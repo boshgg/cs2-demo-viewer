@@ -14,6 +14,7 @@ import (
 
 const analysisCellSize = 64
 const analysisUtilityTimingVersion = 1
+const analysisMovementTimingVersion = 1
 
 // AnalysisCell holds a world-space grid centre followed by independent metrics:
 // x, y, z, observed living-player seconds, gunfight involvements, deaths, shots.
@@ -35,11 +36,15 @@ type AnalysisTeam struct {
 }
 
 type AnalysisSeries struct {
-	PlayerID string         `json:"playerId"`
-	TeamID   string         `json:"teamId"`
-	Side     int            `json:"side"`
-	Cells    []AnalysisCell `json:"cells"`
-	Rounds   int            `json:"rounds"`
+	PlayerID               string                        `json:"playerId"`
+	TeamID                 string                        `json:"teamId"`
+	Side                   int                           `json:"side"`
+	Cells                  []AnalysisCell                `json:"cells"`
+	Rounds                 int                           `json:"rounds"`
+	MovementTimeline       []AnalysisMovementCell        `json:"movementTimeline"`
+	MovementUntimedCells   []AnalysisMovementUntimedCell `json:"movementUntimedCells"`
+	MovementUnknownSeconds float64                       `json:"movementUnknownSeconds"`
+	MovementBeyondSeconds  float64                       `json:"movementBeyondSeconds"`
 }
 
 type AnalysisUtility struct {
@@ -68,20 +73,21 @@ type AnalysisBounds struct {
 }
 
 type AnalysisDemo struct {
-	UtilityTimingVersion int               `json:"utilityTimingVersion"`
-	ID                   string            `json:"id"`
-	Name                 string            `json:"name"`
-	Map                  string            `json:"map"`
-	Duration             float64           `json:"duration"`
-	RoundCount           int               `json:"roundCount"`
-	Synthetic            bool              `json:"synthetic"`
-	Warnings             []string          `json:"warnings"`
-	Players              []AnalysisPlayer  `json:"players"`
-	Teams                []AnalysisTeam    `json:"teams"`
-	Series               []AnalysisSeries  `json:"series"`
-	Utilities            []AnalysisUtility `json:"utilities"`
-	Bounds               AnalysisBounds    `json:"bounds"`
-	CellSize             int               `json:"cellSize"`
+	UtilityTimingVersion  int               `json:"utilityTimingVersion"`
+	MovementTimingVersion int               `json:"movementTimingVersion"`
+	ID                    string            `json:"id"`
+	Name                  string            `json:"name"`
+	Map                   string            `json:"map"`
+	Duration              float64           `json:"duration"`
+	RoundCount            int               `json:"roundCount"`
+	Synthetic             bool              `json:"synthetic"`
+	Warnings              []string          `json:"warnings"`
+	Players               []AnalysisPlayer  `json:"players"`
+	Teams                 []AnalysisTeam    `json:"teams"`
+	Series                []AnalysisSeries  `json:"series"`
+	Utilities             []AnalysisUtility `json:"utilities"`
+	Bounds                AnalysisBounds    `json:"bounds"`
+	CellSize              int               `json:"cellSize"`
 }
 
 type analysisRoundWindow struct {
@@ -114,8 +120,9 @@ type analysisCellValue struct {
 }
 
 type analysisSeriesValue struct {
-	cells  map[analysisGridKey]*analysisCellValue
-	rounds map[int]bool
+	cells    map[analysisGridKey]*analysisCellValue
+	rounds   map[int]bool
+	movement analysisMovementAccumulator
 }
 
 type analysisEngagementKey struct {
@@ -130,7 +137,7 @@ type analysisEngagementKey struct {
 // Gunfights require observed opponent firearm damage; empty damage data is not
 // silently substituted with missed shots or speculative lines of sight.
 func BuildAnalysis(d *DemoData) *AnalysisDemo {
-	a := &AnalysisDemo{UtilityTimingVersion: analysisUtilityTimingVersion, CellSize: analysisCellSize, Players: []AnalysisPlayer{}, Teams: []AnalysisTeam{}, Series: []AnalysisSeries{}, Utilities: []AnalysisUtility{}, Warnings: []string{}}
+	a := &AnalysisDemo{UtilityTimingVersion: analysisUtilityTimingVersion, MovementTimingVersion: analysisMovementTimingVersion, CellSize: analysisCellSize, Players: []AnalysisPlayer{}, Teams: []AnalysisTeam{}, Series: []AnalysisSeries{}, Utilities: []AnalysisUtility{}, Warnings: []string{}}
 	if d == nil {
 		return a
 	}
@@ -167,21 +174,7 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 	for _, p := range d.Players {
 		normalisePlayer(p.ID, p.Name)
 	}
-	windows := map[int]analysisRoundWindow{}
-	for _, r := range d.Rounds {
-		if r.Number < 1 || !analysisFinite(r.Start) || !analysisFinite(r.End) || r.End < r.Start {
-			continue
-		}
-		start := r.Start
-		if analysisFinite(r.FreezeEnd) && r.FreezeEnd > start && r.FreezeEnd <= r.End {
-			start = r.FreezeEnd
-		}
-		end := r.End
-		if analysisFinite(r.EndedAt) && r.EndedAt >= start && r.EndedAt > r.Start && r.EndedAt <= end {
-			end = r.EndedAt
-		}
-		windows[r.Number] = analysisRoundWindow{start, end}
-	}
+	windows := analysisWindows(d.Rounds)
 	a.RoundCount = len(windows)
 	inside := func(round int, t float64) bool {
 		w, ok := windows[round]
@@ -191,36 +184,7 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 	// hint only when they are real clan names; CT/T labels never merge opponents.
 	rosters := map[int]map[int]*analysisRoster{}
 	for _, f := range d.Frames {
-		if !inside(f.Round, f.T) {
-			continue
-		}
-		if rosters[f.Round] == nil {
-			rosters[f.Round] = map[int]*analysisRoster{}
-		}
-		for _, side := range []int{2, 3} {
-			if rosters[f.Round][side] == nil {
-				rosters[f.Round][side] = &analysisRoster{members: map[string]bool{}, stable: map[string]bool{}, names: map[string]int{}}
-			}
-			r := rosters[f.Round][side]
-			name := f.TName
-			if side == 3 {
-				name = f.CTName
-			}
-			if clean := analysisClanName(name); clean != "" {
-				r.names[clean]++
-			}
-		}
-		for _, p := range f.Players {
-			id := normalisePlayer(p.ID, "")
-			if id == "" || !analysisSide(p.Team) || !p.Connected {
-				continue
-			}
-			r := rosters[f.Round][p.Team]
-			r.members[id] = true
-			if players[id].Stable {
-				r.stable[id] = true
-			}
-		}
+		analysisAddRoster(rosters, windows, f, normalisePlayer)
 	}
 	roundTeams, groups := analysisIdentifyTeams(scope, windows, rosters)
 	unknown := &analysisTeamGroup{team: AnalysisTeam{ID: "demo:" + scope + ":team:unknown", Name: "队伍未知", IdentitySource: "unknown", PlayerIDs: []string{}}, members: map[string]bool{}, stable: map[string]bool{}}
@@ -246,20 +210,8 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 		s.rounds[round] = true
 		return key, s
 	}
-	deathTimes := map[int]map[string][]float64{}
-	for _, e := range d.Events {
-		if e.Type == "kill" && e.VictimID != "" && inside(e.Round, e.T) {
-			if deathTimes[e.Round] == nil {
-				deathTimes[e.Round] = map[string][]float64{}
-			}
-			deathTimes[e.Round][e.VictimID] = append(deathTimes[e.Round][e.VictimID], e.T)
-		}
-	}
-	for _, byPlayer := range deathTimes {
-		for _, times := range byPlayer {
-			sort.Float64s(times)
-		}
-	}
+	deathTimes := analysisDeathTimes(d.Events, windows)
+	anchors := analysisMovementAnchors(d.Rounds)
 	hasBounds := false
 	includeBounds := func(p Position) {
 		if !hasBounds {
@@ -287,43 +239,13 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 		c.zWeight += weight
 		includeBounds(p)
 	}
-	for i, f := range d.Frames {
-		w, ok := windows[f.Round]
-		if !ok || !analysisFinite(f.T) || i+1 >= len(d.Frames) {
-			continue
-		}
-		next := d.Frames[i+1]
-		if next.Round != f.Round || !analysisFinite(next.T) || next.T <= f.T {
-			continue
-		}
-		// Clip the observed sample interval to live play. A recording gap cannot
-		// contribute minutes of fabricated occupancy at the last known position.
-		start := math.Max(f.T, w.start)
-		end := math.Min(math.Min(next.T, f.T+.25), w.end)
-		if end <= start {
-			continue
-		}
-		for _, p := range f.Players {
-			if !p.Alive || !p.Connected || !analysisSide(p.Team) || p.ID == "" {
-				continue
-			}
-			pos := Position{p.X, p.Y, p.Z}
-			if !analysisPosition(&pos) {
-				continue
-			}
-			playerEnd := end
-			if times := deathTimes[f.Round][p.ID]; len(times) > 0 {
-				n := sort.SearchFloat64s(times, f.T)
-				if n < len(times) {
-					playerEnd = math.Min(playerEnd, times[n])
-				}
-			}
-			if playerEnd <= start {
-				continue
-			}
+	for i := 0; i+1 < len(d.Frames); i++ {
+		f := d.Frames[i]
+		analysisObserveMovement(f, d.Frames[i+1], windows, deathTimes, func(p PlayerFrame, pos Position, start, end float64) {
 			_, s := seriesFor(normalisePlayer(p.ID, ""), f.Round, p.Team)
-			add(s, pos, 3, playerEnd-start)
-		}
+			add(s, pos, 3, end-start)
+			s.movement.add(pos, start, end, anchors[f.Round])
+		})
 	}
 	seenEngagements := map[analysisEngagementKey]bool{}
 	for _, e := range d.Damage {
@@ -418,6 +340,7 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 	sort.Slice(a.Teams, func(i, j int) bool { return a.Teams[i].ID < a.Teams[j].ID })
 	for key, s := range series {
 		out := AnalysisSeries{PlayerID: key.player, TeamID: key.team, Side: key.side, Rounds: len(s.rounds), Cells: []AnalysisCell{}}
+		s.movement.fill(&out)
 		for _, c := range s.cells {
 			c.cell[2] = math.Round(c.zSum/c.zWeight*100) / 100
 			c.cell[3] = math.Round(c.cell[3]*10000) / 10000

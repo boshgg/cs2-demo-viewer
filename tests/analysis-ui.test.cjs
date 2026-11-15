@@ -33,6 +33,7 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
   const elements = new Map(), canvases = [], downloads = [], downloadBlobs = new Map(), requests = [], timers = new Map(), parseBodies = [], reparseBodies = [], summaryFailures = new Map();
   const mapGates = new Map(), resizeObservers = [], timerDelays = new Map(), savedWrites = [];
   let nextTimer = 0, analysisCalls = 0, refreshError = '', reparseRequestError = '';
+  const workerMessages = [], workerReplies = []; let workerDeferred = false, workerDatasets = [];
   class Element {
     constructor(tag = 'div') {
       this.tagName = tag; this.children = []; this.listeners = {}; this.style = {}; this.dataset = {};
@@ -186,6 +187,15 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
     setTimeout: (callback, delay = 0) => { const id = ++nextTimer; timers.set(id, callback); timerDelays.set(id, delay); if (!delay) queueMicrotask(() => { if (timers.has(id)) { timers.delete(id); timerDelays.delete(id); callback(); } }); return id; },
     clearTimeout: id => { timers.delete(id); timerDelays.delete(id); },
   };
+  if (pageOptions.worker) sandbox.Worker = class {
+    postMessage(input) {
+      const message = structuredClone(input); workerMessages.push(message);
+      if (message.type === 'datasets') { workerDatasets = message.datasets; return; }
+      const reply = () => { analysisCalls++; const result = analysis.aggregate(workerDatasets, message.filter); result.groups = analysis.clusterUtilities(result.utilities, message.cluster); this.onmessage({ data: { id: message.id, result } }); };
+      if (workerDeferred) workerReplies.push(reply); else queueMicrotask(reply);
+    }
+    terminate() {}
+  };
   vm.runInNewContext(script, sandbox, { filename: 'analysis.js' });
   await settle();
   assert.equal(get('global-error').textContent, '', 'page initialization must not report an error');
@@ -195,6 +205,9 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
   return { get, main, canvases, downloads, requests, parseBodies, reparseBodies, renderedHeat, hasVisibleHeat, href: () => location.href,
     saved: () => JSON.parse(stored.get('cs2-analysis-v4') || '{}'),
     savedWrites, analysisCalls: () => analysisCalls,
+    workerMessages, setWorkerDeferred(value) { workerDeferred = value; }, async replyWorker() { assert.ok(workerReplies.length); workerReplies.shift()(); await settle(); },
+    async input(id, value) { get(id).value = String(value); await get(id).dispatch('input'); await settle(); },
+    async flushMovement() { for (const [id, callback] of [...timers]) if (timerDelays.get(id) === 100) { timers.delete(id); timerDelays.delete(id); callback(); } await settle(); },
     setLibraryFiles(demos) { libraryFiles.clear(); for (const demo of demos) libraryFiles.set(demo.id, demo); },
     setLibraryInfo(info) { Object.assign(libraryInfo, info); },
     setJob(demo) { source.set(demo.id, demo); },
@@ -1284,6 +1297,69 @@ function utilityCountButton(ui, key) { return ui.get('utility-time-counts').chil
 function utilityCounts(ui) { return Object.fromEntries(ui.get('utility-time-counts').children.map(button => [button.dataset.timeBucket, Number(button.dataset.count)])); }
 function textWithin(element) { return [element.textContent, ...element.children.map(textWithin)].join(' '); }
 function csvRows(text) { return text.replace(/^\ufeff/, '').split('\r\n').map(row => row.slice(1, -1).split('","').map(cell => cell.replace(/""/g, '"'))); }
+
+function movementDemo(id = 'movement') {
+  const demo = utilityDemo(id); demo.movementTimingVersion = 1;
+  demo.series[0].cells = [[256, 768, 0, 7, 5, 1, 10], [384, 768, 0, 5, 0, 0, 0]];
+  demo.series[0].movementTimeline = [[256, 768, 0, 0, 2], [256, 768, 0, 5, 3], [384, 768, 0, 20, 4], [384, 768, 0, 114, 1]];
+  demo.series[0].movementUntimedCells = [[256, 768, 0, 0, 2]];
+  return demo;
+}
+
+test('movement dual range displays round countdown and changes only movement while preserving existing filters and utility detail', async () => {
+  const demo = movementDemo(), ui = await page([demo], { saved: { selectedDemos: [demo.id], selectedTeams: ['alias:squad'], selectedPlayers: [demo.players[0].id], aliases: { 'team-a': 'Squad' }, side: '3', utilityTime: '5-20', layers: ['movement', 'deaths'] } });
+  const before = viewIndependentSettings(ui.saved()), utilities = utilityCounts(ui), metrics = ['engagements', 'deaths', 'utilities'].map(key => ui.get(`metric-${key}`).textContent);
+  assert.equal(ui.get('metric-movement').textContent, '12.0 秒'); assert.match(ui.get('movement-time-label').textContent, /全部时段/); assert.equal(ui.get('movement-time-all')['aria-pressed'], 'true');
+  await ui.get('utility-groups').children[0].click(); await settle(); const detail = textWithin(ui.get('utility-detail'));
+  await ui.change('movement-time-end', '20'); await ui.change('movement-time-start', '5');
+  assert.equal(ui.get('movement-time-label').textContent, '1:50 → 1:35'); assert.equal(ui.get('movement-time-start-value').textContent, '1:50'); assert.equal(ui.get('movement-time-end-value').textContent, '1:35');
+  assert.equal(ui.get('movement-time-start')['aria-valuetext'], '倒计时 1:50，开局后 5 秒'); assert.match(ui.get('movement-time-help').textContent, /5–20 秒，含开始、不含结束/);
+  assert.equal(ui.get('metric-movement').textContent, '3.0 秒'); assert.deepEqual(['engagements', 'deaths', 'utilities'].map(key => ui.get(`metric-${key}`).textContent), metrics); assert.deepEqual(utilityCounts(ui), utilities);
+  assert.deepEqual(viewIndependentSettings(ui.saved()), before); assert.deepEqual(ui.saved().movementTime, { start: 5, end: 20 }); assert.equal(ui.get('utility-detail').hidden, false); assert.equal(textWithin(ui.get('utility-detail')), detail);
+  assert.match(ui.get('movement-time-coverage').textContent, /时间记录完整/); assert.match(ui.get('movement-time-coverage').textContent, /2.0 秒位于 1:55 倒计时之后/);
+  await ui.get('movement-time-all').click(); await settle(); assert.equal(ui.saved().movementTime, null); assert.equal(ui.get('metric-movement').textContent, '12.0 秒'); assert.deepEqual(viewIndependentSettings(ui.saved()), before); assert.equal(ui.get('movement-time-coverage').hidden, true);
+  await ui.change('movement-time-start', '0'); assert.equal(ui.get('metric-movement').textContent, '10.0 秒', 'explicit 1:55–0:00 excludes known after-clock movement while All retains it');
+});
+
+test('movement endpoints enforce a one-second interval, persist valid numeric preferences and safely discard malformed saved ranges', async () => {
+  const ui = await page([movementDemo()], { saved: { movementTime: { start: 5.4, end: 20.4 }, aliases: { 'team-a': 'Retained' } } });
+  assert.deepEqual(ui.saved().movementTime, { start: 5, end: 20 }); await ui.change('movement-time-start', '115'); assert.deepEqual(ui.saved().movementTime, { start: 19, end: 20 });
+  await ui.change('movement-time-end', '-10'); assert.deepEqual(ui.saved().movementTime, { start: 19, end: 20 }); assert.equal(ui.get('movement-time-end').value, '20');
+  await ui.change('movement-time-end', '115'); await ui.change('movement-time-start', '115'); assert.deepEqual(ui.saved().movementTime, { start: 114, end: 115 }); assert.equal(ui.get('movement-time-label').textContent, '0:01 → 0:00'); assert.equal(ui.get('metric-movement').textContent, '1.0 秒');
+  const restored = await page([movementDemo()], { saved: ui.saved() }); assert.deepEqual(restored.saved().movementTime, { start: 114, end: 115 }); assert.equal(restored.get('metric-movement').textContent, '1.0 秒');
+  await restored.get('clear-selection').click(); await settle(); assert.equal(restored.saved().movementTime, null); assert.deepEqual(restored.saved().aliases, { 'team-a': 'Retained' });
+  for (const value of [{ start: '5', end: 20 }, { start: 20, end: 5 }, { start: 20, end: 20 }, [0, 20], 'all']) { const invalid = await page([movementDemo()], { saved: { movementTime: value } }); assert.equal(invalid.saved().movementTime, null); assert.equal(invalid.get('metric-movement').textContent, '12.0 秒'); }
+  const empty = await page([], { saved: { movementTime: { start: 0, end: 5 } } }); await empty.change('movement-time-end', '6'); assert.deepEqual(empty.saved().movementTime, { start: 0, end: 6 }); assert.equal(empty.get('metric-movement').textContent, '—'); assert.equal(empty.get('export-image').disabled, true);
+});
+
+test('missing movement timing never falls back to whole-match heat and partial coverage counts only observed timed movement', async () => {
+  const legacy = dataset('legacy'), demo = movementDemo(), ui = await page([legacy], { saved: { movementTime: { start: 5, end: 20 } } });
+  assert.equal(ui.get('metric-movement').textContent, '缺少时间记录'); assert.equal(ui.hasVisibleHeat(), false); assert.match(ui.get('movement-time-coverage').textContent, /1 场旧缓存.*未用整场移动代替/); assert.equal(deaths(ui), 1);
+  ui.get('layer-deaths').checked = true; await ui.get('layer-deaths').dispatch('change'); assert.equal(ui.hasVisibleHeat(), true, 'other heat layers remain available with no movement clock');
+  await ui.get('movement-time-all').click(); await settle(); assert.equal(ui.get('metric-movement').textContent, '1.7 分钟'); assert.equal(ui.get('movement-time-coverage').hidden, true);
+  const mixed = await page([legacy, demo], { saved: { movementTime: { start: 5, end: 20 } } }); assert.equal(mixed.get('metric-movement').textContent, '3.0 秒'); assert.match(mixed.get('movement-time-coverage').textContent, /1 \/ 2 场有记录/); assert.match(mixed.get('movement-time-coverage').textContent, /缺失部分未用整场数据代替/); assert.equal(deaths(mixed), 2);
+});
+
+test('rapid movement drags throttle requests and keep one worker compute in flight while rejecting superseded output', async () => {
+  const ui = await page([movementDemo()], { worker: true }), initial = ui.workerMessages.filter(message => message.type === 'compute').length;
+  assert.equal(ui.get('metric-movement').textContent, '12.0 秒'); ui.setWorkerDeferred(true);
+  await ui.input('movement-time-start', 5); await ui.input('movement-time-start', 10); await ui.input('movement-time-end', 50);
+  assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial); assert.equal(ui.get('metric-movement').textContent, '计算中…'); assert.equal(ui.hasVisibleHeat(), false); assert.equal(ui.get('export-image').disabled, true);
+  await ui.flushMovement(); assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial + 1);
+  await ui.input('movement-time-start', 20); await ui.flushMovement(); await ui.input('movement-time-end', 40); await ui.flushMovement();
+  assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial + 1, 'only the most recent pending request is retained behind the in-flight compute');
+  await ui.replyWorker(); assert.equal(ui.get('metric-movement').textContent, '计算中…'); assert.equal(ui.hasVisibleHeat(), false, 'superseded worker output cannot repaint the previous range');
+  assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial + 2); assert.deepEqual(ui.workerMessages.at(-1).filter.movementTime, { start: 20, end: 40 });
+  await ui.replyWorker(); assert.equal(ui.get('metric-movement').textContent, '4.0 秒'); assert.equal(ui.get('movement-time-label').textContent, '1:35 → 1:15'); assert.equal(ui.get('export-image').disabled, false); assert.equal(ui.hasVisibleHeat(), true);
+  ui.setWorkerDeferred(false); await ui.input('movement-time-end', 21); await ui.get('movement-time-end').dispatch('change'); await settle(); assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial + 3, 'change flushes the latest range immediately'); await ui.flushMovement(); assert.equal(ui.workerMessages.filter(message => message.type === 'compute').length, initial + 3);
+});
+
+test('PNG export records selected countdown, elapsed interval and movement coverage without changing CSV utility timing', async () => {
+  const ui = await page([movementDemo()], { saved: { movementTime: { start: 5, end: 20 }, utilityTime: '5-20' } });
+  await ui.get('export-image').click(); const output = ui.canvases.at(-1), text = output.context.texts.map(item => item[0]).join('\n');
+  assert.match(text, /移动 3.0 秒 \[1:50 → 1:35\]/); assert.match(text, /开局后 5–20 秒 \[含开始，不含结束\]/); assert.match(text, /时间记录完整/); assert.ok(output.context.texts.every(([, , y]) => y < 802));
+  await ui.get('export-csv').click(); const csv = await ui.downloads.at(-1).blob.text(); assert.match(csv, /5–20 秒/); assert.equal(csvRows(csv).length, 2); assert.equal(ui.saved().utilityTime, '5-20');
+});
 
 test('utility time options and clickable distribution filter groups without altering movement, combat or death heatmaps', async () => {
   const ui = await page([utilityDemo()]);

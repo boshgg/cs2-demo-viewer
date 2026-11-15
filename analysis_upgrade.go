@@ -15,10 +15,12 @@ import (
 var errAnalysisUpgradeStale = errors.New("analysis upgrade revision is no longer current")
 
 type analysisTimingReplay struct {
-	ID        string    `json:"id"`
-	Map       string    `json:"map"`
-	Rounds    []Round   `json:"rounds"`
-	Utilities []Utility `json:"utilities"`
+	ID            string    `json:"id"`
+	Map           string    `json:"map"`
+	Rounds        []Round   `json:"rounds"`
+	Utilities     []Utility `json:"utilities"`
+	Events        []Event   `json:"events"`
+	FramesPresent bool      `json:"-"`
 }
 
 type analysisUpgradeSnapshot struct {
@@ -59,8 +61,8 @@ func (a *app) currentAnalysisUpgrade(snapshot analysisUpgradeSnapshot) bool {
 	return a.currentAnalysisUpgradeLocked(snapshot)
 }
 
-// Decode only timing-bearing replay fields. Frames are not retained or expanded
-// into PlayerFrame objects; one app-wide gate bounds concurrent cache decoding.
+// Decode a bounded gzip JSON document and verify its complete trailer. Runtime
+// replay upgrades use streamAnalysisReplay so the frame array is never retained.
 func readAnalysisTimingJSON(ctx context.Context, path string, limit int64, out any) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -89,8 +91,13 @@ func readAnalysisTimingJSON(ctx context.Context, path string, limit int64, out a
 
 const analysisTimingUnavailableWarning = "道具投掷时机暂无法从完整回放缓存补齐，已归入“时机未知”；原有热力图和道具数量不变。可重新读取，或在原录像可用时重新解析。"
 
+// One-second spatial bins can exceed the former 64 MiB summary limit in long
+// recordings. The app-wide upgrade gate still permits only one decode at a time.
+const analysisSummaryReadLimit int64 = 256 << 20
+
 // All existing fields remain raw JSON, including team/player IDs and future
-// fields this binary does not know about. Only utility timing fields are patched.
+// fields this binary does not know about. This function only patches utilities;
+// movement timing is upgraded separately without rewriting existing cell values.
 func patchAnalysisUtilityTiming(summary map[string]json.RawMessage, replay *analysisTimingReplay) error {
 	var utilities []map[string]json.RawMessage
 	if raw := summary["utilities"]; len(raw) > 0 {
@@ -187,7 +194,7 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 	}
 	before := analysisFingerprint(snapshot.summary)
 	var summary map[string]json.RawMessage
-	if err := readAnalysisTimingJSON(ctx, snapshot.summary, 64<<20, &summary); err != nil {
+	if err := readAnalysisTimingJSON(ctx, snapshot.summary, analysisSummaryReadLimit, &summary); err != nil {
 		if !a.currentAnalysisUpgrade(snapshot) {
 			return nil, errAnalysisUpgradeStale
 		}
@@ -202,9 +209,11 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	var version int
+	var version, movementVersion int
 	_ = json.Unmarshal(summary["utilityTimingVersion"], &version)
-	if version >= analysisUtilityTimingVersion {
+	_ = json.Unmarshal(summary["movementTimingVersion"], &movementVersion)
+	needUtility, needMovement := version < analysisUtilityTimingVersion, movementVersion < analysisMovementTimingVersion
+	if !needUtility && !needMovement {
 		return nil, nil
 	}
 	var id string
@@ -219,7 +228,7 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 	} else if skipRetry {
 		upgradeErr = fmt.Errorf("unchanged cache upgrade previously failed")
 	} else {
-		upgradeErr = readAnalysisTimingJSON(ctx, snapshot.replay, maxUploadBytes, &replay)
+		upgradeErr = streamAnalysisReplay(ctx, snapshot.replay, &replay, nil)
 		if upgradeErr == nil && (replay.ID != snapshot.id || snapshot.mapName != "" && !strings.EqualFold(replay.Map, snapshot.mapName)) {
 			upgradeErr = fmt.Errorf("replay identity mismatch")
 		}
@@ -231,10 +240,25 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 		return nil, err
 	}
 	if upgradeErr == nil {
-		if err := patchAnalysisUtilityTiming(summary, &replay); err != nil {
+		if needMovement {
+			var movements map[analysisSeriesKey]*analysisMovementAccumulator
+			movements, upgradeErr = upgradeAnalysisMovement(ctx, snapshot.replay, &replay)
+			if upgradeErr == nil {
+				upgradeErr = patchAnalysisMovementTiming(summary, movements)
+			}
+		}
+		if upgradeErr == nil && needUtility {
+			upgradeErr = patchAnalysisUtilityTiming(summary, &replay)
+		}
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		upgradeErr = a.commitAnalysisTiming(ctx, snapshot, before, summary)
+		if upgradeErr == nil && analysisFingerprint(snapshot.replay) != replayFingerprint {
+			upgradeErr = fmt.Errorf("replay changed during timing upgrade")
+		}
+		if upgradeErr == nil {
+			upgradeErr = a.commitAnalysisTiming(ctx, snapshot, before, summary)
+		}
 		if upgradeErr == nil {
 			delete(a.analysisUpgradeFailures, snapshot.id)
 			return nil, nil
@@ -243,7 +267,12 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 			return nil, upgradeErr
 		}
 		// A failed atomic write must not pretend the on-disk upgrade completed.
-		delete(summary, "utilityTimingVersion")
+		if needUtility {
+			delete(summary, "utilityTimingVersion")
+		}
+		if needMovement {
+			delete(summary, "movementTimingVersion")
+		}
 	}
 	if !skipRetry {
 		a.analysisUpgradeFailures[snapshot.id] = analysisUpgradeFailure{Revision: snapshot.revision, Replay: replayFingerprint, Summary: before, At: time.Now()}
@@ -254,8 +283,15 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := patchAnalysisUtilityTiming(summary, nil); err != nil {
-		return nil, err
+	if needUtility {
+		if err := patchAnalysisUtilityTiming(summary, nil); err != nil {
+			return nil, err
+		}
+	}
+	if needMovement {
+		if err := patchAnalysisMovementTiming(summary, nil); err != nil {
+			return nil, err
+		}
 	}
 	return json.Marshal(summary)
 }

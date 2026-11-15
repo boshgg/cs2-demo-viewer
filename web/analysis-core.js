@@ -22,6 +22,18 @@
   const asSet = x => x == null ? null : new Set(x);
   const chosen = (set, value) => !set || set.has(value);
   const distance2 = (a, b) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+  const movementDuration = 115;
+  function normalizeMovementTime(value) {
+    if (!value || typeof value !== 'object' || !valid(value.start) || !valid(value.end)) return null;
+    let start = Math.max(0, Math.min(movementDuration, Math.round(value.start)));
+    let end = Math.max(0, Math.min(movementDuration, Math.round(value.end)));
+    if (start > end) [start, end] = [end, start];
+    if (start === end) {
+      if (end < movementDuration) end++;
+      else start--;
+    }
+    return { start, end };
+  }
   const utilityTimeBuckets = Object.freeze([
     { key: '0-5', label: '开局 0–5 秒' }, { key: '5-20', label: '5–20 秒' },
     { key: '20-50', label: '20–50 秒' }, { key: '50+', label: '50 秒以后' },
@@ -51,6 +63,8 @@
   function floorOf(z, lowerMaxZ) { return valid(lowerMaxZ) ? (z < lowerMaxZ ? 'lower' : 'upper') : 'all'; }
   function aggregate(input, filter = {}) {
     const demos = uniqueDemos(input), map = filter.map || demos[0]?.map || '';
+    const movementTime = normalizeMovementTime(filter.movementTime);
+    const movementCoverage = movementTime ? { status: 'empty', selectedDemos: 0, timedDemos: 0, missingDemos: 0, missingDemoIds: [], totalSeconds: 0, timedSeconds: 0, unknownSeconds: 0, beyondSeconds: 0, selectedSeconds: 0, coverage: null } : null;
     const ids = asSet(filter.demoIds), players = asSet(filter.playerIds), teams = asSet(filter.teamIds), sides = asSet(filter.sides?.map(Number));
     const cells = new Map(), utilities = [], seenUtilities = new Set(), includedPlayers = new Set(), includedTeams = new Set(), includedDemos = new Set();
     const utilityTimeCounts = Object.fromEntries(utilityTimeBuckets.map(bucket => [bucket.key, 0]));
@@ -61,22 +75,76 @@
     for (const d of demos) {
       if (d.map !== map || !chosen(ids, d.id)) continue;
       let contributed = false;
+      let movementObserved = false;
+      const timingAvailable = d.movementTimingVersion === 1;
       for (const series of d.series || []) {
         const playerId = String(series.playerId), teamId = teamKey(d.id, series.teamId, filter.teamAliases);
         if (!chosen(players, playerId) || !chosen(teams, teamId) || !chosen(sides, Number(series.side))) continue;
         let populated = false;
+        let fullSeconds = 0, fullCellCount = 0;
         for (const row of series.cells || []) {
           if (!Array.isArray(row) || row.length < 6 || !row.slice(0, 3).every(valid) || !includeFloor(row[2])) continue;
           const values = [3, 4, 5, 6].map(i => valid(row[i]) && row[i] > 0 ? row[i] : 0);
           if (!values.some(v => v > 0)) continue;
+          // A time selection changes movement only; retain the original scope
+          // counts even when this player's movement falls outside that range.
+          populated = true;
+          if (movementTime) {
+            fullSeconds += values[0];
+            if (values[0] > 0) fullCellCount++;
+            values[0] = 0;
+            if (!values.some(v => v > 0)) continue;
+          }
           const key = `${row[0]},${row[1]},${row[2]}`;
           if (!cells.has(key)) cells.set(key, [row[0], row[1], row[2], 0, 0, 0, 0]);
           const target = cells.get(key);
           values.forEach((v, i) => { target[i + 3] += v; });
           totals.movementSeconds += values[0]; totals.engagements += values[1]; totals.deaths += values[2]; totals.shots += values[3];
-          populated = true;
+        }
+        if (movementTime) {
+          let timedSeconds = 0;
+          if (timingAvailable) for (const row of series.movementTimeline || []) {
+            if (!Array.isArray(row) || row.length < 5 || !valid(row[0]) || !valid(row[1]) || !valid(row[2]) || !includeFloor(row[2]) || !Number.isInteger(row[3]) || row[3] < 0 || row[3] >= movementDuration || !valid(row[4]) || row[4] <= 0) continue;
+            timedSeconds += row[4];
+            populated = true;
+            // Bins represent [second, second + 1), so an end of 115
+            // includes bin 114, never the post-countdown observations.
+            if (row[3] < movementTime.start || row[3] >= movementTime.end) continue;
+            const key = `${row[0]},${row[1]},${row[2]}`;
+            if (!cells.has(key)) cells.set(key, [row[0], row[1], row[2], 0, 0, 0, 0]);
+            cells.get(key)[3] += row[4];
+            totals.movementSeconds += row[4];
+          }
+          let unknownSeconds = 0, beyondSeconds = 0;
+          if (timingAvailable) for (const row of series.movementUntimedCells || []) {
+            if (!Array.isArray(row) || row.length < 5 || !valid(row[0]) || !valid(row[1]) || !valid(row[2]) || !includeFloor(row[2])) continue;
+            if (valid(row[3]) && row[3] > 0) unknownSeconds += row[3];
+            if (valid(row[4]) && row[4] > 0) beyondSeconds += row[4];
+          }
+          // Movement has its own weighted elevation, independent from shots
+          // and deaths. Its spatial evidence, rather than a mixed-metric Z,
+          // determines floor-scoped coverage. Legacy caches stay unknown.
+          if (!timingAvailable || (!Array.isArray(series.movementTimeline) && !Array.isArray(series.movementUntimedCells))) unknownSeconds = fullSeconds;
+          else if (selectedFloor === 'all') {
+            // Legacy cells round each duration to 4 decimals, while timelines
+            // preserve observed precision. Only deficits beyond that error
+            // bound indicate missing or malformed timing evidence.
+            const deficit = fullSeconds - timedSeconds - unknownSeconds - beyondSeconds;
+            if (deficit > fullCellCount * .00005 + 1e-6) unknownSeconds += deficit;
+          }
+          const observedSeconds = timedSeconds + unknownSeconds + beyondSeconds;
+          movementCoverage.totalSeconds += observedSeconds;
+          movementCoverage.timedSeconds += timedSeconds;
+          movementCoverage.beyondSeconds += beyondSeconds;
+          movementCoverage.unknownSeconds += unknownSeconds;
+          if (observedSeconds > 0) movementObserved = true;
         }
         if (populated) { includedPlayers.add(playerId); includedTeams.add(teamId); contributed = true; }
+      }
+      if (movementCoverage && movementObserved) {
+        movementCoverage.selectedDemos++;
+        if (timingAvailable) movementCoverage.timedDemos++;
+        else { movementCoverage.missingDemos++; movementCoverage.missingDemoIds.push(d.id); }
       }
       for (const u of d.utilities || []) {
         const teamId = teamKey(d.id, u.teamId, filter.teamAliases), playerId = String(u.playerId || '');
@@ -94,7 +162,14 @@
       if (contributed) { includedDemos.add(d.id); totals.rounds += Number(d.roundCount) || 0; }
     }
     totals.utilities = utilities.length; totals.players = includedPlayers.size; totals.teams = includedTeams.size; totals.demos = includedDemos.size;
-    return { map, cells: [...cells.values()], utilities, utilityTimeCounts, totals };
+    if (movementCoverage) {
+      movementCoverage.selectedSeconds = totals.movementSeconds;
+      if (movementCoverage.totalSeconds > 0) {
+        movementCoverage.coverage = Math.min(1, (movementCoverage.timedSeconds + movementCoverage.beyondSeconds) / movementCoverage.totalSeconds);
+        movementCoverage.status = movementCoverage.unknownSeconds > 1e-6 ? (movementCoverage.timedSeconds > 0 ? 'partial' : 'missing') : 'ready';
+      }
+    }
+    return { map, cells: [...cells.values()], utilities, utilityTimeCounts, totals, movementTime, movementCoverage };
   }
   function clusterUtilities(input, options = {}) {
     const landing = Math.max(1, Math.min(1024, Number(options.landing) || 128));
@@ -153,5 +228,5 @@
       return `"${safe.replace(/"/g, '""')}"`;
     }).join(',')).join('\r\n');
   }
-  return { aggregate, clusterUtilities, uniqueDemos, teamKey, floorOf, csv, utilityTimeBucket, utilityTimeLabel, utilityTimeBuckets };
+  return { aggregate, clusterUtilities, uniqueDemos, teamKey, floorOf, csv, utilityTimeBucket, utilityTimeLabel, utilityTimeBuckets, normalizeMovementTime, movementDuration };
 });

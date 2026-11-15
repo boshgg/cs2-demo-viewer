@@ -186,3 +186,127 @@ test('worker and direct aggregation use the same filtered counts, utilities and 
   assert.equal(messages[0].id,7);assert.deepEqual(JSON.parse(JSON.stringify(messages[0].result)),JSON.parse(JSON.stringify(direct)));
   assert.deepEqual(direct.utilityTimeCounts,{'0-5':1,'5-20':1,'20-50':0,'50+':0,unknown:1});
 });
+
+function movementDemo(id = 'timed', overrides = {}) {
+  return demo(id, {
+    movementTimingVersion: 1,
+    series: [{ playerId: '76561198000000001', teamId: 'name:a', side: 3, rounds: 2,
+      cells: [[0, 0, 0, 16, 2, 1, 3]],
+      movementTimeline: [[0, 0, 0, 0, .5], [0, 0, 0, 4, 1.5], [0, 0, 0, 5, 2], [0, 0, 0, 19, 3], [0, 0, 0, 20, 1], [0, 0, 0, 114, 4]],
+      movementUntimedCells: [[0, 0, 0, 1, 3]], movementUnknownSeconds: 1, movementBeyondSeconds: 3,
+    }], ...overrides,
+  });
+}
+
+test('movement ranges normalize to integer elapsed seconds with at least one second and never reinterpret full as 0..115', () => {
+  assert.equal(A.movementDuration, 115);
+  for (const value of [undefined, null, false, 'all', {}, {start:NaN,end:20}, {start:1,end:Infinity}, {start:'5',end:20}]) assert.equal(A.normalizeMovementTime(value), null);
+  for (const [input, expected] of [
+    [{start:-5,end:200},{start:0,end:115}], [{start:20,end:5},{start:5,end:20}],
+    [{start:4.4,end:19.6},{start:4,end:20}], [{start:10,end:10},{start:10,end:11}],
+    [{start:115,end:115},{start:114,end:115}], [{start:0,end:0},{start:0,end:1}],
+  ]) assert.deepEqual(A.normalizeMovementTime(input), expected);
+  const d=movementDemo(),full=A.aggregate([d]);
+  assert.equal(full.totals.movementSeconds,16);assert.equal(full.movementTime,null);assert.equal(full.movementCoverage,null);
+  assert.equal(A.aggregate([d],{movementTime:{start:0,end:115}}).totals.movementSeconds,12);
+  assert.equal(d.series[0].cells[0][3],16,'range normalization must not mutate source data');
+});
+
+test('movement ranges use half-open one-second bins, sum overlapping round observations, and conserve all movement evidence', () => {
+  const d=movementDemo(),before=structuredClone(d);
+  const early=A.aggregate([d],{movementTime:{start:0,end:5}}), middle=A.aggregate([d],{movementTime:{start:5,end:20}}),late=A.aggregate([d],{movementTime:{start:20,end:115}});
+  assert.equal(early.totals.movementSeconds,2);assert.equal(middle.totals.movementSeconds,5);assert.equal(late.totals.movementSeconds,5);
+  assert.equal(A.aggregate([d],{movementTime:{start:114,end:115}}).totals.movementSeconds,4);
+  const all=A.aggregate([d],{movementTime:{start:0,end:115}}),c=all.movementCoverage;
+  assert.equal(early.totals.movementSeconds+middle.totals.movementSeconds+late.totals.movementSeconds,all.totals.movementSeconds);
+  assert.deepEqual(c,{status:'partial',selectedDemos:1,timedDemos:1,missingDemos:0,missingDemoIds:[],totalSeconds:16,timedSeconds:12,unknownSeconds:1,beyondSeconds:3,selectedSeconds:12,coverage:15/16});
+  assert.equal(c.timedSeconds+c.unknownSeconds+c.beyondSeconds,A.aggregate([d]).totals.movementSeconds);
+  assert.deepEqual(d,before);
+});
+
+test('an elapsed range replaces only movement and does not change scope, combat, deaths, shots or utility-time filtering', () => {
+  const one=movementDemo(),two=movementDemo('movement-only');
+  one.utilities=[timedUtility('early',3),timedUtility('late',60),timedUtility('unknown',null,{timeSource:'unknown'})];
+  two.series[0].cells=[[50,0,0,2,0,0,0]];two.series[0].movementTimeline=[[50,0,0,0,2]];two.series[0].movementUntimedCells=[];
+  const otherMetrics = result => Object.fromEntries(Object.entries(result.totals).filter(([key]) => key!=='movementSeconds'));
+  for(const utilityTime of ['all','0-5','50+','unknown']) {
+    const full=A.aggregate([one,two],{utilityTime}),range=A.aggregate([one,two],{utilityTime,movementTime:{start:40,end:50}});
+    assert.equal(range.totals.movementSeconds,0);
+    assert.deepEqual(otherMetrics(range),otherMetrics(full));
+    assert.deepEqual(range.utilities,full.utilities);assert.deepEqual(range.utilityTimeCounts,full.utilityTimeCounts);
+    assert.deepEqual(range.cells.map(row=>[...row.slice(0,3),...row.slice(4)]),[[0,0,0,2,1,3]]);
+  }
+});
+
+test('old, unsupported and missing timing evidence never masquerades as whole-round movement in range mode', () => {
+  const legacy=demo('legacy'),future=movementDemo('future',{movementTimingVersion:2});
+  const ranged=A.aggregate([legacy,legacy,future],{movementTime:{start:0,end:115}});
+  assert.equal(ranged.totals.movementSeconds,0);assert.equal(ranged.totals.engagements,3);
+  assert.deepEqual(ranged.movementCoverage,{status:'missing',selectedDemos:2,timedDemos:0,missingDemos:2,missingDemoIds:['legacy','future'],totalSeconds:18,timedSeconds:0,unknownSeconds:18,beyondSeconds:0,selectedSeconds:0,coverage:0});
+  assert.equal(A.aggregate([legacy,future]).totals.movementSeconds,18);
+  const absent=movementDemo('absent');delete absent.series[0].movementTimeline;delete absent.series[0].movementUntimedCells;
+  const result=A.aggregate([absent],{movementTime:{start:0,end:115}});
+  assert.equal(result.movementCoverage.unknownSeconds,16);assert.equal(result.movementCoverage.status,'missing');
+  assert.equal(result.totals.movementSeconds,0);
+});
+
+test('movement timings and coverage obey map, demo, player, team aliases, side and floor selections without double-counting demos', () => {
+  const makeSeries = (overrides={}) => ({playerId:'76561198000000001',teamId:'name:a',side:3,cells:[[0,0,-500,4,1,1,1]],movementTimeline:[[0,0,-500,5,2]],movementUntimedCells:[[0,0,-500,1,1]],...overrides});
+  const one=movementDemo('one',{series:[makeSeries(),makeSeries({playerId:'76561198000000002'}),makeSeries({side:2}),makeSeries({teamId:'name:other'}),makeSeries({cells:[[0,0,100,4,1,1,1]],movementTimeline:[[0,0,100,5,2]],movementUntimedCells:[[0,0,100,1,1]]})]});
+  const two=movementDemo('two',{series:[makeSeries({teamId:'name:variant'})]}),otherMap=movementDemo('nuke',{map:'de_nuke'}),unselected=movementDemo('unselected');
+  const filter={map:'de_mirage',demoIds:['one','two','nuke'],playerIds:['76561198000000001'],teamAliases:{'name:a':'Team','name:variant':'TEAM'},teamIds:['alias:team'],sides:[3],floor:'lower',lowerMaxZ:0,movementTime:{start:5,end:6}};
+  const result=A.aggregate([one,two,one,otherMap,unselected],filter);
+  assert.deepEqual(result.cells,[[0,0,-500,4,2,2,2]]);
+  assert.equal(result.totals.demos,2);assert.equal(result.totals.players,1);assert.equal(result.totals.teams,1);
+  assert.deepEqual(result.movementCoverage,{status:'partial',selectedDemos:2,timedDemos:2,missingDemos:0,missingDemoIds:[],totalSeconds:8,timedSeconds:4,unknownSeconds:2,beyondSeconds:2,selectedSeconds:4,coverage:.75});
+  assert.equal(A.aggregate([one,two],{...filter,sides:[]}).movementCoverage.status,'empty');
+  assert.equal(A.aggregate([one,two],{...filter,playerIds:[]}).movementCoverage.totalSeconds,0);
+});
+
+test('floor coverage uses movement elevations rather than elevations mixed with combat events', () => {
+  const d=movementDemo();d.series[0].cells=[[0,0,-490,8,1,1,1]];
+  d.series[0].movementTimeline=[[0,0,-500,5,3],[0,0,-480,5,1]];
+  d.series[0].movementUntimedCells=[[0,0,-500,1,1],[0,0,-480,1,1]];
+  const lower=A.aggregate([d],{floor:'lower',lowerMaxZ:-495,movementTime:{start:0,end:115}}),upper=A.aggregate([d],{floor:'upper',lowerMaxZ:-495,movementTime:{start:0,end:115}});
+  assert.equal(lower.totals.movementSeconds,3);assert.equal(lower.movementCoverage.totalSeconds,5);assert.equal(lower.movementCoverage.unknownSeconds,1);assert.equal(lower.movementCoverage.beyondSeconds,1);
+  assert.equal(upper.totals.movementSeconds,1);assert.equal(upper.movementCoverage.totalSeconds,3);
+  assert.equal(lower.movementCoverage.totalSeconds+upper.movementCoverage.totalSeconds,8);
+});
+
+test('no selected-time movement is distinct from missing evidence, and post-countdown movement is not unknown', () => {
+  const d=movementDemo();d.series[0].cells=[[0,0,0,5,0,0,0]];d.series[0].movementTimeline=[[0,0,0,5,2]];d.series[0].movementUntimedCells=[[0,0,0,0,3]];
+  const emptyRange=A.aggregate([d],{movementTime:{start:50,end:60}});
+  assert.equal(emptyRange.totals.movementSeconds,0);assert.equal(emptyRange.movementCoverage.status,'ready');assert.equal(emptyRange.movementCoverage.coverage,1);assert.equal(emptyRange.movementCoverage.beyondSeconds,3);
+  assert.equal(A.aggregate([d],{demoIds:[],movementTime:{start:0,end:115}}).movementCoverage.status,'empty');
+  assert.equal(A.aggregate([],{movementTime:{start:0,end:115}}).movementCoverage.coverage,null);
+});
+
+test('invalid timing values cannot poison or expand a selected range, and lost known totals remain unknown', () => {
+  const d=movementDemo();d.series[0].cells=[[0,0,0,8,0,0,0]];d.series[0].movementUntimedCells=[];
+  d.series[0].movementTimeline=[[0,0,0,0,1],[0,0,0,114,1],[0,0,0,115,1],[0,0,0,-1,1],[0,0,0,.5,1],[0,0,0,'5',1],[0,0,0,2,NaN],[NaN,0,0,2,1],[0,0,0,3,-1]];
+  const result=A.aggregate([d],{movementTime:{start:0,end:115}});
+  assert.equal(result.totals.movementSeconds,2);assert.equal(result.movementCoverage.unknownSeconds,6);assert.equal(result.movementCoverage.coverage,.25);
+  assert.ok(result.cells.flat().every(Number.isFinite));
+});
+
+test('worker range results equal direct aggregation and changing requests cannot reuse another range', () => {
+  const messages=[],sandbox={self:{postMessage:message=>messages.push(message)},importScripts(){}};
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../web/analysis-core.js'),'utf8'),sandbox,{filename:'analysis-core.js'});
+  const datasets=[movementDemo('one'),movementDemo('one'),demo('legacy')],cluster={landing:128,throwing:64};
+  sandbox.self.onmessage({data:{type:'datasets',datasets}});
+  for (const [id,movementTime] of [[1,{start:0,end:5}],[2,{start:5,end:20}],[3,null]]) {
+    const filter={movementTime};sandbox.self.onmessage({data:{type:'compute',id,filter,cluster}});
+    const expected=A.aggregate(datasets,filter);expected.groups=A.clusterUtilities(expected.utilities,cluster);
+    assert.equal(messages.at(-1).id,id);assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1).result)),JSON.parse(JSON.stringify(expected)));
+  }
+  assert.deepEqual(messages.map(message=>message.result.totals.movementSeconds),[2,5,18]);
+});
+
+test('rounding of legacy per-cell movement durations does not invent unknown elapsed evidence', () => {
+  const d=movementDemo();d.series[0].movementUntimedCells=[];
+  d.series[0].cells=[[0,0,0,1.0001,0,0,0],[64,0,0,2.0001,0,0,0],[128,0,0,3.0001,0,0,0]];
+  d.series[0].movementTimeline=[[0,0,0,0,1.000051],[64,0,0,0,2.000051],[128,0,0,0,3.000051]];
+  const result=A.aggregate([d],{movementTime:{start:0,end:115}});
+  assert.equal(result.movementCoverage.unknownSeconds,0);assert.equal(result.movementCoverage.coverage,1);assert.equal(result.movementCoverage.status,'ready');
+  assert.ok(Math.abs(A.aggregate([d]).totals.movementSeconds-6.0003)<1e-10);
+});
