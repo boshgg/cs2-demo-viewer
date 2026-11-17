@@ -1,4 +1,4 @@
-param([string]$Version = '4.1.6')
+param([string]$Version = '4.1.7')
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Use a numeric semantic version, for example 4.0.0.' }
@@ -67,7 +67,8 @@ CS2 Replay v$Version - Windows x64 便携版
 已包含可执行程序，不需要安装 Go、Node.js 或 CS2。地图与图标内嵌，可离线使用。
 保持启动终端开启，在终端按 Ctrl+C 停止。解析记录保存在本目录 data 文件夹，重启会自动恢复，无需逐个重新导入；原始 demo 文件不会删除。
 原目录升级时替换 bin 程序和说明文件，保留 demo 与 data 文件夹。旧版升级后先在原目录启动一次，等待文件夹扫描完成并关闭程序；之后可重命名整个安装目录，缓存与原件的关联会保留。
-若端口冲突，在本目录运行 bin\cs2-viewer.exe -port 8766 -open。
+默认优先使用 8765 端口；占用时依次尝试后续端口，连续 20 个候选都不可用时由系统分配空闲端口。浏览器会打开实际地址，也可查看启动终端。可用 -port 8766 指定首选端口，占用时仍会自动切换。
+切换端口后，浏览器筛选偏好按新地址独立保存；demo 与 data 中的录像及解析缓存不受影响。同一 data 目录仍只能由一个进程使用，升级时请先关闭旧程序。
 统计口径、地图版本限制和素材归属请参阅 README.md、MAP_SOURCES.md、ICON_SOURCES.md 及 licenses。
 
 版本：$Version

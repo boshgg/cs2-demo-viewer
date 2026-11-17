@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -76,6 +77,8 @@ func jobCachePaths(root, id, revision string) (string, string) {
 	return filepath.Join(root, revision+".json.gz"), filepath.Join(root, revision+".analysis.json.gz")
 }
 
+var errLibraryLocked = errors.New("data directory is already in use or unavailable")
+
 func openLibrary(root, demoDir string, assets fs.FS) (*app, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
@@ -93,7 +96,7 @@ func openLibrary(root, demoDir string, assets fs.FS) (*app, error) {
 	}
 	lock, err := lockLibrary(root)
 	if err != nil {
-		return nil, fmt.Errorf("data directory is already in use or unavailable: %w", err)
+		return nil, fmt.Errorf("%w: %w", errLibraryLocked, err)
 	}
 	a := newApp(root, assets)
 	a.persistent = true

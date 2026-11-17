@@ -3,18 +3,16 @@ package main
 import (
 	"context"
 	"embed"
-	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"runtime"
-	"strconv"
 	"time"
 )
 
@@ -27,22 +25,12 @@ type viewerHealth struct {
 }
 
 // Reusing a different binary would silently open an older viewer after an upgrade.
-func canReuseViewer(health viewerHealth) (bool, error) {
-	if health.App != "cs2-local-viewer" {
-		return false, nil
-	}
-	if health.Version == appVersion {
-		return true, nil
-	}
-	runningVersion := health.Version
-	if runningVersion == "" {
-		runningVersion = "未知（未报告版本号）"
-	}
-	return false, fmt.Errorf("端口已被另一版本的 CS2 Replay 占用：运行版本 %s，当前程序版本 %s。请关闭旧程序后重新启动，或使用 -port 指定其他端口（例如 -port 8766）", runningVersion, appVersion)
+func canReuseViewer(health viewerHealth) bool {
+	return health.App == "cs2-local-viewer" && health.Version == appVersion
 }
 
 func main() {
-	port := flag.Int("port", 8765, "Local HTTP port")
+	port := flag.Int("port", 8765, "Preferred local HTTP port (automatically changes if unavailable)")
 	open := flag.Bool("open", false, "Open the viewer in the default browser")
 	restore := flag.String("restore-session", "", "Restore an explicitly selected local session manifest and parsed caches")
 	executable, err := os.Executable()
@@ -56,30 +44,21 @@ func main() {
 	if *port < 1 || *port > 65535 {
 		log.Fatal("invalid port")
 	}
-	addr := "127.0.0.1:" + strconv.Itoa(*port)
-	url := "http://" + addr
-	listener, err := net.Listen("tcp", addr)
+	listener, url, err := listenForViewer(*port)
 	if err != nil {
-		client := http.Client{Timeout: time.Second}
-		if res, e := client.Get(url + "/api/health"); e == nil {
-			defer res.Body.Close()
-			var health viewerHealth
-			if res.StatusCode == http.StatusOK && json.NewDecoder(res.Body).Decode(&health) == nil {
-				reuse, versionErr := canReuseViewer(health)
-				if versionErr != nil {
-					log.Fatal(versionErr)
-				}
-				if reuse {
-					fmt.Printf("CS2 Replay v%s already running: %s\n", appVersion, url)
-					if *open {
-						openBrowser(url)
-					}
-					return
-				}
-			}
-		}
-		log.Fatalf("Cannot listen on %s: %v. Try -port 8766", addr, err)
+		log.Fatal(err)
 	}
+	if url != fmt.Sprintf("http://127.0.0.1:%d", *port) {
+		fmt.Printf("Preferred port %d is unavailable; using %s\n", *port, url)
+	}
+	if listener == nil {
+		fmt.Printf("CS2 Replay v%s already running: %s\n", appVersion, url)
+		if *open {
+			openBrowser(url)
+		}
+		return
+	}
+	defer listener.Close()
 	assets, err := fs.Sub(webFiles, "web")
 	if err != nil {
 		log.Fatal(err)
@@ -87,6 +66,17 @@ func main() {
 	a, err := openLibrary(*dataDir, *demoDir, assets)
 	if err != nil {
 		_ = listener.Close()
+		// An earlier port may have become free since this viewer started on a
+		// fallback port. Recover that instance before reporting the library lock.
+		if errors.Is(err, errLibraryLocked) {
+			if runningURL := findRunningViewer(*port); runningURL != "" {
+				fmt.Printf("CS2 Replay v%s already running: %s\n", appVersion, runningURL)
+				if *open {
+					openBrowser(runningURL)
+				}
+				return
+			}
+		}
 		log.Fatalf("Cannot open local library: %v", err)
 	}
 	defer a.close()
