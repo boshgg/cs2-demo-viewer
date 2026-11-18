@@ -1,0 +1,8 @@
+#local-charts { max-width: 820px; }
+.spatial-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px 12px; margin: 12px 0; }
+.spatial-controls label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+.spatial-controls select { min-width: 0; margin: 0; }
+.spatial-figure { margin: 0; }
+.spatial-figure canvas { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 5px; }
+.spatial-footer { display: flex; gap: 10px; align-items: center; justify-content: space-between; margin-top: 8px; }
+.spatial-footer button { flex-shrink: 0; }

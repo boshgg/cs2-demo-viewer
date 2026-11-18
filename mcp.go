@@ -279,7 +279,7 @@ var mcpTools = []mcpToolSpec{
 	mcpSpec("get_demo_status", "Read parse progress and revision for one local demo.", true, mcpObject{"demoId": mcpIDSchema}, "demoId"),
 	mcpSpec("get_match_statistics", "Read match totals, player IDs, teams and rule version. Pass a round number for per-round economy, kills and player statistics.", true, mcpObject{
 		"demoId": mcpIDSchema, "round": mcpObject{"type": "integer", "minimum": 1}}, "demoId"),
-	mcpSpec("get_analysis_evidence", "Get evidence for up to 8 selected ready demos. Omit playerId/team first to discover IDs, then use one filter at a time. A synthetic demo is available by passing [\"sample\"] alone.", true, mcpObject{
+	mcpSpec("get_analysis_evidence", "Get match statistics and spatial evidence for up to 8 selected ready demos: map, side, round phase, occupancy, movements and fight locations. Read spatial.method for coordinates, units and coverage. Omit playerId/team first to discover IDs, then use one filter at a time. A synthetic demo is available by passing [\"sample\"] alone.", true, mcpObject{
 		"demoIds":  mcpObject{"type": "array", "items": mcpObject{"type": "string"}, "minItems": 1, "maxItems": 8, "uniqueItems": true},
 		"playerId": mcpObject{"type": "string"}, "team": mcpObject{"type": "string"}}, "demoIds"),
 }

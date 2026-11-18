@@ -175,7 +175,12 @@ func (a *app) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+		imageSources := "'self' data:"
+		if r.URL.Path == "/insights.html" {
+			// External model images load only when the user requests a preview.
+			imageSources += " https:"
+		}
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src "+imageSources+"; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'")
 		// Accept only direct loopback requests, including when a hostile DNS name resolves here.
 		host := r.Host
 		if h := strings.LastIndex(host, ":"); h >= 0 {

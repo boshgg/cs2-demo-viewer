@@ -11,6 +11,7 @@ import (
 )
 
 const maxInsightsDemos = 8
+const maxInsightsEvidenceBytes = 256 << 10
 
 type insightsRequest struct {
 	DemoIDs  []string `json:"demoIds"`
@@ -109,6 +110,7 @@ type insightsReport struct {
 	Matches           []insightsMatch  `json:"matches"`
 	Players           []insightsPlayer `json:"players"`
 	Teams             []insightsTeam   `json:"teams"`
+	Spatial           insightsSpatial  `json:"spatial"`
 	Notes             []string         `json:"notes"`
 }
 
@@ -170,8 +172,9 @@ func (a *app) buildInsightsEvidence(ctx context.Context, req insightsRequest) (*
 	players := make(map[string]insightsPlayer)
 	teams := make(map[string]insightsTeam)
 	var snapshots []statisticsSnapshot
+	spatial := newSpatialBuilder()
 	for _, id := range req.DemoIDs {
-		match, synthetic, snapshot, err := a.insightsMatchForID(ctx, id, req)
+		match, synthetic, snapshot, err := a.insightsMatchForID(ctx, id, req, spatial)
 		if err != nil {
 			return nil, err
 		}
@@ -221,14 +224,39 @@ func (a *app) buildInsightsEvidence(ctx context.Context, req insightsRequest) (*
 	if report.Synthetic {
 		report.Notes = append(report.Notes, "合成示例仅供验证功能，不能据此评价真实选手或战队。")
 	}
-	encoded, err := json.Marshal(report)
-	if err != nil {
+	report.Spatial = spatial.report()
+	if err := report.fitSize(maxInsightsEvidenceBytes); err != nil {
 		return nil, err
 	}
-	if len(encoded) > 128<<10 {
-		return nil, &insightsError{422, "所选录像产生的证据超过 128 KiB，请减少场数或指定玩家、队伍"}
-	}
 	return report, nil
+}
+
+func (r *insightsReport) fitSize(maxBytes int) error {
+	for {
+		encoded, err := json.Marshal(r)
+		if err != nil || len(encoded) <= maxBytes {
+			return err
+		}
+		shortened := false
+		for i := range r.Spatial.Groups {
+			g := &r.Spatial.Groups[i]
+			if n := len(g.Cells); n > 1 {
+				g.Cells = g.Cells[:max(1, n*2/3)]
+				shortened = true
+			}
+			if snapshot := g.OpeningAt15; snapshot != nil && len(snapshot.Cells) > 1 {
+				snapshot.Cells = snapshot.Cells[:max(1, len(snapshot.Cells)*2/3)]
+				shortened = true
+			}
+			if n := len(g.Moves); n > 1 {
+				g.Moves = g.Moves[:max(1, n*2/3)]
+				shortened = true
+			}
+		}
+		if !shortened {
+			return &insightsError{422, "所选录像产生的证据超过容量，请减少场数或指定玩家、队伍"}
+		}
+	}
 }
 
 func (p *insightsPlayer) add(part insightsPlayer) {
@@ -263,7 +291,7 @@ func staleInsights() error {
 
 // Decode and derive one recording at a time; share the normal statistics
 // concurrency limit so an Agent cannot load a second full replay alongside it.
-func (a *app) insightsMatchForID(ctx context.Context, id string, req insightsRequest) (insightsMatch, bool, statisticsSnapshot, error) {
+func (a *app) insightsMatchForID(ctx context.Context, id string, req insightsRequest, spatial *spatialBuilder) (insightsMatch, bool, statisticsSnapshot, error) {
 	var snapshot statisticsSnapshot
 	var empty insightsMatch
 	if id != "sample" {
@@ -314,6 +342,9 @@ func (a *app) insightsMatchForID(ctx context.Context, id string, req insightsReq
 		return empty, false, snapshot, err
 	}
 	match := summarizeInsightsMatch(d, stats, req)
+	if err := spatial.observe(ctx, d, stats, req); err != nil {
+		return empty, false, snapshot, err
+	}
 	match.Revision = snapshot.revision
 	return match, d.Synthetic, snapshot, nil
 }

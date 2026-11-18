@@ -25,6 +25,7 @@ func postInsights(t *testing.T, h http.Handler, body map[string]any) *httptest.R
 }
 
 func TestAIQuestionUsesSelectedEvidenceAndOwnCredentials(t *testing.T) {
+	const chart = "de_ancient，CT 第 15 秒站位，第 1 位 (-576, 576, 192)"
 	var calls atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -40,6 +41,9 @@ func TestAIQuestionUsesSelectedEvidenceAndOwnCredentials(t *testing.T) {
 		if !bytes.Contains(body, []byte("sample")) || !bytes.Contains(body, []byte("看看这三回合")) || !bytes.Contains(body, []byte("local-test")) {
 			t.Error("missing evidence, model or question")
 		}
+		if !bytes.Contains(body, []byte(chart)) {
+			t.Error("current chart markers missing from model request")
+		}
 		if r.Header.Get("Authorization") != "Bearer page-test-secret" || bytes.Contains(body, []byte("secret")) {
 			t.Error("incorrect key handling")
 		}
@@ -51,6 +55,7 @@ func TestAIQuestionUsesSelectedEvidenceAndOwnCredentials(t *testing.T) {
 	t.Setenv("CS2_AI_BASE_URL", "https://provider.invalid/v1")
 	_, h := testViewer(t)
 	input := map[string]any{"demoIds": []string{"sample"}, "baseUrl": provider.URL + "/v1/", "model": "local-test", "apiKey": "page-test-secret", "question": "看看这三回合"}
+	input["chartContext"] = chart
 	reply := postInsights(t, h, input)
 	if reply.Code != 200 || !strings.Contains(reply.Body.String(), "示例比赛的分析") || strings.Contains(reply.Body.String(), "secret") {
 		t.Fatalf("status %d %s", reply.Code, reply.Body.String())

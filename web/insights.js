@@ -66,7 +66,10 @@
     baseUrl.readOnly = Boolean(preset);
     model.value = preset?.model || '';
     el('provider-fields').hidden = system;
-    el('server-config').hidden = !system && value !== 'custom';
+    el('image-output-option').hidden = Boolean(preset);
+    el('image-output').checked = false;
+    el('server-config').hidden = false;
+    if (preset) message('server-config', '预设模型用于文字复盘。选好比赛后即可查看本地复盘图。');
     if (system) message('server-config', `使用查看器启动时配置的 ${config.model} @ ${config.endpoint}。`);
     if (value === 'custom') message('server-config', '填写兼容 Chat Completions 的服务地址和模型 ID。');
     cancelAnswer();
@@ -105,6 +108,11 @@
     answerRequest = null;
     el('result').hidden = true;
     el('answer').textContent = '';
+    if (el('image-viewer').open) el('image-viewer').close();
+    el('viewer-content').replaceChildren();
+    el('model-images').hidden = true;
+    el('image-warning').hidden = true;
+    el('image-gallery').replaceChildren();
     message('analysis-status', '');
     syncActions();
   }
@@ -220,6 +228,8 @@
     el('synthetic').hidden = !report.synthetic;
     el('evidence-content').hidden = false;
     message('evidence-status', `已读取 ${report.matches?.length ?? 0} 场比赛的统计证据。`);
+    el('charts-panel').hidden = false;
+    window.InsightsCharts.render(el('local-charts'), report, scope());
   }
 
   async function updateScope(resetSubject = false) {
@@ -230,6 +240,8 @@
     if (resetSubject) populateSubjects(null);
     renderMatches();
     el('evidence-content').hidden = true;
+    el('charts-panel').hidden = true;
+    el('local-charts').replaceChildren();
     el('retry-evidence').hidden = true;
     el('synthetic').hidden = !selected.has('sample');
     if (!selected.size) {
@@ -300,6 +312,110 @@
     syncActions();
   }
 
+  function imageSource(value) {
+    if (typeof value !== 'string') return null;
+    const embedded = /^data:image\/(png|jpeg|gif|webp);base64,/i.exec(value);
+    if (embedded) return { url: value, extension: embedded[1].toLowerCase() };
+    try {
+      const url = new URL(value);
+      if (url.protocol === 'https:' && !url.username && !url.password) return { url: url.href, host: url.host };
+    } catch { /* Skip unsupported image references. */ }
+    return null;
+  }
+
+  function picture(source, alt) {
+    const img = document.createElement('img');
+    img.alt = alt;
+    img.referrerPolicy = 'no-referrer';
+    if (source.host) img.crossOrigin = 'anonymous';
+    return img;
+  }
+
+  function showLargeImage(source, alt) {
+    const dialog = el('image-viewer');
+    const content = el('viewer-content');
+    const img = picture(source, alt);
+    img.addEventListener('error', () => {
+      if (content.contains(img)) content.replaceChildren(node('p', '图片加载失败，请关闭后重试。', 'hint'));
+    });
+    el('viewer-caption').textContent = alt;
+    content.replaceChildren(img);
+    dialog.showModal();
+    img.src = source.url;
+  }
+
+  function renderModelImages(items) {
+    const figures = [];
+    for (const item of Array.isArray(items) ? items : []) {
+      const source = imageSource(item?.url);
+      if (!source) continue;
+      const index = figures.length + 1;
+      const alt = typeof item.alt === 'string' && item.alt.trim() || `模型配图 ${index}`;
+      const figure = node('figure');
+      const img = picture(source, alt);
+      const actions = node('div', undefined, 'image-actions');
+      const zoom = node('button', '查看大图');
+      zoom.type = 'button';
+      zoom.addEventListener('click', () => showLargeImage(source, alt));
+      actions.append(zoom);
+      if (source.extension) {
+        const save = node('a', '保存图片');
+        save.href = source.url;
+        save.download = `cs2-review-${index}.${source.extension}`;
+        actions.append(save);
+      }
+      const load = node('button', '加载外部图片');
+      load.type = 'button';
+      const copy = node('button', '复制图片链接');
+      copy.type = 'button';
+      copy.hidden = true;
+      const status = node('p', source.host ? `图片来源：${source.host}` : '', 'hint');
+      status.setAttribute('role', 'status');
+      copy.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(source.url);
+          status.textContent = '已复制图片链接，可粘贴到浏览器单独查看。';
+        } catch {
+          const field = document.createElement('input');
+          field.readOnly = true;
+          field.value = source.url;
+          field.setAttribute('aria-label', '图片链接');
+          status.replaceChildren(field);
+          field.focus();
+          field.select();
+        }
+      });
+      actions.hidden = true;
+      img.hidden = true;
+      const loadPicture = () => {
+        load.hidden = true;
+        copy.hidden = true;
+        status.textContent = '正在加载图片…';
+        img.src = source.url;
+      };
+      load.addEventListener('click', loadPicture);
+      img.addEventListener('load', () => {
+        img.hidden = false;
+        actions.hidden = false;
+        status.textContent = source.host ? `图片来源：${source.host}` : '';
+      });
+      img.addEventListener('error', () => {
+        img.hidden = true;
+        actions.hidden = true;
+        status.textContent = source.host ? `无法加载来自 ${source.host} 的图片，链接可能已过期，或图片服务限制了跨站读取。` : '无法读取模型返回的图片。';
+        load.textContent = '重试加载';
+        load.hidden = !source.host;
+        copy.hidden = !source.host;
+      });
+      figure.append(node('figcaption', alt), status, img, load, copy, actions);
+      figures.push(figure);
+      if (!source.host) loadPicture();
+    }
+    el('image-gallery').replaceChildren(...figures);
+    el('model-images').hidden = !figures.length;
+    return figures.length;
+  }
+
   async function submit(event) {
     event.preventDefault();
     const connection = providerOptions();
@@ -313,13 +429,22 @@
     syncActions();
     message('analysis-status', '模型正在分析所选比赛…');
     try {
-      const result = await api('/api/insights/ask', { ...currentScope, ...connection.fields, question: prompt }, request.signal);
+      const payload = { ...currentScope, ...connection.fields, question: prompt };
+      const chartContext = window.InsightsCharts.describe?.(el('local-charts'));
+      if (chartContext) payload.chartContext = chartContext;
+      if (el('image-output').checked && !el('image-output-option').hidden) payload.imageOutput = true;
+      const result = await api('/api/insights/ask', payload, request.signal);
       if (answerRequest !== request) return;
-      if (typeof result.answer !== 'string' || !result.answer.trim()) throw new Error('模型未返回分析正文，请重新发送。');
+      const answer = typeof result.answer === 'string' ? result.answer.trim() : '';
+      const imageCount = renderModelImages(result.images);
+      if (!answer && !imageCount) throw new Error('模型未返回可显示的文字或图片。');
       if (result.evidence) { evidence = result.evidence; renderEvidence(result.evidence); }
       el('result-context').textContent = description;
       el('result-question').textContent = prompt;
-      el('answer').textContent = result.answer;
+      el('answer').textContent = answer;
+      el('answer').hidden = !answer;
+      el('image-warning').textContent = typeof result.imageWarning === 'string' ? result.imageWarning : '';
+      el('image-warning').hidden = !el('image-warning').textContent;
       el('result').hidden = false;
       message('analysis-status', '分析完成。');
     } catch (error) {
@@ -342,6 +467,11 @@
   provider.addEventListener('change', () => {
     connectionEdited = true;
     selectProvider(provider.value);
+  });
+  el('image-output').addEventListener('change', cancelAnswer);
+  el('close-image').addEventListener('click', () => el('image-viewer').close());
+  el('image-viewer').addEventListener('close', () => {
+    if (!el('image-viewer').open) el('viewer-content').replaceChildren();
   });
   baseUrl.addEventListener('input', () => {
     connectionEdited = true;
