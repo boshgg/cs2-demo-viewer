@@ -32,6 +32,8 @@ func canReuseViewer(health viewerHealth) bool {
 func main() {
 	port := flag.Int("port", 8765, "Preferred local HTTP port (automatically changes if unavailable)")
 	open := flag.Bool("open", false, "Open the viewer in the default browser")
+	mcp := flag.Bool("mcp", false, "Run the local MCP server on stdin/stdout")
+	viewerURL := flag.String("viewer-url", "", "Viewer address for -mcp (default: discover a running local viewer)")
 	restore := flag.String("restore-session", "", "Restore an explicitly selected local session manifest and parsed caches")
 	executable, err := os.Executable()
 	if err != nil {
@@ -41,6 +43,12 @@ func main() {
 	demoDir := flag.String("demo-dir", defaultDemoDir, "Directory automatically scanned for local .dem files")
 	dataDir := flag.String("data-dir", defaultDataDir, "Persistent parsed demo library directory")
 	flag.Parse()
+	if *mcp {
+		if err := runViewerMCP(*viewerURL); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if *port < 1 || *port > 65535 {
 		log.Fatal("invalid port")
 	}

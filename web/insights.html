@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>CS2 Replay · AI 分析</title>
+  <link rel="stylesheet" href="/insights.css">
+  <link rel="stylesheet" href="/navigation.css">
+  <script src="/insights.js" defer></script>
+</head>
+<body>
+  <header class="app-topbar">
+    <a class="app-brand" href="/" aria-label="CS2 Replay 首页"><span class="app-brand-mark" aria-hidden="true">Ⅱ</span><span class="app-brand-name">CS2 <b>REPLAY</b><small>LOCAL DEMO ANALYSIS</small></span></a>
+    <nav class="app-nav" aria-label="工作模式"><a href="/">比赛回放</a><a href="/analysis.html">地图分析</a><a href="/statistics.html">数据分析</a><a href="/insights.html" aria-current="page">AI 分析</a></nav>
+    <span class="app-local"><i></i> 本地统计 · 自选模型</span>
+  </header>
+  <main class="insights-layout">
+    <aside class="scope-pane" aria-label="选择分析范围">
+      <section>
+        <div class="section-title"><h2>比赛范围</h2><button class="text-button" type="button" id="reload-library">刷新列表</button></div>
+        <p class="hint">最多选择 8 场已解析的录像。</p>
+        <p id="library-message" class="hint" role="status"></p>
+        <div id="demo-list"></div>
+        <button type="button" id="use-sample" aria-pressed="false">使用合成示例</button>
+      </section>
+      <section>
+        <h2><label for="subject">分析对象</label></h2>
+        <select id="subject" disabled><option value="">全部选中比赛</option></select>
+        <p class="hint" id="scope-summary" aria-live="polite">尚未选择比赛。</p>
+      </section>
+      <details id="connection">
+        <summary>模型连接</summary>
+        <div class="config-fields">
+          <p id="server-config" class="hint" role="status">正在读取服务配置…</p>
+          <label for="base-url">API 基础地址</label>
+          <input type="url" id="base-url" placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false">
+          <label for="model-name">模型名称</label>
+          <input id="model-name" placeholder="服务商提供的模型 ID" autocomplete="off" spellcheck="false">
+          <label for="api-key">API 密钥</label>
+          <input type="password" id="api-key" autocomplete="off" spellcheck="false" placeholder="本机免密模型可留空">
+          <p class="hint">使用兼容 Chat Completions 的服务。密钥仅用于本页请求，刷新后需重新填写。</p>
+        </div>
+      </details>
+      <details id="mcp-connection">
+        <summary>Agent 接入</summary>
+        <p class="hint">将以下配置合并到支持 stdio MCP 的 Agent 客户端，保持查看器运行。</p>
+        <pre id="mcp-config" tabindex="0"></pre>
+        <button id="copy-mcp" type="button" disabled>复制 MCP 配置</button>
+        <p id="mcp-status" role="status" class="hint"></p>
+      </details>
+    </aside>
+    <div class="analysis-pane">
+      <h1>AI 复盘分析</h1>
+      <section class="evidence-panel" aria-labelledby="evidence-heading">
+        <div class="section-title"><h2 id="evidence-heading">比赛证据</h2><span id="synthetic" hidden>合成示例</span></div>
+        <p id="evidence-status" class="hint" role="status">选择比赛后可在本机查看统计。</p>
+        <button id="retry-evidence" type="button" hidden>重新读取证据</button>
+        <div id="evidence-content" hidden>
+          <div id="match-evidence"></div>
+          <details id="metric-details"><summary>查看选手与战队指标</summary><div id="metrics"></div></details>
+          <details><summary>查看完整统计证据</summary><pre id="evidence-json" tabindex="0"></pre></details>
+        </div>
+      </section>
+      <form id="analysis-form" autocomplete="off">
+        <label for="question" class="field-title">复盘问题</label>
+        <textarea id="question" rows="3" maxlength="4000" required placeholder="例如：哪些回合最能解释这支队伍的失利？下一场应优先练什么？"></textarea>
+        <div class="submit-row">
+          <p class="hint" id="destination" aria-live="polite"></p>
+          <button type="submit" id="ask" class="primary" disabled>发送并分析</button>
+          <button type="button" id="cancel-analysis" hidden>取消分析</button>
+        </div>
+        <p class="feedback" id="analysis-status" role="status"></p>
+      </form>
+      <section id="result" hidden aria-labelledby="result-title">
+        <h2 id="result-title">分析结果</h2>
+        <p id="result-context" class="hint"></p>
+        <p id="result-question"></p>
+        <div id="answer" tabindex="0"></div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

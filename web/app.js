@@ -224,6 +224,8 @@
     if (analysisLink) analysisLink.href = data.synthetic ? '/analysis.html' : `/analysis.html?demo=${encodeURIComponent(data.id)}`;
     const statisticsLink = $('statistics-link');
     if (statisticsLink) statisticsLink.href = data.synthetic ? '/statistics.html' : `/statistics.html?demo=${encodeURIComponent(data.id)}`;
+    const insightsLink = $('insights-link');
+    if (insightsLink) insightsLink.href = `/insights.html?demo=${data.synthetic ? 'sample' : encodeURIComponent(data.id)}`;
     state.t = 0;
     state.frameIndex = 0;
     state.speed = 1;

@@ -1,4 +1,4 @@
-param([string]$Version = '4.1.8')
+param([string]$Version = '4.2.0')
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Use a numeric semantic version, for example 4.0.0.' }
@@ -48,6 +48,7 @@ $readme = @"
 CS2 Replay v$Version - Windows x64 便携版
 
 1. 完整解压本文件夹，双击 Start Viewer.cmd。
+   如需 AI 分析或连接外部 Agent，可在顶部进入「AI 分析」，接入说明见 docs/AI_AND_MCP.md。
 2. 将 .dem 或包含 .dem 的 .zip 放入本目录 demo 文件夹或任意子文件夹；启动后自动扫描，也可点击「刷新文件夹」更新。
 3. 回放页点击「本地录像库」，搜索文件名或文件夹，选择一场解析播放；已缓存的比赛直接打开。也可手动导入 .dem。
 4. 分析页从本地录像库勾选需要的比赛并加入分析，按地图、玩家ID、队伍和CT/T筛选叠加，不设10场数量上限。

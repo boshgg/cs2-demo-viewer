@@ -77,6 +77,7 @@ type app struct {
 	libraryLock             *os.File
 	closeOnce               sync.Once
 	statisticsGate          chan struct{}
+	insightsGate            chan struct{}
 	statisticsKey           string
 	statisticsJSON          []byte
 	analysisUpgradeGate     chan struct{}
@@ -87,6 +88,7 @@ type app struct {
 func newApp(root string, assets fs.FS) *app {
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &app{root: root, assets: assets, jobs: map[string]*job{}, sources: map[string]librarySource{}, queue: make(chan struct{}, 1), slots: make(chan struct{}, 3), statisticsGate: make(chan struct{}, 1), analysisUpgradeGate: make(chan struct{}, 1), analysisUpgradeFailures: map[string]analysisUpgradeFailure{}, ctx: ctx, cancel: cancel}
+	a.insightsGate = make(chan struct{}, 2)
 	a.wg.Add(1)
 	go a.worker()
 	return a
@@ -136,6 +138,10 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("GET /api/demos/{id}/analysis", a.analysisResult)
 	mux.HandleFunc("GET /api/demos/{id}/statistics", a.statisticsResult)
 	mux.HandleFunc("GET /api/analyses", a.analyses)
+	mux.HandleFunc("GET /api/insights/config", insightsConfig)
+	mux.HandleFunc("GET /api/insights/mcp-config", insightsMCPConfig)
+	mux.HandleFunc("POST /api/insights/evidence", a.insightsEvidence)
+	mux.HandleFunc("POST /api/insights/ask", a.insightsAsk)
 	mux.HandleFunc("DELETE /api/analyses/{id}", a.removeAnalysis)
 	mux.HandleFunc("GET /api/session-settings", a.sessionSettingsResult)
 	mux.HandleFunc("GET /api/library", a.libraryInfo)
