@@ -16,6 +16,7 @@ const analysisCellSize = 64
 const analysisUtilityTimingVersion = 1
 const analysisMovementTimingVersion = 1
 const analysisEventTimingVersion = 1
+const analysisPlantPhaseVersion = 1
 
 // AnalysisCell holds a world-space grid centre followed by independent metrics:
 // x, y, z, observed living-player seconds, gunfight involvements, deaths, shots.
@@ -37,9 +38,14 @@ type AnalysisTeam struct {
 }
 
 type AnalysisSeries struct {
-	PlayerID               string                        `json:"playerId"`
-	TeamID                 string                        `json:"teamId"`
-	Side                   int                           `json:"side"`
+	AnalysisHeatmap
+	PlayerID    string                     `json:"playerId"`
+	TeamID      string                     `json:"teamId"`
+	Side        int                        `json:"side"`
+	PlantPhases map[string]AnalysisHeatmap `json:"plantPhases,omitempty"`
+}
+
+type AnalysisHeatmap struct {
 	Cells                  []AnalysisCell                `json:"cells"`
 	Rounds                 int                           `json:"rounds"`
 	MovementTimeline       []AnalysisMovementCell        `json:"movementTimeline"`
@@ -76,22 +82,24 @@ type AnalysisBounds struct {
 }
 
 type AnalysisDemo struct {
-	UtilityTimingVersion  int               `json:"utilityTimingVersion"`
-	MovementTimingVersion int               `json:"movementTimingVersion"`
-	EventTimingVersion    int               `json:"eventTimingVersion"`
-	ID                    string            `json:"id"`
-	Name                  string            `json:"name"`
-	Map                   string            `json:"map"`
-	Duration              float64           `json:"duration"`
-	RoundCount            int               `json:"roundCount"`
-	Synthetic             bool              `json:"synthetic"`
-	Warnings              []string          `json:"warnings"`
-	Players               []AnalysisPlayer  `json:"players"`
-	Teams                 []AnalysisTeam    `json:"teams"`
-	Series                []AnalysisSeries  `json:"series"`
-	Utilities             []AnalysisUtility `json:"utilities"`
-	Bounds                AnalysisBounds    `json:"bounds"`
-	CellSize              int               `json:"cellSize"`
+	PlantPhaseVersion       int               `json:"plantPhaseVersion"`
+	PlantPhaseUnknownRounds []int             `json:"plantPhaseUnknownRounds,omitempty"`
+	UtilityTimingVersion    int               `json:"utilityTimingVersion"`
+	MovementTimingVersion   int               `json:"movementTimingVersion"`
+	EventTimingVersion      int               `json:"eventTimingVersion"`
+	ID                      string            `json:"id"`
+	Name                    string            `json:"name"`
+	Map                     string            `json:"map"`
+	Duration                float64           `json:"duration"`
+	RoundCount              int               `json:"roundCount"`
+	Synthetic               bool              `json:"synthetic"`
+	Warnings                []string          `json:"warnings"`
+	Players                 []AnalysisPlayer  `json:"players"`
+	Teams                   []AnalysisTeam    `json:"teams"`
+	Series                  []AnalysisSeries  `json:"series"`
+	Utilities               []AnalysisUtility `json:"utilities"`
+	Bounds                  AnalysisBounds    `json:"bounds"`
+	CellSize                int               `json:"cellSize"`
 }
 
 type analysisRoundWindow struct {
@@ -137,12 +145,47 @@ type analysisEngagementKey struct {
 	second int64
 }
 
+func (s *analysisSeriesValue) addCell(p Position, metric int, weight float64) {
+	if !analysisPosition(&p) || !analysisFinite(weight) || weight <= 0 {
+		return
+	}
+	g := analysisGrid(p)
+	c := s.cells[g]
+	if c == nil {
+		c = &analysisCellValue{cell: AnalysisCell{(float64(g.x) + .5) * analysisCellSize, (float64(g.y) + .5) * analysisCellSize}}
+		s.cells[g] = c
+	}
+	c.cell[metric] += weight
+	c.zSum += p.Z * weight
+	c.zWeight += weight
+}
+
+func (s *analysisSeriesValue) heatmap() AnalysisHeatmap {
+	out := AnalysisSeries{AnalysisHeatmap: AnalysisHeatmap{Rounds: len(s.rounds), Cells: []AnalysisCell{}}}
+	s.movement.fill(&out)
+	s.events.fill(&out)
+	for _, c := range s.cells {
+		c.cell[2] = math.Round(c.zSum/c.zWeight*100) / 100
+		c.cell[3] = math.Round(c.cell[3]*10000) / 10000
+		out.Cells = append(out.Cells, c.cell)
+	}
+	sort.Slice(out.Cells, func(i, j int) bool {
+		for n := 0; n < 3; n++ {
+			if out.Cells[i][n] != out.Cells[j][n] {
+				return out.Cells[i][n] < out.Cells[j][n]
+			}
+		}
+		return false
+	})
+	return out.AnalysisHeatmap
+}
+
 // BuildAnalysis does not mutate the source replay. It condenses frames to a
 // world-space grid and keeps identities and side changes separate from metrics.
 // Gunfights require observed opponent firearm damage; empty damage data is not
 // silently substituted with missed shots or speculative lines of sight.
 func BuildAnalysis(d *DemoData) *AnalysisDemo {
-	a := &AnalysisDemo{UtilityTimingVersion: analysisUtilityTimingVersion, MovementTimingVersion: analysisMovementTimingVersion, EventTimingVersion: analysisEventTimingVersion, CellSize: analysisCellSize, Players: []AnalysisPlayer{}, Teams: []AnalysisTeam{}, Series: []AnalysisSeries{}, Utilities: []AnalysisUtility{}, Warnings: []string{}}
+	a := &AnalysisDemo{PlantPhaseVersion: analysisPlantPhaseVersion, UtilityTimingVersion: analysisUtilityTimingVersion, MovementTimingVersion: analysisMovementTimingVersion, EventTimingVersion: analysisEventTimingVersion, CellSize: analysisCellSize, Players: []AnalysisPlayer{}, Teams: []AnalysisTeam{}, Series: []AnalysisSeries{}, Utilities: []AnalysisUtility{}, Warnings: []string{}}
 	if d == nil {
 		return a
 	}
@@ -188,9 +231,12 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 	// Team snapshots use the actual side in each round. Names are an identity
 	// hint only when they are real clan names; CT/T labels never merge opponents.
 	rosters := map[int]map[int]*analysisRoster{}
+	plants := newAnalysisPlantPhases(d.Rounds, d.Events, windows)
 	for _, f := range d.Frames {
+		plants.observeFrame(f, windows)
 		analysisAddRoster(rosters, windows, f, normalisePlayer)
 	}
+	a.PlantPhaseUnknownRounds = plants.unknownRounds()
 	roundTeams, groups := analysisIdentifyTeams(scope, windows, rosters)
 	unknown := &analysisTeamGroup{team: AnalysisTeam{ID: "demo:" + scope + ":team:unknown", Name: "队伍未知", IdentitySource: "unknown", PlayerIDs: []string{}}, members: map[string]bool{}, stable: map[string]bool{}}
 	unknownUsed := false
@@ -229,26 +275,13 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 			a.Bounds.MaxY = math.Max(a.Bounds.MaxY, p.Y)
 		}
 	}
-	add := func(s *analysisSeriesValue, p Position, metric int, weight float64) {
-		if !analysisPosition(&p) || !analysisFinite(weight) || weight <= 0 {
-			return
-		}
-		g := analysisGrid(p)
-		c := s.cells[g]
-		if c == nil {
-			c = &analysisCellValue{cell: AnalysisCell{(float64(g.x) + .5) * analysisCellSize, (float64(g.y) + .5) * analysisCellSize}}
-			s.cells[g] = c
-		}
-		c.cell[metric] += weight
-		c.zSum += p.Z * weight
-		c.zWeight += weight
-		includeBounds(p)
-	}
 	for i := 0; i+1 < len(d.Frames); i++ {
 		f := d.Frames[i]
 		analysisObserveMovement(f, d.Frames[i+1], windows, deathTimes, func(p PlayerFrame, pos Position, start, end float64) {
-			_, s := seriesFor(normalisePlayer(p.ID, ""), f.Round, p.Team)
-			add(s, pos, 3, end-start)
+			key, s := seriesFor(normalisePlayer(p.ID, ""), f.Round, p.Team)
+			includeBounds(pos)
+			s.addCell(pos, 3, end-start)
+			plants.movement(key, f.Round, pos, start, end, anchors[f.Round])
 			s.movement.add(pos, start, end, anchors[f.Round])
 		})
 	}
@@ -260,7 +293,9 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 		},
 		add: func(key analysisSeriesKey, pos Position, metric, round int, when float64) {
 			s := series[key]
-			add(s, pos, metric, 1)
+			includeBounds(pos)
+			s.addCell(pos, metric, 1)
+			plants.event(key, round, pos, metric, when, anchors[round])
 			s.events.add(pos, metric, when, anchors[round])
 		},
 	}
@@ -325,22 +360,7 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 	}
 	sort.Slice(a.Teams, func(i, j int) bool { return a.Teams[i].ID < a.Teams[j].ID })
 	for key, s := range series {
-		out := AnalysisSeries{PlayerID: key.player, TeamID: key.team, Side: key.side, Rounds: len(s.rounds), Cells: []AnalysisCell{}}
-		s.movement.fill(&out)
-		s.events.fill(&out)
-		for _, c := range s.cells {
-			c.cell[2] = math.Round(c.zSum/c.zWeight*100) / 100
-			c.cell[3] = math.Round(c.cell[3]*10000) / 10000
-			out.Cells = append(out.Cells, c.cell)
-		}
-		sort.Slice(out.Cells, func(i, j int) bool {
-			for n := 0; n < 3; n++ {
-				if out.Cells[i][n] != out.Cells[j][n] {
-					return out.Cells[i][n] < out.Cells[j][n]
-				}
-			}
-			return false
-		})
+		out := AnalysisSeries{PlayerID: key.player, TeamID: key.team, Side: key.side, AnalysisHeatmap: s.heatmap(), PlantPhases: plants.heatmaps(key)}
 		a.Series = append(a.Series, out)
 	}
 	sort.Slice(a.Series, func(i, j int) bool {

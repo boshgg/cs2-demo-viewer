@@ -65,6 +65,9 @@
   function aggregate(input, filter = {}) {
     const demos = uniqueDemos(input), map = filter.map || demos[0]?.map || '';
     const movementTime = normalizeMovementTime(filter.movementTime);
+    const plantPhase = ['pre', 'post'].includes(filter.plantPhase) ? filter.plantPhase : 'all';
+    const missingPlantPhaseDemos = [];
+    let unknownPlantRounds = 0;
     const movementCoverage = movementTime ? { status: 'empty', selectedDemos: 0, timedDemos: 0, missingDemos: 0, missingDemoIds: [], totalSeconds: 0, timedSeconds: 0, unknownSeconds: 0, beyondSeconds: 0, selectedSeconds: 0, coverage: null } : null;
     const heatmapCoverage = movementTime ? { movement: movementCoverage, ...Object.fromEntries(eventMetrics.map(metric => [metric, { status: 'empty', selectedDemos: 0, timedDemos: 0, missingDemos: 0, missingDemoIds: [], totalCount: 0, timedCount: 0, unknownCount: 0, beyondCount: 0, selectedCount: 0, coverage: null }])) } : null;
     const ids = asSet(filter.demoIds), players = asSet(filter.playerIds), teams = asSet(filter.teamIds), sides = asSet(filter.sides?.map(Number));
@@ -78,11 +81,17 @@
       if (d.map !== map || !chosen(ids, d.id)) continue;
       let contributed = false;
       let movementObserved = false;
-      const timingAvailable = d.movementTimingVersion === 1;
-      const eventsAvailable = d.eventTimingVersion === 1, eventsObserved = [false, false, false];
-      for (const series of d.series || []) {
-        const playerId = String(series.playerId), teamId = teamKey(d.id, series.teamId, filter.teamAliases);
-        if (!chosen(players, playerId) || !chosen(teams, teamId) || !chosen(sides, Number(series.side))) continue;
+      const phaseFiltered = plantPhase !== 'all';
+      const phaseAvailable = d.plantPhaseVersion === 1;
+      if (phaseFiltered && !phaseAvailable) missingPlantPhaseDemos.push(d.id);
+      if (phaseFiltered && phaseAvailable && Array.isArray(d.plantPhaseUnknownRounds)) unknownPlantRounds += d.plantPhaseUnknownRounds.length;
+      const timingAvailable = phaseFiltered ? phaseAvailable : d.movementTimingVersion === 1;
+      const eventsAvailable = phaseFiltered ? phaseAvailable : d.eventTimingVersion === 1, eventsObserved = [false, false, false];
+      for (const source of d.series || []) {
+        const playerId = String(source.playerId), teamId = teamKey(d.id, source.teamId, filter.teamAliases);
+        if (!chosen(players, playerId) || !chosen(teams, teamId) || !chosen(sides, Number(source.side))) continue;
+        const series = phaseFiltered ? phaseAvailable && source.plantPhases?.[plantPhase] : source;
+        if (!series) continue;
         let populated = false;
         let fullSeconds = 0, fullCellCount = 0;
         const fullEvents = [0, 0, 0];
@@ -222,7 +231,7 @@
         }
       }
     }
-    return { map, cells: [...cells.values()], utilities, utilityTimeCounts, totals, movementTime, movementCoverage, heatmapCoverage };
+    return { map, cells: [...cells.values()], utilities, utilityTimeCounts, totals, movementTime, movementCoverage, heatmapCoverage, plantPhase, missingPlantPhaseDemos, unknownPlantRounds };
   }
   function clusterUtilities(input, options = {}) {
     const landing = Math.max(1, Math.min(1024, Number(options.landing) || 128));

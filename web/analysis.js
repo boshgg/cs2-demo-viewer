@@ -8,6 +8,8 @@
   let playbackRunning = false, playbackTimer = null, playbackGeneration = 0, playbackPending = null, playbackStartedAt = 0, analysisPending = false;
   let playbackLength = playback.defaultWindowLength, playbackSpeed = 1, playbackMessage = '已暂停。固定窗口逐秒前进，计算完成后再更新下一帧。';
   state.movementTime = null;
+  state.plantPhase = 'all';
+  const plantPhaseNames = { all: '全部阶段', pre: '下包前', post: '下包后' };
   let initializing = true, migratedSessionId = '', libraryEnabled = false, libraryRefreshing = false, libraryScanning = false, syncPromise = null, libraryTimer, restoredView = null;
   let libraryInfoRequest = 0;
   const loadingJobs = new Map();
@@ -22,6 +24,7 @@
   const reparseSkipped = new Map();
   const metricNames = { movement: '移动', engagements: '交火', deaths: '死亡', shots: '开火' };
   const heatResolution = 384;
+  let utilityMarkers = [];
   const metrics = ['movement', 'engagements', 'deaths', 'shots'];
   const utilityNames = { smoke: '烟雾弹', flash: '闪光弹', he: '高爆手雷', molotov: '燃烧瓶', incendiary: '燃烧弹', decoy: '诱饵弹', unknown: '未知道具' };
   const utilityIcons = { smoke: 'smokegrenade', flash: 'flashbang', he: 'hegrenade', molotov: 'molotov', incendiary: 'incgrenade', decoy: 'decoy' };
@@ -37,6 +40,7 @@
     const settings = { ids: [...state.jobs.keys()], selectedDemos: state.selectedDemos && [...state.selectedDemos], selectedTeams: state.selectedTeams && [...state.selectedTeams], selectedPlayers: state.selectedPlayers && [...state.selectedPlayers], map: state.map, aliases: state.aliases, side: $('analysis-side').value, floor: $('analysis-floor').value, utilityType: $('analysis-utility-type').value, utilityTime: $('analysis-utility-time').value, utilitySort: $('utility-sort').value, query: $('player-search').value, layers: metrics.filter(name => $(`layer-${name}`).checked), radius: Number($('heat-radius').value), opacity: Number($('heat-opacity').value), scale: heatMode(), landingDistance: Number($('landing-distance').value), throwDistance: Number($('throw-distance').value), migratedSessionId };
     settings.sourceView = { ...sourceView, folderExpansion: sourceExpansion.snapshot() }; settings.libraryView = { ...libraryView, folderExpansion: libraryExpansion.snapshot() };
     settings.movementTime = state.movementTime;
+    settings.plantPhase = state.plantPhase;
     settings.heatmapPlayback = { windowLength: playbackLength, speed: playbackSpeed };
     if (restoredView) { settings.map = restoredView.map; settings.floor = restoredView.floor; }
     try { localStorage.setItem(storageKey, JSON.stringify(settings)); } catch { /* Private browsing may not offer localStorage. */ }
@@ -64,6 +68,7 @@
     $('radius-value').textContent = `${$('heat-radius').value} 单位`; $('opacity-value').textContent = `${$('heat-opacity').value}%`;
     migratedSessionId = typeof saved.migratedSessionId === 'string' ? saved.migratedSessionId : '';
     state.movementTime = sanitizeMovementTime(saved.movementTime);
+    state.plantPhase = ['pre', 'post'].includes(saved.plantPhase) ? saved.plantPhase : 'all';
     playbackLength = state.movementTime ? state.movementTime.end - state.movementTime.start : playback.normalizeWindowLength(saved.heatmapPlayback?.windowLength);
     playbackSpeed = playback.normalizeSpeed(saved.heatmapPlayback?.speed); renderMovementTime(); renderPlayback();
   }
@@ -134,7 +139,10 @@
     for (const edge of ['start', 'end']) { const input = $(`movement-time-${edge}`); input.value = String(range[edge]); input.setAttribute('aria-valuetext', `倒计时 ${countdown(range[edge])}，开局后 ${range[edge]} 秒`); $(`movement-time-${edge}-value`).textContent = countdown(range[edge]); }
     $('movement-time-fill').style.left = `${range.start / movementDuration * 100}%`; $('movement-time-fill').style.width = `${(range.end - range.start) / movementDuration * 100}%`;
     $('movement-time-label').textContent = movementRangeLabel(); $('movement-time-all').setAttribute('aria-pressed', String(!state.movementTime));
+    for (const phase of Object.keys(plantPhaseNames)) $('plant-phase-' + phase).setAttribute('aria-pressed', String(phase === state.plantPhase));
     $('movement-time-help').textContent = state.movementTime ? `开局后 ${range.start}–${range.end} 秒，含开始、不含结束；冻结结束为 0 秒。移动、交火、死亡、开火同步筛选，道具投掷时段独立。可用方向键每次调整 1 秒。` : '拖动两个手柄选择任意时段；冻结结束为开局 0 秒。当前显示移动、交火、死亡、开火的全部时段（也含倒计时结束后）；道具投掷时段独立设置。';
+    if (state.plantPhase !== 'all') $('movement-time-help').textContent += state.plantPhase === 'pre'
+      ? ' 下包前含未下包回合，下包完成起的记录会被排除。' : ' 下包后从每回合 T 方完成下包的时刻开始；未下包回合没有该阶段。';
     if (state.movementTime) playbackLength = range.end - range.start;
     renderPlayback();
   }
@@ -153,10 +161,17 @@
   }
   function renderMovementCoverage() {
     const note = $('movement-time-coverage');
-    note.hidden = !state.movementTime;
-    if (!state.movementTime) { note.textContent = ''; return; }
-    if (movementPending) { note.textContent = '正在更新移动、交火、死亡和开火时段…'; return; }
-    note.textContent = timeCoverageLines().join('\n');
+    const lines = movementPending ? ['正在更新移动、交火、死亡和开火时段…'] : heatmapCoverageLines();
+    note.hidden = !lines.length;
+    note.textContent = lines.join('\n');
+  }
+  function heatmapCoverageLines() {
+    const lines = state.movementTime ? timeCoverageLines() : [];
+    const missing = state.result?.missingPlantPhaseDemos?.length;
+    if (state.plantPhase !== 'all' && missing) lines.unshift(`${missing} 场录像缺少下包阶段记录，已从四个热力图层排除。可在比赛来源中重新解析补齐。`);
+    const unknownRounds = state.result?.unknownPlantRounds;
+    if (state.plantPhase !== 'all' && unknownRounds) lines.unshift(`所选比赛中有 ${unknownRounds} 个回合缺少可靠的下包记录，已从当前阶段排除。`);
+    return lines;
   }
   function invalidateHeatmapTime() {
     ++state.request; movementPending = true; analysisPending = true; $('computing').hidden = false; $('export-image').disabled = true;
@@ -193,6 +208,7 @@
     const filter = { map: state.map, demoIds: state.selectedDemos && [...state.selectedDemos], teamIds: state.selectedTeams && [...state.selectedTeams], playerIds: state.selectedPlayers && [...state.selectedPlayers], sides: $('analysis-side').value === 'all' ? [2, 3] : [Number($('analysis-side').value)], floor: $('analysis-floor').value, lowerMaxZ: state.mapInfo?.lowerMaxZ, teamAliases: state.aliases, utilityType: $('analysis-utility-type').value, utilityTime: $('analysis-utility-time').value };
     const cluster = { landing: Number($('landing-distance').value) || 128, throwing: Number($('throw-distance').value) || 64, lowerMaxZ: state.mapInfo?.lowerMaxZ };
     filter.movementTime = options.autoplay ? options.range : state.movementTime;
+    filter.plantPhase = state.plantPhase;
     const id = ++state.request;
     analysisPending = true;
     if (options.autoplay) playbackPending = { id, range: { ...options.range } };
@@ -217,10 +233,13 @@
     state.result = result; $('computing').hidden = true;
     movementPending = false; renderMovementCoverage();
     const total = result.totals;
-    $('metric-movement').textContent = missingTime('movement') ? '缺少时间记录' : seconds(total.movementSeconds);
-    for (const metric of ['engagements', 'deaths', 'shots']) $(`metric-${metric}`).textContent = missingTime(metric) ? '缺少时间记录' : number(total[metric]);
-    $('metric-utilities').textContent = number(total.utilities);
     const available = currentDemos();
+    const missingPhase = available.length > 0 && result.missingPlantPhaseDemos?.length === available.length;
+    for (const metric of metrics) {
+      const value = metric === 'movement' ? seconds(total.movementSeconds) : number(total[metric]);
+      $(`metric-${metric}`).textContent = missingPhase ? '缺少阶段记录' : missingTime(metric) ? '缺少时间记录' : value;
+    }
+    $('metric-utilities').textContent = number(total.utilities);
     $('selection-summary').textContent = `${available.length} 场已选比赛 · ${total.players} 名有记录玩家 · ${total.teams} 支队伍 · ${$('analysis-side').selectedOptions[0].textContent}${available.some(d => d.synthetic) ? ' · 含合成示例' : ''}`;
     $('analysis-empty').hidden = !!state.demos.size;
     $('selection-empty').hidden = !state.demos.size || result.cells.length > 0 || result.utilities.length > 0;
@@ -929,6 +948,9 @@
   }
   function draw() {
     $('heat-tooltip').hidden = true;
+    utilityMarkers = [];
+    canvas.style.cursor = '';
+    if (!state.selectedGroup && $('throw-replays').open) $('throw-replays').close();
     const d = dimensions(), scale = Math.min(2, devicePixelRatio || 1);
     if (canvas.width !== Math.round(d.width * scale) || canvas.height !== Math.round(d.height * scale)) { canvas.width = Math.round(d.width * scale); canvas.height = Math.round(d.height * scale); }
     ctx.setTransform(scale, 0, 0, scale, 0, 0); ctx.clearRect(0, 0, d.width, d.height); ctx.fillStyle = '#13181e'; ctx.fillRect(0, 0, d.width, d.height);
@@ -948,14 +970,57 @@
     const toScreen = p => { const q = projection(p); return { x: d.x + q.x * d.size, y: d.y + q.y * d.size }; };
     for (const item of items) {
       const end = toScreen(item.end); ctx.beginPath(); ctx.arc(end.x, end.y, 3.5, 0, Math.PI * 2); ctx.fillStyle = '#ffca76'; ctx.fill();
-      if (item.start) { const start = toScreen(item.start); ctx.beginPath(); ctx.arc(start.x, start.y, 3.5, 0, Math.PI * 2); ctx.fillStyle = '#7fe8dc'; ctx.fill(); }
+      utilityMarkers.push({ ...end, item });
+      if (item.start) {
+        const start = toScreen(item.start); ctx.beginPath(); ctx.arc(start.x, start.y, 3.5, 0, Math.PI * 2); ctx.fillStyle = '#7fe8dc'; ctx.fill();
+        utilityMarkers.push({ ...start, item });
+      }
     }
     const representative = items.find(u => u.path?.length > 1) || items[0];
     if (representative?.path?.length > 1) {
       ctx.beginPath(); representative.path.forEach((point, index) => { const p = toScreen(point); if (!index) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); }); ctx.strokeStyle = '#e7f0d5'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]); ctx.stroke(); ctx.setLineDash([]);
     }
     const label = toScreen(group.end); ctx.font = '10px "Segoe UI",sans-serif'; ctx.fillStyle = '#ffdc9b'; ctx.fillText(`${utilityNames[group.type] || group.type} · ${items.length} 次`, label.x + 10, label.y - 9);
-    $('map-status').textContent = '青色：出手点 · 金色：落点 · 虚线：一条观测轨迹';
+    $('map-status').textContent = '青色出手 · 金色落点 · 点击圆点回放，密集处可选择录像';
+  }
+  function throwsAt(event) {
+    if (!state.selectedGroup || !utilityMarkers.length) return [];
+    const rect = canvas.getBoundingClientRect();
+    const x = event.clientX - rect.left, y = event.clientY - rect.top;
+    const radius = event.pointerType === 'touch' ? 20 : 12;
+    const nearby = new Map();
+    for (const marker of utilityMarkers) {
+      const distance = (x - marker.x) ** 2 + (y - marker.y) ** 2;
+      if (distance > radius * radius) continue;
+      const previous = nearby.get(marker.item);
+      if (previous === undefined || distance < previous) nearby.set(marker.item, distance);
+    }
+    return [...nearby].sort((a, b) => a[1] - b[1] || a[0].demoId.localeCompare(b[0].demoId) || a[0].time - b[0].time).map(([item]) => item);
+  }
+  function throwReplayLink(item) {
+    const link = node('a', '回放 ↗');
+    const query = new URLSearchParams({demo: item.demoId, round: String(item.round)});
+    if (Number.isFinite(item.time)) query.set('t', String(item.time));
+    if (item.id) query.set('utility', item.id);
+    link.href = '/?' + query.toString();
+    link.target = '_blank'; link.rel = 'noopener';
+    return link;
+  }
+  function openMapThrows(items) {
+    if (!items.length) return;
+    if (items.length === 1) { throwReplayLink(items[0]).click(); return; }
+    const dialog = $('throw-replays'), list = $('throw-replay-list');
+    $('throw-replays-title').textContent = `选择要回放的投掷（${items.length} 次）`;
+    list.replaceChildren();
+    for (const item of items) {
+      const link = throwReplayLink(item);
+      const paths = library.sourcePaths(catalog.get(item.demoId));
+      link.replaceChildren(node('strong', item.demoName || item.demoId),
+        node('span', `第 ${item.round} 回合 · ${item.owner || item.playerId || '未知选手'} · ${utilityNames[item.type] || item.type} · ${utilityTimeDescription(item)}`),
+        node('small', paths[0] || `比赛 ID ${item.demoId}`));
+      const li = document.createElement('li'); li.append(link); list.append(li);
+    }
+    dialog.showModal();
   }
   function renderUtilityTimeCounts() {
     const counts = state.result?.utilityTimeCounts || {}, selected = $('analysis-utility-time').value;
@@ -1005,8 +1070,7 @@
       for (const item of subgroup.items) {
         const li = document.createElement('li'); li.append(node('span', `${item.owner || item.playerId || '未知投掷者'} · ${item.demoName} · R${item.round} `));
         li.append(node('small', utilityTimeDescription(item), 'throw-time'));
-        if (!state.demos.get(item.demoId)?.synthetic) { const link = node('a', '回放 ↗'); link.href = `/?demo=${encodeURIComponent(item.demoId)}&t=${Math.max(0, Number(item.time) || 0).toFixed(2)}`; link.target = '_blank'; link.rel = 'noopener'; li.append(link); }
-        else li.append(node('span', '合成示例'));
+        li.append(throwReplayLink(item));
         list.append(li);
       }
       details.append(list); block.append(details); detail.append(block);
@@ -1066,6 +1130,12 @@
     $(`movement-time-${edge}`).addEventListener('change', () => setMovementEdge(edge, true));
   }
   $('movement-time-all').addEventListener('click', () => { pausePlayback('已暂停：已切回全部时段。'); state.movementTime = null; renderMovementTime(); invalidateHeatmapTime(); requestAnalysis({ movementOnly: true }); });
+  for (const phase of Object.keys(plantPhaseNames)) $('plant-phase-' + phase).addEventListener('click', () => {
+    if (state.plantPhase === phase) return;
+    pausePlayback('已暂停：下包阶段已更改。');
+    state.plantPhase = phase;
+    renderMovementTime(); invalidateHeatmapTime(); requestAnalysis({ movementOnly: true });
+  });
   $('heatmap-time-play').addEventListener('click', () => startPlayback());
   $('heatmap-time-restart').addEventListener('click', () => startPlayback(true));
   $('heatmap-time-window').addEventListener('focus', () => pausePlayback('已暂停：正在调整窗口跨度。'));
@@ -1093,7 +1163,7 @@
   $('players-invert').addEventListener('click', () => { state.selectedPlayers = new Set(availablePlayers().map(p => p.id).filter(id => state.selectedPlayers && !state.selectedPlayers.has(id))); renderPlayers(); requestAnalysis(); });
   $('player-search').addEventListener('input', () => { renderPlayers(); save(); });
   $('apply-aliases').addEventListener('click', () => { $('team-aliases').querySelectorAll('input').forEach(input => { const value = input.value.trim(); if (value) state.aliases[input.dataset.teamId] = value; else delete state.aliases[input.dataset.teamId]; }); state.selectedTeams = null; renderFilters(); requestAnalysis(); });
-  $('clear-selection').addEventListener('click', () => { state.selectedDemos = state.selectedTeams = state.selectedPlayers = null; state.movementTime = null; renderMovementTime(); $('analysis-side').value = 'all'; $('analysis-floor').value = 'all'; $('analysis-utility-type').value = 'all'; $('analysis-utility-time').value = 'all'; $('player-search').value = ''; renderJobs(); renderFilters(); void loadMapImage(); requestAnalysis(); });
+  $('clear-selection').addEventListener('click', () => { state.selectedDemos = state.selectedTeams = state.selectedPlayers = null; state.movementTime = null; state.plantPhase = 'all'; renderMovementTime(); $('analysis-side').value = 'all'; $('analysis-floor').value = 'all'; $('analysis-utility-type').value = 'all'; $('analysis-utility-time').value = 'all'; $('player-search').value = ''; renderJobs(); renderFilters(); void loadMapImage(); requestAnalysis(); });
   $('clear-utility').addEventListener('click', () => { state.selectedGroup = state.selectedThrow = null; renderUtilityGroups(); draw(); });
   for (const name of metrics) $(`layer-${name}`).addEventListener('change', () => { rebuildHeat(); save(); });
   let radiusTimer;
@@ -1104,17 +1174,34 @@
   $('fit-map').addEventListener('click', fit);
   canvas.addEventListener('wheel', event => { event.preventDefault(); const before = dimensions(), rect = canvas.getBoundingClientRect(), px = event.clientX - rect.left, py = event.clientY - rect.top, old = state.zoom; state.zoom = Math.max(1, Math.min(5, state.zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12))); const ratio = state.zoom / old; state.panX = (state.panX + before.width / 2 - px) * ratio - before.width / 2 + px; state.panY = (state.panY + before.height / 2 - py) * ratio - before.height / 2 + py; draw(); }, { passive: false });
   let dragging;
-  canvas.addEventListener('pointerdown', event => { $('heat-tooltip').hidden = true; dragging = { id: event.pointerId, x: event.clientX, y: event.clientY }; canvas.setPointerCapture(event.pointerId); });
+  canvas.addEventListener('pointerdown', event => {
+    if (event.isPrimary === false || (event.button != null && event.button !== 0)) return;
+    $('heat-tooltip').hidden = true;
+    dragging = { id: event.pointerId, x: event.clientX, y: event.clientY, originX: event.clientX, originY: event.clientY, moved: false };
+    canvas.setPointerCapture(event.pointerId);
+  });
   canvas.addEventListener('pointermove', event => {
     if (!dragging) { showHeatValue(event); return; }
     if (dragging.id !== event.pointerId) return;
+    if (!dragging.moved && Math.hypot(event.clientX - dragging.originX, event.clientY - dragging.originY) < 5) return;
+    dragging.moved = true;
     state.panX += event.clientX - dragging.x; state.panY += event.clientY - dragging.y; dragging.x = event.clientX; dragging.y = event.clientY; draw();
   });
-  canvas.addEventListener('pointerleave', () => { $('heat-tooltip').hidden = true; });
+  canvas.addEventListener('pointerleave', () => { $('heat-tooltip').hidden = true; canvas.style.cursor = ''; });
   function showHeatValue(event) {
     const tip = $('heat-tooltip'), rect = canvas.getBoundingClientRect(), d = dimensions(), mx = event.clientX - rect.left, my = event.clientY - rect.top;
     const u = (mx - d.x) / d.size, v = (my - d.y) / d.size;
     tip.hidden = true;
+    const nearby = throwsAt(event);
+    canvas.style.cursor = nearby.length ? 'pointer' : '';
+    if (nearby.length) {
+      const item = nearby[0];
+      tip.replaceChildren(node('strong', nearby.length === 1 ? `第 ${item.round} 回合 · ${item.owner || '未知选手'}` : `附近 ${nearby.length} 次投掷`),
+        node('span', nearby.length === 1 ? item.demoName : '点击选择比赛和回合'));
+      tip.hidden = false;
+      positionTooltip(tip, mx, my, d);
+      return;
+    }
     if (!state.heatCanvas || u < 0 || u > 1 || v < 0 || v > 1) return;
     const index = Math.round(v * (heatResolution - 1)) * heatResolution + Math.round(u * (heatResolution - 1));
     const values = [...state.layers].filter(([, layer]) => layer[index] > 0);
@@ -1122,20 +1209,31 @@
     tip.replaceChildren(node('strong', '相对本层峰值'));
     for (const [name, layer] of values) tip.append(node('span', `${metricNames[name]} ${layer[index] < .001 ? '< 0.1' : (layer[index] * 100).toFixed(1)}%`));
     tip.append(node('small', '扩散后密度 · 非事件占比')); tip.hidden = false;
+    positionTooltip(tip, mx, my, d);
+  }
+  function positionTooltip(tip, mx, my, d) {
     tip.style.left = `${Math.max(8, Math.min(mx + 16, d.width - tip.offsetWidth - 8))}px`;
     tip.style.top = `${Math.max(8, Math.min(my + 16, d.height - tip.offsetHeight - 8))}px`;
   }
-  for (const event of ['pointerup', 'pointercancel', 'lostpointercapture']) canvas.addEventListener(event, () => { dragging = null; });
+  canvas.addEventListener('pointerup', event => {
+    if (!dragging || dragging.id !== event.pointerId) return;
+    const clicked = !dragging.moved && Math.hypot(event.clientX - dragging.originX, event.clientY - dragging.originY) < 5;
+    dragging = null;
+    if (clicked) openMapThrows(throwsAt(event));
+  });
+  for (const event of ['pointercancel', 'lostpointercapture']) canvas.addEventListener(event, e => {
+    if (dragging?.id === e.pointerId) dragging = null;
+  });
   canvas.addEventListener('keydown', event => { if (['+', '=', '-', '0'].includes(event.key)) { event.preventDefault(); if (event.key === '0') fit(); else { state.zoom = Math.max(1, Math.min(5, state.zoom * (event.key === '-' ? 1 / 1.2 : 1.2))); draw(); } } });
   new ResizeObserver(draw).observe($('heatmap-stage'));
   $('export-image').addEventListener('click', () => {
     const output = document.createElement('canvas'), ratio = canvas.width / canvas.getBoundingClientRect().width, width = canvas.width / ratio, height = canvas.height / ratio;
-    const coverageLines = state.movementTime ? timeCoverageLines() : [], extraHeight = 202 + coverageLines.length * 17;
+    const coverageLines = heatmapCoverageLines(), extraHeight = 202 + coverageLines.length * 17;
     output.width = canvas.width; output.height = Math.round((height + extraHeight) * ratio);
     const c = output.getContext('2d'); c.scale(ratio, ratio); c.fillStyle = '#141b23'; c.fillRect(0, 0, width, height + extraHeight); c.drawImage(canvas, 0, 80, width, height);
     c.fillStyle = '#e5eef4'; c.font = '18px sans-serif'; c.fillText(`CS2 Replay · ${state.map} · ${$('analysis-side').selectedOptions[0].textContent}`, 18, 28, width - 36);
     c.fillStyle = '#91a9b8'; c.font = '12px sans-serif'; c.fillText($('selection-summary').textContent, 18, 49, width - 36);
-    c.fillText(`移动 ${$('metric-movement').textContent} / 交火 ${$('metric-engagements').textContent} / 死亡 ${$('metric-deaths').textContent} / 开火 ${$('metric-shots').textContent} · 热力图 ${movementRangeLabel()}`, 18, 68, width - 36);
+    c.fillText(`移动 ${$('metric-movement').textContent} / 交火 ${$('metric-engagements').textContent} / 死亡 ${$('metric-deaths').textContent} / 开火 ${$('metric-shots').textContent} · 热力图 ${movementRangeLabel()} · ${plantPhaseNames[state.plantPhase]}`, 18, 68, width - 36);
     const y = height + 105, barWidth = Math.min(500, width - 64), gradient = c.createLinearGradient(32, 0, 32 + barWidth, 0);
     for (const [at, rgb] of heat.stops) gradient.addColorStop(at, `rgb(${rgb.join(',')})`);
     c.fillStyle = '#d8e5ed'; c.fillText(`${selectedLayers()} · ${$('heat-scale').selectedOptions[0].textContent} · 相对当前筛选峰值`, 18, y, width - 36);

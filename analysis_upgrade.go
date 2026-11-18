@@ -209,13 +209,15 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	var version, movementVersion, eventVersion int
+	var version, movementVersion, eventVersion, plantVersion int
+	_ = json.Unmarshal(summary["plantPhaseVersion"], &plantVersion)
+	needPlant := plantVersion < analysisPlantPhaseVersion
 	_ = json.Unmarshal(summary["utilityTimingVersion"], &version)
 	_ = json.Unmarshal(summary["movementTimingVersion"], &movementVersion)
 	_ = json.Unmarshal(summary["eventTimingVersion"], &eventVersion)
 	needUtility, needMovement := version < analysisUtilityTimingVersion, movementVersion < analysisMovementTimingVersion
 	needEvents := eventVersion < analysisEventTimingVersion
-	if !needUtility && !needMovement && !needEvents {
+	if !needUtility && !needMovement && !needEvents && !needPlant {
 		return nil, nil
 	}
 	var id string
@@ -259,6 +261,10 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 				upgradeErr = patchAnalysisEventTiming(summary, events)
 			}
 		}
+		if upgradeErr == nil && needPlant {
+			upgradeErr = upgradeAnalysisPlantPhases(ctx, snapshot.replay, &replay, summary)
+		}
+
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -309,6 +315,13 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 		if err := patchAnalysisEventTiming(summary, nil); err != nil {
 			return nil, err
 		}
+	}
+	if needPlant {
+		delete(summary, "plantPhaseVersion")
+		var warnings []string
+		_ = json.Unmarshal(summary["warnings"], &warnings)
+		warnings = append(warnings, "无法从回放缓存核实下包阶段，按下包前后筛选时将跳过这场比赛。")
+		summary["warnings"], _ = json.Marshal(warnings)
 	}
 	return json.Marshal(summary)
 }

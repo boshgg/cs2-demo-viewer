@@ -56,6 +56,8 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
     querySelectorAll(tag) { return this.children.flatMap(child => [child, ...child.querySelectorAll(tag)]).filter(child => child.tagName === tag); }
     getBoundingClientRect() { return { left: 0, top: 0, width: 800, height: 600 }; }
     setPointerCapture() {}
+    showModal() { this.open = true; }
+    close() { this.open = false; }
   }
   class Canvas extends Element {
     constructor() {
@@ -185,7 +187,7 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
     ResizeObserver: class { constructor(callback) { resizeObservers.push(callback); } observe() {} },
     localStorage: { getItem: key => stored.get(key) ?? null, setItem: (key, value) => { stored.set(key, value); if (key === 'cs2-analysis-v4') savedWrites.push(JSON.parse(value)); } }, location,
     FormData: class { constructor() { this.values = new Map(); } append(key, value) { this.values.set(key, value); } get(key) { return this.values.get(key); } },
-    AbortController, DOMException, devicePixelRatio: 2, URL: PageURL, Blob, fetch, console,
+    AbortController, DOMException, devicePixelRatio: 2, URL: PageURL, URLSearchParams, Blob, fetch, console,
     setTimeout: (callback, delay = 0) => { const id = ++nextTimer; timers.set(id, callback); timerDelays.set(id, delay); timerDeadlines.set(id, now + delay); if (!delay) queueMicrotask(() => { if (timers.has(id)) { timers.delete(id); timerDelays.delete(id); timerDeadlines.delete(id); callback(); } }); return id; },
     clearTimeout: id => { timers.delete(id); timerDelays.delete(id); timerDeadlines.delete(id); },
   };
@@ -1398,6 +1400,38 @@ function utilityDemo(id = 'timed', map = 'de_mirage') {
   return demo;
 }
 function utilityCountButton(ui, key) { return ui.get('utility-time-counts').children.find(button => button.dataset.timeBucket === key); }
+
+test('map utility points open one throw or list nearby throws across demos after zoom, without activating on pan', async () => {
+  const first = utilityDemo('first'), second = utilityDemo('second');
+  first.utilities = first.utilities.slice(0, 1);
+  second.utilities = [{...second.utilities[1], start:{x:650, y:350, z:0}}];
+  // First throw starts at its landing. Seeing both markers must still offer just one replay for it.
+  first.utilities[0].start = first.utilities[0].end;
+  const ui = await page([first, second]);
+  await ui.get('utility-groups').children[0].click(); await settle();
+  const at = (x, y) => ({clientX:111 + x*578/1024, clientY:11 + (1024-y)*578/1024, pointerId:1, button:0});
+  const click = async e => { await ui.main.dispatch('pointerdown', e); await ui.main.dispatch('pointerup', e); };
+  await click(at(650,350));
+  assert.equal(ui.downloads.length, 1);
+  const single = new URL(ui.downloads[0].href, 'http://localhost');
+  assert.deepEqual(Object.fromEntries(single.searchParams), {demo:'second', round:'2', t:'405', utility:'grenade-1'});
+  const landing = at(300,650);
+  await ui.main.dispatch('wheel', {...landing, deltaY:-100});
+  await click(landing);
+  assert.equal(ui.get('throw-replays').open, true);
+  const links = ui.get('throw-replay-list').querySelectorAll('a');
+  assert.deepEqual(links.map(a => new URL(a.href, 'http://localhost').searchParams.get('demo')).sort(), ['first','second']);
+  assert.ok(links.every(a => a.target === '_blank' && textWithin(a).includes('第 2 回合')));
+  ui.get('throw-replays').close();
+  await ui.main.dispatch('pointerdown', landing);
+  await ui.main.dispatch('pointermove', {...landing, clientX:landing.clientX+10});
+  await ui.main.dispatch('pointerup', landing);
+  await ui.main.dispatch('pointerdown', landing);
+  await ui.main.dispatch('pointercancel', landing);
+  await ui.main.dispatch('pointerup', landing);
+  assert.equal(ui.get('throw-replays').open, false);
+  assert.equal(ui.downloads.length, 1);
+});
 function utilityCounts(ui) { return Object.fromEntries(ui.get('utility-time-counts').children.map(button => [button.dataset.timeBucket, Number(button.dataset.count)])); }
 function textWithin(element) { return [element.textContent, ...element.children.map(textWithin)].join(' '); }
 function csvRows(text) { return text.replace(/^\ufeff/, '').split('\r\n').map(row => row.slice(1, -1).split('","').map(cell => cell.replace(/""/g, '"'))); }
@@ -1412,6 +1446,75 @@ function movementDemo(id = 'movement') {
   return demo;
 }
 function heatMetrics(ui) { return ['movement', 'engagements', 'deaths', 'shots'].map(key => ui.get(`metric-${key}`).textContent); }
+
+test('plant phase intersects the current window for every layer, persists, and is included in PNG exports', async () => {
+  const demo = movementDemo();
+  demo.plantPhaseVersion = 1;
+  demo.series[0].plantPhases = {
+    pre: {
+      cells: [[256, 768, 0, 3, 2, 0, 3]],
+      movementTimeline: [[256, 768, 0, 0, 2], [256, 768, 0, 5, 1]],
+      eventTimeline: [[256, 768, 0, 0, 1, 0, 2], [256, 768, 0, 5, 1, 0, 1]],
+    },
+    post: {
+      cells: [[256, 768, 0, 4, 2, 1, 4], [384, 768, 0, 5, 1, 0, 3]],
+      movementTimeline: [[256, 768, 0, 5, 2], [384, 768, 0, 20, 4], [384, 768, 0, 114, 1]],
+      eventTimeline: [[256, 768, 0, 5, 1, 1, 2], [384, 768, 0, 20, 1, 0, 2], [384, 768, 0, 114, 0, 0, 1]],
+      movementUntimedCells: [[256, 768, 0, 0, 2]], eventUntimedCells: [[256, 768, 0, 0, 0, 0, 1, 0, 2]],
+    },
+  };
+  const window = { start: 5, end: 6 };
+  const ui = await page([demo], {worker: true, saved: {movementTime: window, layers: ['deaths']}});
+  assert.deepEqual(heatMetrics(ui), ['3.0 秒', '2', '1', '3']);
+  const utilities = utilityCounts(ui);
+  await clickAndSettle(ui, 'plant-phase-pre');
+  assert.equal(ui.get('plant-phase-pre')['aria-pressed'], 'true');
+  assert.deepEqual(heatMetrics(ui), ['1.0 秒', '1', '0', '1']);
+  assert.equal(ui.hasVisibleHeat(), false, 'a post-plant death must disappear even when its clock second is selected');
+  await clickAndSettle(ui, 'plant-phase-post');
+  assert.equal(ui.get('plant-phase-pre')['aria-pressed'], 'false');
+  assert.deepEqual(heatMetrics(ui), ['2.0 秒', '1', '1', '2']);
+  assert.equal(ui.hasVisibleHeat(), true);
+  assert.deepEqual(utilityCounts(ui), utilities);
+  await ui.get('export-image').click();
+  assert.match(ui.canvases.at(-1).context.texts.map(entry => entry[0]).join('\n'), /死亡 1 .*1:50 → 1:49 · 下包后/);
+  const restored = await page([demo], {saved: ui.saved()});
+  assert.deepEqual(heatMetrics(restored), heatMetrics(ui));
+  await clickAndSettle(ui, 'heatmap-time-play');
+  await ui.advanceClock(1000);
+  assert.equal(ui.workerMessages.at(-1).filter.plantPhase, 'post');
+  await clickAndSettle(ui, 'plant-phase-pre');
+  assert.equal(ui.get('heatmap-time-play')['aria-pressed'], 'false');
+  await clickAndSettle(ui, 'movement-time-all');
+  assert.deepEqual(heatMetrics(ui), ['3.0 秒', '2', '0', '3']);
+  await clickAndSettle(ui, 'plant-phase-post');
+  assert.deepEqual(heatMetrics(ui), ['9.0 秒', '3', '1', '7'], 'whole phase includes post-countdown data');
+  await clickAndSettle(ui, 'clear-selection');
+  assert.equal(ui.saved().plantPhase, 'all');
+  assert.deepEqual(heatMetrics(ui), ['12.0 秒', '5', '1', '10']);
+});
+
+test('legacy phase evidence is excluded while utilities remain visible, and unplanted rounds have zero post-plant heat', async () => {
+  const legacy = movementDemo('legacy');
+  const ui = await page([legacy], {saved: {plantPhase: 'unsupported'}});
+  assert.equal(ui.saved().plantPhase, 'all');
+  await clickAndSettle(ui, 'plant-phase-pre');
+  assert.deepEqual(heatMetrics(ui), Array(4).fill('缺少阶段记录'));
+  assert.equal(ui.hasVisibleHeat(), false);
+  assert.match(ui.get('movement-time-coverage').textContent, /1 场录像缺少下包阶段记录/);
+  assert.equal(ui.get('metric-utilities').textContent, '7');
+  const unplanted = movementDemo('no-plant');
+  unplanted.plantPhaseVersion = 1;
+  unplanted.series[0].plantPhases = {pre: {...unplanted.series[0]}};
+  const post = await page([unplanted], {saved: {plantPhase: 'post'}});
+  assert.deepEqual(heatMetrics(post), ['0.0 秒', '0', '0', '0']);
+  assert.equal(post.hasVisibleHeat(), false);
+  const partial = {...unplanted, id:'partial', plantPhaseUnknownRounds:[2, 8]};
+  const mixed = await page([legacy, partial], {saved:{plantPhase:'pre'}});
+  assert.deepEqual(heatMetrics(mixed), ['12.0 秒','5','1','10']);
+  assert.match(mixed.get('movement-time-coverage').textContent, /2 个回合缺少可靠的下包记录/);
+  assert.match(mixed.get('movement-time-coverage').textContent, /1 场录像缺少下包阶段记录/);
+});
 
 test('shared heatmap range filters all four metrics while preserving existing filters and independent utility detail', async () => {
   const demo = movementDemo(), ui = await page([demo], { saved: { selectedDemos: [demo.id], selectedTeams: ['alias:squad'], selectedPlayers: [demo.players[0].id], aliases: { 'team-a': 'Squad' }, side: '3', utilityTime: '5-20', layers: ['movement', 'deaths'] } });
@@ -1597,7 +1700,8 @@ test('utility time options and clickable distribution filter groups without alte
   assert.equal(ui.get('metric-utilities').textContent, '1'); assert.equal(ui.get('utility-group-count').textContent, '1 类落点 · 1 次');
   await ui.get('utility-groups').children[0].click(); await settle();
   assert.match(textWithin(ui.get('utility-detail')), /开打后 5\.50 秒 · 5–20 秒/);
-  assert.equal(ui.get('utility-detail').querySelectorAll('a')[0].href, '/?demo=timed&t=405.50', 'replay uses original match time, not elapsed round time');
+  const link = new URL(ui.get('utility-detail').querySelectorAll('a')[0].href, 'http://localhost');
+  assert.deepEqual(Object.fromEntries(link.searchParams), {demo:'timed', round:'2', t:'405.5', utility:'grenade-2'});
   for (const key of ['0-5', '20-50', '50+', 'unknown', 'all']) {
     await ui.change('analysis-utility-time', key);
     assert.equal(Number(ui.get('metric-utilities').textContent), counts[key]);

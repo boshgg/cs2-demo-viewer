@@ -92,6 +92,8 @@
   function setDemoQuery(id) {
     const url = new URL(window.location.href);
     url.searchParams.delete('t');
+    url.searchParams.delete('utility');
+    url.searchParams.delete('round');
     if (id) url.searchParams.set('demo', id);
     else url.searchParams.delete('demo');
     window.history.replaceState(null, '', url);
@@ -162,7 +164,7 @@
       error(`示例载入失败：${err.message}`);
     }
   }
-  async function openLibraryDemo(demo, autoplay = true) {
+  async function openLibraryDemo(demo, requestedPosition = null) {
     const { generation, signal } = beginRequest();
     $('loading-title').textContent = demo.status === 'ready' ? '正在载入本地回放' : '正在准备所选录像';
     $('cancel-import').textContent = '停止等待';
@@ -178,8 +180,11 @@
       if (generation !== state.generation) return;
       await loadDemo(result.data, generation, signal);
       if (generation !== state.generation) return;
-      setDemoQuery(result.id);
-      if (autoplay) { setPlaying(true); updateUI(true); }
+      if (requestedPosition && result.id === demo.id) restoreReplayPosition(requestedPosition);
+      else {
+        setDemoQuery(result.id);
+        if (!requestedPosition) { setPlaying(true); updateUI(true); }
+      }
     } catch (err) {
       if (generation !== state.generation) return;
       state.controller = null;
@@ -187,27 +192,37 @@
       error(`本地录像载入失败：${err.message || '请刷新录像库后重试。'}`);
     }
   }
+  function restoreReplayPosition(params) {
+    const t = params.get('t'), requestedRound = params.get('round');
+    const round = requestedRound === null ? null : state.data.rounds.find(r => r.number === Number(requestedRound));
+    const utilityId = params.get('utility');
+    const utility = utilityId && state.data.utilities?.find(u => u.id === utilityId && (!round || u.round === round.number));
+    let time = t !== null && Number.isFinite(Number(t)) ? Number(t) : null;
+    if (utility) {
+      const observedTime = utility.throwObserved ? utility.start : utility.detonate;
+      if (Number.isFinite(observedTime)) time = observedTime;
+    }
+    if (round && (time === null || time < round.start || time > round.end)) time = round.start;
+    if (time !== null) seek(time);
+    if (utility) selectUtility(utility.id);
+  }
   async function restoreDemo(id) {
     const { generation, signal } = beginRequest();
+    const params = new URL(window.location.href).searchParams;
     $('loading-title').textContent = '正在恢复比赛';
     setLoading(true, '从本机缓存载入上次导入的 Demo…');
     try {
-      const response = await fetch(`/api/demos/${encodeURIComponent(id)}`, { signal });
+      const response = await fetch(id === 'sample' ? '/api/sample' : `/api/demos/${encodeURIComponent(id)}`, { signal });
       if (generation !== state.generation) return;
       if (response.status === 409) {
-        const requestedTime = new URL(window.location.href).searchParams.get('t');
-        await openLibraryDemo({ id }, false);
-        if (generation + 1 === state.generation && state.data?.id === id && requestedTime !== null && Number.isFinite(Number(requestedTime))) seek(Number(requestedTime));
+        await openLibraryDemo({ id }, params);
         return;
       }
       if (response.status === 404 || response.status === 410) throw new Error('本机比赛缓存不可用，请打开本地录像库刷新并重新选择。');
       const data = await json(response);
       if (generation !== state.generation) return;
       await loadDemo(data, generation, signal);
-      if (generation === state.generation) {
-        const requestedTime = new URL(window.location.href).searchParams.get('t');
-        if (requestedTime !== null && Number.isFinite(Number(requestedTime))) seek(Number(requestedTime));
-      }
+      if (generation === state.generation) restoreReplayPosition(params);
     } catch (err) {
       if (generation !== state.generation) return;
       state.controller = null;

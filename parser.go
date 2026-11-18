@@ -23,6 +23,7 @@ const sampleRate = 16
 const maxFrames = 120000
 const maxShots = 200000
 const maxDamageEvents = 200000
+const maxReplayEvents = 50000
 
 // Clock preserves elapsed time when a recording resets the server tick counter.
 type timelineClock struct {
@@ -137,7 +138,7 @@ func parseDemo(ctx context.Context, path, id, name string, progress func(float64
 		return n
 	}
 	addEvent := func(e Event) {
-		if clock.initialized && !p.GameState().IsWarmupPeriod() && len(d.Events) < 50000 {
+		if clock.initialized && !p.GameState().IsWarmupPeriod() && len(d.Events) < maxReplayEvents {
 			e.T = rounded(now())
 			e.Round = currentRound()
 			d.Events = append(d.Events, e)

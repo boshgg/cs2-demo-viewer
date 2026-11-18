@@ -85,3 +85,18 @@ html[data-filter-resizing] body{user-select:none}html[data-filter-resizing=width
 .source-catalog-path { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .source-catalog-pages { margin-top: 7px; justify-content: space-between; }
 .source-catalog-pages[hidden] { display: none; }
+.throw-replays { box-sizing: border-box; width: min(600px, 92vw); max-height: 76dvh; padding: 0; color: #e5edf1; background: #182128; border: 1px solid #516572; border-radius: 8px; }
+.throw-replays[open] { display: flex; flex-direction: column; }
+.throw-replays::backdrop { background: #0a1016b8; }
+.throw-replays header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px; border-bottom: 1px solid #364750; }
+.throw-replays h2 { margin: 0; font-size: 17px; }
+.throw-replays ul { overflow: auto; padding: 4px 12px 12px; margin: 0; list-style: none; }
+.throw-replays li + li { border-top: 1px solid #303e47; }
+.throw-replays a { display: grid; gap: 5px; padding: 11px 8px; color: inherit; text-decoration: none; overflow-wrap: anywhere; }
+.throw-replays a:hover, .throw-replays a:focus-visible { background: #25343c; }
+.throw-replays span { color: #82e3d6; font-size: 13px; }
+.throw-replays small { color: #a3b5bf; }
+.heatmap-plant-filter{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;margin:8px 0 12px;font-size:12px;color:#c2d3dd}
+.heatmap-plant-filter>div{display:flex;gap:3px}
+.heatmap-plant-filter .button{min-height:34px;padding:5px 11px;font-size:12px}
+.heatmap-plant-filter .button[aria-pressed="true"]{background:#284649;border-color:#64d7cd;color:#b4fff7}
