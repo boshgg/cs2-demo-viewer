@@ -233,7 +233,7 @@ func TestAnalysisTimingUpgradeRejectsChangedRevisionBeforeCommit(t *testing.T) {
 	j, replay, summary := legacyAnalysisFixture(t, a, "000000000000000000000014")
 	oldHash := fileHash(t, j.analysisResult)
 	snapshot := analysisUpgradeSnapshot{job: j, id: j.ID, revision: j.Revision, replay: j.result, summary: j.analysisResult, mapName: j.Map}
-	if err := patchAnalysisUtilityTiming(summary, &analysisTimingReplay{ID: replay.ID, Map: replay.Map, Rounds: replay.Rounds, Utilities: replay.Utilities}); err != nil {
+	if err := patchAnalysisUtilities(summary, &analysisTimingReplay{ID: replay.ID, Map: replay.Map, Rounds: replay.Rounds, Utilities: replay.Utilities}, true, false); err != nil {
 		t.Fatal(err)
 	}
 	next, _ := statisticsFixture(t, a, j.ID, j.ID+"-123", "replacement.dem")

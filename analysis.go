@@ -17,6 +17,7 @@ const analysisUtilityTimingVersion = 1
 const analysisMovementTimingVersion = 1
 const analysisEventTimingVersion = 1
 const analysisPlantPhaseVersion = 1
+const analysisUtilityPlantPhaseVersion = 1
 
 // AnalysisCell holds a world-space grid centre followed by independent metrics:
 // x, y, z, observed living-player seconds, gunfight involvements, deaths, shots.
@@ -57,6 +58,7 @@ type AnalysisHeatmap struct {
 }
 
 type AnalysisUtility struct {
+	PlantPhase    string         `json:"plantPhase"`
 	ID            string         `json:"id"`
 	Type          string         `json:"type"`
 	PlayerID      string         `json:"playerId"`
@@ -82,24 +84,25 @@ type AnalysisBounds struct {
 }
 
 type AnalysisDemo struct {
-	PlantPhaseVersion       int               `json:"plantPhaseVersion"`
-	PlantPhaseUnknownRounds []int             `json:"plantPhaseUnknownRounds,omitempty"`
-	UtilityTimingVersion    int               `json:"utilityTimingVersion"`
-	MovementTimingVersion   int               `json:"movementTimingVersion"`
-	EventTimingVersion      int               `json:"eventTimingVersion"`
-	ID                      string            `json:"id"`
-	Name                    string            `json:"name"`
-	Map                     string            `json:"map"`
-	Duration                float64           `json:"duration"`
-	RoundCount              int               `json:"roundCount"`
-	Synthetic               bool              `json:"synthetic"`
-	Warnings                []string          `json:"warnings"`
-	Players                 []AnalysisPlayer  `json:"players"`
-	Teams                   []AnalysisTeam    `json:"teams"`
-	Series                  []AnalysisSeries  `json:"series"`
-	Utilities               []AnalysisUtility `json:"utilities"`
-	Bounds                  AnalysisBounds    `json:"bounds"`
-	CellSize                int               `json:"cellSize"`
+	UtilityPlantPhaseVersion int               `json:"utilityPlantPhaseVersion"`
+	PlantPhaseVersion        int               `json:"plantPhaseVersion"`
+	PlantPhaseUnknownRounds  []int             `json:"plantPhaseUnknownRounds,omitempty"`
+	UtilityTimingVersion     int               `json:"utilityTimingVersion"`
+	MovementTimingVersion    int               `json:"movementTimingVersion"`
+	EventTimingVersion       int               `json:"eventTimingVersion"`
+	ID                       string            `json:"id"`
+	Name                     string            `json:"name"`
+	Map                      string            `json:"map"`
+	Duration                 float64           `json:"duration"`
+	RoundCount               int               `json:"roundCount"`
+	Synthetic                bool              `json:"synthetic"`
+	Warnings                 []string          `json:"warnings"`
+	Players                  []AnalysisPlayer  `json:"players"`
+	Teams                    []AnalysisTeam    `json:"teams"`
+	Series                   []AnalysisSeries  `json:"series"`
+	Utilities                []AnalysisUtility `json:"utilities"`
+	Bounds                   AnalysisBounds    `json:"bounds"`
+	CellSize                 int               `json:"cellSize"`
 }
 
 type analysisRoundWindow struct {
@@ -185,7 +188,7 @@ func (s *analysisSeriesValue) heatmap() AnalysisHeatmap {
 // Gunfights require observed opponent firearm damage; empty damage data is not
 // silently substituted with missed shots or speculative lines of sight.
 func BuildAnalysis(d *DemoData) *AnalysisDemo {
-	a := &AnalysisDemo{PlantPhaseVersion: analysisPlantPhaseVersion, UtilityTimingVersion: analysisUtilityTimingVersion, MovementTimingVersion: analysisMovementTimingVersion, EventTimingVersion: analysisEventTimingVersion, CellSize: analysisCellSize, Players: []AnalysisPlayer{}, Teams: []AnalysisTeam{}, Series: []AnalysisSeries{}, Utilities: []AnalysisUtility{}, Warnings: []string{}}
+	a := &AnalysisDemo{UtilityPlantPhaseVersion: analysisUtilityPlantPhaseVersion, PlantPhaseVersion: analysisPlantPhaseVersion, UtilityTimingVersion: analysisUtilityTimingVersion, MovementTimingVersion: analysisMovementTimingVersion, EventTimingVersion: analysisEventTimingVersion, CellSize: analysisCellSize, Players: []AnalysisPlayer{}, Teams: []AnalysisTeam{}, Series: []AnalysisSeries{}, Utilities: []AnalysisUtility{}, Warnings: []string{}}
 	if d == nil {
 		return a
 	}
@@ -321,6 +324,7 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 		player := normalisePlayer(u.OwnerID, u.Owner)
 		out := AnalysisUtility{ID: u.ID, Type: u.Type, PlayerID: player, Owner: u.Owner, TeamID: teamAt(u.Round, u.Team, player).team.ID, Side: u.Team, Round: u.Round, Time: when, End: end, Path: []UtilityPoint{}, ThrowObserved: u.ThrowObserved, Detonated: true}
 		out.RoundElapsed, out.TimeSource = analysisUtilityTiming(u, timingRounds)
+		out.PlantPhase = plants.throwPhase(u)
 		if u.ThrowObserved && len(u.Path) > 0 {
 			first := u.Path[0]
 			pos := Position{first.X, first.Y, first.Z}

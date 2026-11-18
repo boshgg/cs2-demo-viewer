@@ -39,11 +39,17 @@
 <details class="method-note"><summary>统计口径与读图说明</summary><p>移动按存活、连接状态下的有效回合停留秒数累计，排除冻结、死亡后和回合结束后的记录；它表示路线使用与停留密度，不等同于移动距离。交火记录敌方枪械造成伤害时的双方位置，同一玩家同一空间格内 1 秒合并一次；开火图层统计所有观测到的枪械开火事件。死亡包括自杀和世界伤害。</p><p>蓝、青、绿、黄、红依次表示从低到高的密度，零记录处透明。默认「低频增强」用对数色阶拉开稀少记录的差异，可切换「线性」。图例与悬停百分比表示相对当前筛选峰值的扩散后密度，不是事件占比；上方数值保留实际数量。各图层独立归一化，叠加时取各位置的最高相对密度，避免不同单位相加或混色变白。比较具体事件时可单独勾选图层；不同筛选之间的颜色不可直接比较。空间格约 64 游戏单位，扩散仅用于显示。地图版本或多层结构可能影响读图，请使用楼层筛选。合成示例用于体验，不能当作真实比赛结论。</p></details>
 </section>
 <aside class="utility-pane" aria-label="道具统计与投法分析"><div class="pane-title"><span class="eyebrow">UTILITY LIBRARY</span><h2>常见落点与投法</h2><p>从重复的落点，找到值得练习的道具。</p></div><div class="utility-controls"><div class="split"><div><label class="field-title" for="analysis-utility-type">道具</label><select id="analysis-utility-type"><option value="all">全部类型</option><option value="smoke">烟雾弹</option><option value="flash">闪光弹</option><option value="he">高爆手雷</option><option value="molotov">燃烧瓶</option><option value="incendiary">燃烧弹</option><option value="decoy">诱饵弹</option></select></div><div><label class="field-title" for="utility-sort">频率</label><select id="utility-sort"><option value="common">最常见优先</option><option value="rare">罕见优先</option></select></div></div><section class="utility-time-filter" aria-label="道具投掷时段">
+<div class="utility-phase-filter" role="group" aria-labelledby="utility-phase-label">
+<span id="utility-phase-label" class="field-title">投掷下包阶段</span>
+<div class="utility-phase-buttons"><button id="utility-phase-all" class="utility-time-count" type="button" aria-pressed="true">全部</button><button id="utility-phase-pre" class="utility-time-count" type="button" aria-pressed="false">下包前</button><button id="utility-phase-post" class="utility-time-count" type="button" aria-pressed="false">下包后</button></div>
+<p class="micro">按出手时刻判断，成功下包的瞬间计入下包后。未下包回合的投掷计入下包前。</p>
+<p id="utility-phase-coverage" class="micro" role="status" hidden></p>
+</div>
 <label class="field-title" for="analysis-utility-time">投掷时段</label>
 <select id="analysis-utility-time" aria-describedby="utility-time-note"><option value="all">全部时段</option><option value="0-5">开局 0–5 秒（含 5 秒）</option><option value="5-20">5–20 秒（大于 5 秒）</option><option value="20-50">20–50 秒（大于 20 秒）</option><option value="50+">50 秒以后（大于 50 秒）</option><option value="unknown">时间未知</option></select>
 <p id="utility-time-note" class="micro">以冻结结束、回合正式开打为 0，按出手时刻分类。5 秒归开局，20 / 50 秒归前一段；缺少时间记录单列为未知。</p>
 <div id="utility-time-counts" class="utility-time-counts" role="group" aria-label="各投掷时段次数，点击筛选"></div>
-<p class="micro utility-time-scope">次数沿用地图、比赛、队伍、玩家、阵营、楼层及道具筛选，展示选时段前的分布。仅筛选道具，不影响其他热力图。</p>
+<p class="micro utility-time-scope">阶段次数随投掷时段变化，时段分布按选中的下包阶段统计。</p>
 </section><div class="split thresholds"><label>落点归类距离<input id="landing-distance" type="number" min="16" max="512" step="16" value="128"><small>游戏单位</small></label><label>相同投法距离<input id="throw-distance" type="number" min="16" max="256" step="16" value="64"><small>出手点 + 落点</small></label></div><p class="micro">按道具类型和楼层分组，组内任意两点均须满足距离。罕见指当前样本中次数少，不代表无效或职业赛总体频率。</p></div><div class="section-head utility-count"><h3 id="utility-group-count">0 类落点</h3><button id="clear-utility" class="text-button" hidden>取消定位</button></div><div id="utility-groups" class="utility-groups"><div class="utility-empty">导入比赛后显示道具统计</div></div><section id="utility-detail" class="utility-detail" hidden aria-label="道具投法详情"></section></aside>
 </main>
 <dialog id="throw-replays" class="throw-replays" aria-labelledby="throw-replays-title">

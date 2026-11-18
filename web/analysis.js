@@ -9,6 +9,7 @@
   let playbackLength = playback.defaultWindowLength, playbackSpeed = 1, playbackMessage = '已暂停。固定窗口逐秒前进，计算完成后再更新下一帧。';
   state.movementTime = null;
   state.plantPhase = 'all';
+  state.utilityPlantPhase = 'all';
   const plantPhaseNames = { all: '全部阶段', pre: '下包前', post: '下包后' };
   let initializing = true, migratedSessionId = '', libraryEnabled = false, libraryRefreshing = false, libraryScanning = false, syncPromise = null, libraryTimer, restoredView = null;
   let libraryInfoRequest = 0;
@@ -41,6 +42,7 @@
     settings.sourceView = { ...sourceView, folderExpansion: sourceExpansion.snapshot() }; settings.libraryView = { ...libraryView, folderExpansion: libraryExpansion.snapshot() };
     settings.movementTime = state.movementTime;
     settings.plantPhase = state.plantPhase;
+    settings.utilityPlantPhase = state.utilityPlantPhase;
     settings.heatmapPlayback = { windowLength: playbackLength, speed: playbackSpeed };
     if (restoredView) { settings.map = restoredView.map; settings.floor = restoredView.floor; }
     try { localStorage.setItem(storageKey, JSON.stringify(settings)); } catch { /* Private browsing may not offer localStorage. */ }
@@ -69,6 +71,7 @@
     migratedSessionId = typeof saved.migratedSessionId === 'string' ? saved.migratedSessionId : '';
     state.movementTime = sanitizeMovementTime(saved.movementTime);
     state.plantPhase = ['pre', 'post'].includes(saved.plantPhase) ? saved.plantPhase : 'all';
+    state.utilityPlantPhase = ['pre', 'post'].includes(saved.utilityPlantPhase) ? saved.utilityPlantPhase : 'all';
     playbackLength = state.movementTime ? state.movementTime.end - state.movementTime.start : playback.normalizeWindowLength(saved.heatmapPlayback?.windowLength);
     playbackSpeed = playback.normalizeSpeed(saved.heatmapPlayback?.speed); renderMovementTime(); renderPlayback();
   }
@@ -209,12 +212,18 @@
     const cluster = { landing: Number($('landing-distance').value) || 128, throwing: Number($('throw-distance').value) || 64, lowerMaxZ: state.mapInfo?.lowerMaxZ };
     filter.movementTime = options.autoplay ? options.range : state.movementTime;
     filter.plantPhase = state.plantPhase;
+    filter.utilityPlantPhase = state.utilityPlantPhase;
     const id = ++state.request;
     analysisPending = true;
     if (options.autoplay) playbackPending = { id, range: { ...options.range } };
     $('computing').hidden = false;
     $('export-image').disabled = $('export-csv').disabled = true;
-    if (!options.movementOnly) { state.selectedGroup = null; state.selectedThrow = null; }
+    if (!options.movementOnly) {
+      const wasShowingMarkers = !!state.selectedGroup;
+      state.selectedGroup = state.selectedThrow = null;
+      $('utility-groups').replaceChildren(); $('utility-detail').hidden = true; $('clear-utility').hidden = true;
+      if (wasShowingMarkers) draw();
+    }
     if (state.worker) { const job = { type: 'compute', id, filter, cluster }; if (workerBusy) workerPending = job; else sendWorkerRequest(job); }
     else {
       setTimeout(() => {
@@ -1022,6 +1031,20 @@
     }
     dialog.showModal();
   }
+  function renderUtilityPhase() {
+    const counts = state.result?.utilityPlantPhaseCounts || {};
+    for (const phase of Object.keys(plantPhaseNames)) {
+      const button = $('utility-phase-' + phase), count = counts[phase] || 0;
+      const label = phase === 'all' ? '全部' : core.utilityPlantPhaseLabel(phase);
+      button.replaceChildren(node('span', label), node('strong', number(count)));
+      button.dataset.count = String(count);
+      button.setAttribute('aria-label', `${label}，${count} 次投掷`);
+      button.setAttribute('aria-pressed', String(state.utilityPlantPhase === phase));
+    }
+    const unknown = counts.unknown || 0, coverage = $('utility-phase-coverage');
+    coverage.textContent = unknown ? `当前时段有 ${number(unknown)} 次投掷无法确定下包阶段，仅计入「全部」。` : '';
+    coverage.hidden = !unknown;
+  }
   function renderUtilityTimeCounts() {
     const counts = state.result?.utilityTimeCounts || {}, selected = $('analysis-utility-time').value;
     const all = core.utilityTimeBuckets.reduce((sum, bucket) => sum + (counts[bucket.key] || 0), 0);
@@ -1037,9 +1060,11 @@
   }
   function utilityTimeDescription(item) {
     const bucket = item.timeBucket || core.utilityTimeBucket(item);
-    return bucket === 'unknown' ? '投掷时段未知（缺少出手或冻结结束记录）' : `开打后 ${item.roundElapsed.toFixed(2)} 秒 · ${core.utilityTimeLabel(bucket)}`;
+    const time = bucket === 'unknown' ? '投掷时段未知（缺少出手或冻结结束记录）' : `开打后 ${item.roundElapsed.toFixed(2)} 秒 · ${core.utilityTimeLabel(bucket)}`;
+    return `${time} · ${core.utilityPlantPhaseLabel(item.plantPhase)}`;
   }
   function renderUtilityGroups() {
+    renderUtilityPhase();
     renderUtilityTimeCounts();
     const groups = [...(state.result?.groups || [])];
     if ($('utility-sort').value === 'rare') groups.sort((a, b) => a.count - b.count || a.id.localeCompare(b.id));
@@ -1055,13 +1080,13 @@
       button.append(image, text, count); button.addEventListener('click', () => { state.selectedGroup = group; state.selectedThrow = null; renderUtilityGroups(); renderUtilityDetail(); draw(); }); list.append(button);
     }
     if (groups.length > max) { const more = node('button', `显示更多（还有 ${groups.length - max} 类）`, 'cluster-more'); more.addEventListener('click', () => { list.dataset.limit = String(max + 80); renderUtilityGroups(); }); list.append(more); }
-    if (!groups.length) list.append(node('div', '当前筛选没有已观测到落点的道具。切换投掷时段、道具类型或扩大筛选范围。', 'utility-empty'));
+    if (!groups.length) list.append(node('div', '当前筛选没有已观测到落点的道具。切换投掷时段、下包阶段或扩大筛选范围。', 'utility-empty'));
     $('clear-utility').hidden = !state.selectedGroup;
     if (!state.selectedGroup) { $('utility-detail').hidden = true; $('map-status').textContent = '滚轮缩放 · 拖拽平移 · 点击右侧落点定位'; }
   }
   function renderUtilityDetail() {
     const group = state.selectedGroup, detail = $('utility-detail'); detail.replaceChildren(); detail.hidden = !group; if (!group) return;
-    detail.append(node('h3', `${utilityNames[group.type] || group.type} · ${group.count} 次观测`), node('p', `${core.utilityTimeLabel($('analysis-utility-time').value)} · 占当前道具筛选 ${group.percent.toFixed(1)}%。下列投法同时比较出手点和落点；位置接近不代表视角、速度与按键完全相同。`));
+    detail.append(node('h3', `${utilityNames[group.type] || group.type} · ${group.count} 次观测`), node('p', `${core.utilityTimeLabel($('analysis-utility-time').value)} · ${core.utilityPlantPhaseLabel(state.utilityPlantPhase)} · 占当前道具筛选 ${group.percent.toFixed(1)}%。下列投法同时比较出手点和落点；位置接近不代表视角、速度与按键完全相同。`));
     for (const [index, subgroup] of group.throws.entries()) {
       const block = node('div', null, 'throw-group'), button = node('button', `${subgroup.unknown ? '出手点未知（不归并投法）' : `投法 ${index + 1}`} · ${subgroup.count} 次`, state.selectedThrow?.id === subgroup.id ? 'selected' : '');
       button.addEventListener('click', () => { state.selectedThrow = subgroup; renderUtilityDetail(); draw(); }); block.append(button);
@@ -1125,6 +1150,12 @@
   $('analysis-floor').addEventListener('change', async () => { await loadMapImage(); requestAnalysis(); });
   $('analysis-utility-type').addEventListener('change', requestAnalysis);
   $('analysis-utility-time').addEventListener('change', requestAnalysis);
+  for (const phase of Object.keys(plantPhaseNames)) $('utility-phase-' + phase).addEventListener('click', () => {
+    if (state.utilityPlantPhase === phase) return;
+    state.utilityPlantPhase = phase;
+    renderUtilityPhase();
+    requestAnalysis();
+  });
   for (const edge of ['start', 'end']) {
     $(`movement-time-${edge}`).addEventListener('input', () => setMovementEdge(edge));
     $(`movement-time-${edge}`).addEventListener('change', () => setMovementEdge(edge, true));
@@ -1163,7 +1194,7 @@
   $('players-invert').addEventListener('click', () => { state.selectedPlayers = new Set(availablePlayers().map(p => p.id).filter(id => state.selectedPlayers && !state.selectedPlayers.has(id))); renderPlayers(); requestAnalysis(); });
   $('player-search').addEventListener('input', () => { renderPlayers(); save(); });
   $('apply-aliases').addEventListener('click', () => { $('team-aliases').querySelectorAll('input').forEach(input => { const value = input.value.trim(); if (value) state.aliases[input.dataset.teamId] = value; else delete state.aliases[input.dataset.teamId]; }); state.selectedTeams = null; renderFilters(); requestAnalysis(); });
-  $('clear-selection').addEventListener('click', () => { state.selectedDemos = state.selectedTeams = state.selectedPlayers = null; state.movementTime = null; state.plantPhase = 'all'; renderMovementTime(); $('analysis-side').value = 'all'; $('analysis-floor').value = 'all'; $('analysis-utility-type').value = 'all'; $('analysis-utility-time').value = 'all'; $('player-search').value = ''; renderJobs(); renderFilters(); void loadMapImage(); requestAnalysis(); });
+  $('clear-selection').addEventListener('click', () => { state.selectedDemos = state.selectedTeams = state.selectedPlayers = null; state.movementTime = null; state.plantPhase = 'all'; state.utilityPlantPhase = 'all'; renderMovementTime(); $('analysis-side').value = 'all'; $('analysis-floor').value = 'all'; $('analysis-utility-type').value = 'all'; $('analysis-utility-time').value = 'all'; $('player-search').value = ''; renderJobs(); renderFilters(); void loadMapImage(); requestAnalysis(); });
   $('clear-utility').addEventListener('click', () => { state.selectedGroup = state.selectedThrow = null; renderUtilityGroups(); draw(); });
   for (const name of metrics) $(`layer-${name}`).addEventListener('change', () => { rebuildHeat(); save(); });
   let radiusTimer;
@@ -1228,7 +1259,11 @@
   new ResizeObserver(draw).observe($('heatmap-stage'));
   $('export-image').addEventListener('click', () => {
     const output = document.createElement('canvas'), ratio = canvas.width / canvas.getBoundingClientRect().width, width = canvas.width / ratio, height = canvas.height / ratio;
-    const coverageLines = heatmapCoverageLines(), extraHeight = 202 + coverageLines.length * 17;
+    const coverageLines = heatmapCoverageLines();
+    if (state.result?.totals.utilities || state.utilityPlantPhase !== 'all' || $('analysis-utility-time').value !== 'all') {
+      coverageLines.push(`道具投掷 · ${core.utilityPlantPhaseLabel(state.utilityPlantPhase)} · ${core.utilityTimeLabel($('analysis-utility-time').value)} · ${number(state.result?.totals.utilities || 0)} 次`);
+    }
+    const extraHeight = 202 + coverageLines.length * 17;
     output.width = canvas.width; output.height = Math.round((height + extraHeight) * ratio);
     const c = output.getContext('2d'); c.scale(ratio, ratio); c.fillStyle = '#141b23'; c.fillRect(0, 0, width, height + extraHeight); c.drawImage(canvas, 0, 80, width, height);
     c.fillStyle = '#e5eef4'; c.font = '18px sans-serif'; c.fillText(`CS2 Replay · ${state.map} · ${$('analysis-side').selectedOptions[0].textContent}`, 18, 28, width - 36);
@@ -1245,8 +1280,8 @@
     output.toBlob(blob => { if (blob) download(blob, `${state.map}-analysis.png`); });
   });
   $('export-csv').addEventListener('click', () => {
-    const rows = [['地图', '落点分类', '投法分类', '道具', '落点次数', '占当前道具百分比', '比赛', '玩家', '玩家ID', '队伍分组', '阵营', '回合', '秒', '回合开打后秒数', '投掷时段', '出手X', '出手Y', '出手Z', '落点X', '落点Y', '落点Z']];
-    for (const g of state.result?.groups || []) for (const t of g.throws) for (const u of t.items) rows.push([u.map, g.id, t.unknown ? '未知出手点' : t.id, utilityNames[u.type] || u.type, g.count, g.percent.toFixed(2), u.demoName, u.owner, u.playerId, u.teamId, u.side === 3 ? 'CT' : 'T', u.round, u.time, u.timeBucket === 'unknown' ? '' : u.roundElapsed, core.utilityTimeLabel(u.timeBucket), u.start?.x ?? '', u.start?.y ?? '', u.start?.z ?? '', u.end.x, u.end.y, u.end.z]);
+    const rows = [['地图', '落点分类', '投法分类', '道具', '落点次数', '占当前道具百分比', '比赛', '玩家', '玩家ID', '队伍分组', '阵营', '回合', '秒', '回合开打后秒数', '投掷时段', '出手X', '出手Y', '出手Z', '落点X', '落点Y', '落点Z', '投掷下包阶段']];
+    for (const g of state.result?.groups || []) for (const t of g.throws) for (const u of t.items) rows.push([u.map, g.id, t.unknown ? '未知出手点' : t.id, utilityNames[u.type] || u.type, g.count, g.percent.toFixed(2), u.demoName, u.owner, u.playerId, u.teamId, u.side === 3 ? 'CT' : 'T', u.round, u.time, u.timeBucket === 'unknown' ? '' : u.roundElapsed, core.utilityTimeLabel(u.timeBucket), u.start?.x ?? '', u.start?.y ?? '', u.start?.z ?? '', u.end.x, u.end.y, u.end.z, core.utilityPlantPhaseLabel(u.plantPhase)]);
     download(new Blob([core.csv(rows)], { type: 'text/csv;charset=utf-8' }), `${state.map}-utilities.csv`);
   });
   document.addEventListener('dragover', event => { if (event.dataTransfer?.types.includes('Files')) event.preventDefault(); });

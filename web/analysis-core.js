@@ -52,6 +52,14 @@
     return '50+';
   }
   function utilityTimeLabel(key) { return key === 'all' ? '全部时间' : utilityTimeBuckets.find(bucket => bucket.key === key)?.label || '时间未知'; }
+  function utilityPlantPhaseLabel(key) {
+    switch (key) {
+      case 'all': return '全部阶段';
+      case 'pre': return '下包前';
+      case 'post': return '下包后';
+      default: return '阶段未知';
+    }
+  }
   function uniqueDemos(demos) {
     const result = [], ids = new Set();
     for (const d of demos || []) if (d && d.id && !ids.has(d.id)) { ids.add(d.id); result.push(d); }
@@ -66,6 +74,8 @@
     const demos = uniqueDemos(input), map = filter.map || demos[0]?.map || '';
     const movementTime = normalizeMovementTime(filter.movementTime);
     const plantPhase = ['pre', 'post'].includes(filter.plantPhase) ? filter.plantPhase : 'all';
+    const utilityPlantPhase = ['pre', 'post'].includes(filter.utilityPlantPhase) ? filter.utilityPlantPhase : 'all';
+    const utilityPlantPhaseCounts = { all: 0, pre: 0, post: 0, unknown: 0 };
     const missingPlantPhaseDemos = [];
     let unknownPlantRounds = 0;
     const movementCoverage = movementTime ? { status: 'empty', selectedDemos: 0, timedDemos: 0, missingDemos: 0, missingDemoIds: [], totalSeconds: 0, timedSeconds: 0, unknownSeconds: 0, beyondSeconds: 0, selectedSeconds: 0, coverage: null } : null;
@@ -207,11 +217,18 @@
         if (filter.utilityType && filter.utilityType !== 'all' && u.type !== filter.utilityType) continue;
         seenUtilities.add(key);
         const timeBucket = utilityTimeBucket(u);
-        utilityTimeCounts[timeBucket]++;
+        const phase = d.utilityPlantPhaseVersion === 1 && u.throwObserved === true && (u.plantPhase === 'pre' || u.plantPhase === 'post') ? u.plantPhase : 'unknown';
+        const timeMatches = selectedTime === 'all' || timeBucket === selectedTime;
+        const phaseMatches = utilityPlantPhase === 'all' || phase === utilityPlantPhase;
+        if (phaseMatches) utilityTimeCounts[timeBucket]++;
+        if (timeMatches) {
+          utilityPlantPhaseCounts.all++;
+          utilityPlantPhaseCounts[phase]++;
+        }
         if (playerId) includedPlayers.add(playerId);
         includedTeams.add(teamId); contributed = true;
-        if (selectedTime !== 'all' && timeBucket !== selectedTime) continue;
-        utilities.push({ ...u, start: u.throwObserved && position(u.start) ? u.start : null, demoId: d.id, demoName: d.name, map: d.map, playerId, teamId, key, timeBucket });
+        if (!timeMatches || !phaseMatches) continue;
+        utilities.push({ ...u, plantPhase: phase, start: u.throwObserved && position(u.start) ? u.start : null, demoId: d.id, demoName: d.name, map: d.map, playerId, teamId, key, timeBucket });
       }
       if (contributed) { includedDemos.add(d.id); totals.rounds += Number(d.roundCount) || 0; }
     }
@@ -231,7 +248,7 @@
         }
       }
     }
-    return { map, cells: [...cells.values()], utilities, utilityTimeCounts, totals, movementTime, movementCoverage, heatmapCoverage, plantPhase, missingPlantPhaseDemos, unknownPlantRounds };
+    return { map, cells: [...cells.values()], utilities, utilityTimeCounts, utilityPlantPhase, utilityPlantPhaseCounts, totals, movementTime, movementCoverage, heatmapCoverage, plantPhase, missingPlantPhaseDemos, unknownPlantRounds };
   }
   function clusterUtilities(input, options = {}) {
     const landing = Math.max(1, Math.min(1024, Number(options.landing) || 128));
@@ -290,5 +307,5 @@
       return `"${safe.replace(/"/g, '""')}"`;
     }).join(',')).join('\r\n');
   }
-  return { aggregate, clusterUtilities, uniqueDemos, teamKey, floorOf, csv, utilityTimeBucket, utilityTimeLabel, utilityTimeBuckets, normalizeMovementTime, movementDuration };
+  return { aggregate, clusterUtilities, uniqueDemos, teamKey, floorOf, csv, utilityTimeBucket, utilityTimeLabel, utilityTimeBuckets, utilityPlantPhaseLabel, normalizeMovementTime, movementDuration };
 });

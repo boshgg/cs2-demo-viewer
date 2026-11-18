@@ -92,6 +92,41 @@ test('CSV safely escapes names, line breaks, quotes and spreadsheet formulas', (
 function timedUtility(id, elapsed, overrides = {}) { return { ...utility(id), teamId: 'name:a', roundElapsed: elapsed, timeSource: 'freeze_end', time: 2700 + (elapsed || 0), ...overrides }; }
 const emptyTimeCounts = () => ({ '0-5': 0, '5-20': 0, '20-50': 0, '50+': 0, unknown: 0 });
 
+test('utility time and plant phase count each other’s scope and share deduplicated throws', () => {
+  const pre = timedUtility('early-pre', 5, {plantPhase:'pre'});
+  const current = demo('current', {utilityPlantPhaseVersion:1, utilities:[
+    pre, pre,
+    timedUtility('late-pre', 70, {plantPhase:'pre'}),
+    timedUtility('late-post', 71, {plantPhase:'post'}),
+    timedUtility('missing-phase', 72),
+    timedUtility('unknown-phase', 73, {plantPhase:'unknown'}),
+    timedUtility('unselected-type', 75, {type:'flash', plantPhase:'post'}),
+    timedUtility('unknown-time', null, {plantPhase:'post',timeSource:'unknown'}),
+  ]});
+  // Without a verified version, even an old or partial row containing a phase is unknown.
+  const legacy = demo('legacy', {utilities:[timedUtility('unverified', 74, {plantPhase:'pre'})]});
+  const data = [current, legacy];
+  const filter = {utilityType:'smoke', utilityTime:'50+'};
+  const all = A.aggregate(data, filter);
+  assert.deepEqual(all.utilityPlantPhaseCounts, {all:5, pre:1, post:1, unknown:3});
+  assert.deepEqual(all.utilities.map(u => u.plantPhase), ['pre','post','unknown','unknown','unknown']);
+  for (const [phase, id, times] of [
+    ['pre', 'late-pre', {...emptyTimeCounts(), '0-5':1,'50+':1}],
+    ['post', 'late-post', {...emptyTimeCounts(), '50+':1, unknown:1}],
+  ]) {
+    const result = A.aggregate(data, {...filter, utilityPlantPhase:phase});
+    assert.equal(result.utilityPlantPhase, phase);
+    assert.deepEqual(result.utilityPlantPhaseCounts, all.utilityPlantPhaseCounts);
+    assert.deepEqual(result.utilityTimeCounts, times);
+    assert.deepEqual(result.utilities.map(u => u.id), [id]);
+    assert.deepEqual(result.cells, all.cells);
+    assert.equal(result.totals.utilities, 1);
+  }
+  const invalid = A.aggregate(data, {...filter, utilityPlantPhase:'invalid'});
+  assert.equal(invalid.utilityPlantPhase, 'all');
+  assert.deepEqual(invalid.utilities, all.utilities);
+});
+
 test('utility release buckets have inclusive upper boundaries and tolerate tiny floating-point drift', () => {
   for (const [elapsed, bucket] of [[0,'0-5'],[5,'0-5'],[20,'5-20'],[50,'20-50'],[50.01,'50+']]) assert.equal(A.utilityTimeBucket(timedUtility('u',elapsed)),bucket);
   const epsilon = 1e-7;

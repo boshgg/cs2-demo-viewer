@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
@@ -95,10 +96,9 @@ const analysisTimingUnavailableWarning = "道具投掷时机暂无法从完整�
 // recordings. The app-wide upgrade gate still permits only one decode at a time.
 const analysisSummaryReadLimit int64 = 256 << 20
 
-// All existing fields remain raw JSON, including team/player IDs and future
-// fields this binary does not know about. This function only patches utilities;
-// movement timing is upgraded separately without rewriting existing cell values.
-func patchAnalysisUtilityTiming(summary map[string]json.RawMessage, replay *analysisTimingReplay) error {
+// Update only the requested utility fields, preserving existing measurements
+// and unknown fields from older or newer producers.
+func patchAnalysisUtilities(summary map[string]json.RawMessage, replay *analysisTimingReplay, timing, plant bool) error {
 	var utilities []map[string]json.RawMessage
 	if raw := summary["utilities"]; len(raw) > 0 {
 		if err := json.Unmarshal(raw, &utilities); err != nil {
@@ -108,8 +108,23 @@ func patchAnalysisUtilityTiming(summary map[string]json.RawMessage, replay *anal
 	rounds := map[int]Round{}
 	observed := map[string]Utility{}
 	ambiguous := map[string]bool{}
+	var phases *analysisPlantPhases
 	if replay != nil {
 		rounds = analysisTimingRounds(replay.Rounds)
+		if plant {
+			phases = newAnalysisPlantPhases(replay.Rounds, replay.Events, analysisWindows(replay.Rounds))
+			// The heatmap upgrade already checked contradictions against frames.
+			// Reuse those exclusions even when upgrading a v4.3.1 summary alone.
+			if raw := summary["plantPhaseUnknownRounds"]; len(raw) > 0 {
+				var unknown []int
+				if err := json.Unmarshal(raw, &unknown); err != nil {
+					return err
+				}
+				for _, round := range unknown {
+					phases.unknown[round] = true
+				}
+			}
+		}
 		for _, utility := range replay.Utilities {
 			if _, exists := observed[utility.ID]; exists {
 				ambiguous[utility.ID] = true
@@ -122,40 +137,55 @@ func patchAnalysisUtilityTiming(summary map[string]json.RawMessage, replay *anal
 			continue
 		}
 		var previous struct {
-			ID            string  `json:"id"`
-			Type          string  `json:"type"`
-			Round         int     `json:"round"`
-			Time          float64 `json:"time"`
-			ThrowObserved bool    `json:"throwObserved"`
+			ID            string   `json:"id"`
+			Type          string   `json:"type"`
+			Round         int      `json:"round"`
+			Time          *float64 `json:"time"`
+			ThrowObserved bool     `json:"throwObserved"`
 		}
 		body, err := json.Marshal(raw)
 		if err != nil {
 			return err
 		}
 		var elapsed *float64
-		source := "unknown"
+		source, phase := "unknown", "unknown"
 		if err := json.Unmarshal(body, &previous); err == nil {
-			if original, found := observed[previous.ID]; found && !ambiguous[previous.ID] && previous.ThrowObserved && original.ThrowObserved && previous.Round == original.Round && previous.Type == original.Type && previous.Time == original.Start {
-				elapsed, source = analysisUtilityTiming(original, rounds)
+			if original, found := observed[previous.ID]; found && previous.ID != "" && !ambiguous[previous.ID] && previous.ThrowObserved && original.ThrowObserved && previous.Round == original.Round && previous.Type == original.Type && previous.Time != nil && *previous.Time == original.Start {
+				if timing {
+					elapsed, source = analysisUtilityTiming(original, rounds)
+				}
+				if phases != nil {
+					phase = phases.throwPhase(original)
+				}
 			}
 		}
-		raw["roundElapsed"], _ = json.Marshal(elapsed)
-		raw["timeSource"], _ = json.Marshal(source)
+		if timing {
+			raw["roundElapsed"], _ = json.Marshal(elapsed)
+			raw["timeSource"], _ = json.Marshal(source)
+		}
+		if plant {
+			raw["plantPhase"], _ = json.Marshal(phase)
+		}
 	}
 	if _, exists := summary["utilities"]; exists {
 		summary["utilities"], _ = json.Marshal(utilities)
 	}
 	if replay != nil {
-		summary["utilityTimingVersion"], _ = json.Marshal(analysisUtilityTimingVersion)
+		if timing {
+			summary["utilityTimingVersion"], _ = json.Marshal(analysisUtilityTimingVersion)
+		}
+		if plant {
+			summary["utilityPlantPhaseVersion"], _ = json.Marshal(analysisUtilityPlantPhaseVersion)
+		}
 	} else {
 		var warnings []string
 		_ = json.Unmarshal(summary["warnings"], &warnings)
-		found := false
-		for _, warning := range warnings {
-			found = found || warning == analysisTimingUnavailableWarning
-		}
-		if !found {
+		if timing && !slices.Contains(warnings, analysisTimingUnavailableWarning) {
 			warnings = append(warnings, analysisTimingUnavailableWarning)
+		}
+		const plantWarning = "无法从回放缓存核实道具出手时的下包阶段，已将这些投掷归入阶段未知。"
+		if plant && !slices.Contains(warnings, plantWarning) {
+			warnings = append(warnings, plantWarning)
 		}
 		summary["warnings"], _ = json.Marshal(warnings)
 	}
@@ -209,7 +239,9 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	var version, movementVersion, eventVersion, plantVersion int
+	var version, movementVersion, eventVersion, plantVersion, utilityPlantVersion int
+	_ = json.Unmarshal(summary["utilityPlantPhaseVersion"], &utilityPlantVersion)
+	needUtilityPlant := utilityPlantVersion < analysisUtilityPlantPhaseVersion
 	_ = json.Unmarshal(summary["plantPhaseVersion"], &plantVersion)
 	needPlant := plantVersion < analysisPlantPhaseVersion
 	_ = json.Unmarshal(summary["utilityTimingVersion"], &version)
@@ -217,7 +249,7 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 	_ = json.Unmarshal(summary["eventTimingVersion"], &eventVersion)
 	needUtility, needMovement := version < analysisUtilityTimingVersion, movementVersion < analysisMovementTimingVersion
 	needEvents := eventVersion < analysisEventTimingVersion
-	if !needUtility && !needMovement && !needEvents && !needPlant {
+	if !needUtility && !needMovement && !needEvents && !needPlant && !needUtilityPlant {
 		return nil, nil
 	}
 	var id string
@@ -251,9 +283,6 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 				upgradeErr = patchAnalysisMovementTiming(summary, movements)
 			}
 		}
-		if upgradeErr == nil && needUtility {
-			upgradeErr = patchAnalysisUtilityTiming(summary, &replay)
-		}
 		if upgradeErr == nil && needEvents {
 			var events map[analysisSeriesKey]*analysisEventAccumulator
 			events, upgradeErr = upgradeAnalysisEvents(ctx, snapshot.replay, &replay)
@@ -263,6 +292,9 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 		}
 		if upgradeErr == nil && needPlant {
 			upgradeErr = upgradeAnalysisPlantPhases(ctx, snapshot.replay, &replay, summary)
+		}
+		if upgradeErr == nil && (needUtility || needUtilityPlant) {
+			upgradeErr = patchAnalysisUtilities(summary, &replay, needUtility, needUtilityPlant)
 		}
 
 		if err := ctx.Err(); err != nil {
@@ -285,6 +317,9 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 		if needUtility {
 			delete(summary, "utilityTimingVersion")
 		}
+		if needUtilityPlant {
+			delete(summary, "utilityPlantPhaseVersion")
+		}
 		if needMovement {
 			delete(summary, "movementTimingVersion")
 		}
@@ -301,8 +336,8 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if needUtility {
-		if err := patchAnalysisUtilityTiming(summary, nil); err != nil {
+	if needUtility || needUtilityPlant {
+		if err := patchAnalysisUtilities(summary, nil, needUtility, needUtilityPlant); err != nil {
 			return nil, err
 		}
 	}

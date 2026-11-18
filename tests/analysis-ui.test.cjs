@@ -1734,6 +1734,61 @@ test('utility distribution follows other filters while changing and restoring ti
   await utilityCountButton(ui, '0-5').click(); await settle(); assert.equal(ui.get('metric-utilities').textContent, '1');
 });
 
+test('utility plant phase filters late throws, replay links and CSV together, persists and leaves the four heatmap layers intact', async () => {
+  const demo = movementDemo();
+  demo.utilityPlantPhaseVersion = 1;
+  const late = demo.utilities[4];
+  demo.utilities.push({ ...late, id: 'late-post', roundElapsed: 80, time: 480, plantPhase: 'post' },
+    { ...late, id: 'late-unknown', roundElapsed: 81, time: 481 });
+  ['pre', 'pre', 'post', 'post', 'pre', 'pre', 'unknown'].forEach((phase, index) => { demo.utilities[index].plantPhase = phase; });
+  const ui = await page([demo], { worker: true, saved: { utilityTime: '50+', layers: ['movement', 'engagements', 'deaths', 'shots'] } });
+  const metrics = heatMetrics(ui), heat = ui.renderedHeat().imageData.data.slice();
+  const phaseCounts = () => ['all', 'pre', 'post'].map(phase => Number(ui.get('utility-phase-' + phase).dataset.count));
+  const replayIds = () => ui.get('utility-detail').querySelectorAll('a').map(a => new URL(a.href, 'http://localhost').searchParams.get('utility')).sort();
+  const csvThrows = async () => {
+    await clickAndSettle(ui, 'export-csv');
+    const [headers, ...rows] = csvRows(await ui.downloads.at(-1).blob.text());
+    return rows.map(row => ['秒', '投掷时段', '投掷下包阶段', '落点次数'].map(field => row[headers.indexOf(field)]));
+  };
+  assert.deepEqual(phaseCounts(), [3, 1, 1]);
+  assert.equal(ui.get('utility-phase-coverage').hidden, false);
+  assert.match(ui.get('utility-phase-coverage').textContent, /1 次/);
+  await ui.get('utility-groups').children[0].click(); await settle();
+  assert.deepEqual(replayIds(), ['grenade-4', 'late-post', 'late-unknown']);
+  assert.deepEqual((await csvThrows()).sort(), [
+    ['472', '50 秒以后', '下包前', '3'], ['480', '50 秒以后', '下包后', '3'], ['481', '50 秒以后', '阶段未知', '3'],
+  ]);
+
+  for (const [phase, id, seconds, label] of [['pre', 'grenade-4', '472', '下包前'], ['post', 'late-post', '480', '下包后']]) {
+    await clickAndSettle(ui, 'utility-phase-' + phase);
+    assert.equal(ui.get('utility-detail').hidden, true);
+    assert.equal(ui.get('clear-utility').hidden, true);
+    assert.deepEqual(phaseCounts(), [3, 1, 1]);
+    assert.equal(ui.get('utility-phase-' + phase)['aria-pressed'], 'true');
+    assert.equal(ui.get('metric-utilities').textContent, '1');
+    assert.equal(ui.get('utility-group-count').textContent, '1 类落点 · 1 次');
+    await ui.get('utility-groups').children[0].click(); await settle();
+    assert.deepEqual(replayIds(), [id]);
+    assert.ok(textWithin(ui.get('utility-detail')).includes(label));
+    assert.deepEqual(await csvThrows(), [[seconds, '50 秒以后', label, '1']]);
+    assert.deepEqual(heatMetrics(ui), metrics);
+    assert.deepEqual(ui.renderedHeat().imageData.data, heat);
+  }
+  assert.deepEqual(utilityCounts(ui), { all: 3, '0-5': 0, '5-20': 1, '20-50': 1, '50+': 1, unknown: 0 });
+  const restored = await page([demo], { saved: ui.saved() });
+  assert.equal(restored.get('utility-phase-post')['aria-pressed'], 'true');
+  assert.equal(restored.get('analysis-utility-time').value, '50+');
+  assert.equal(restored.get('metric-utilities').textContent, '1');
+  await ui.change('analysis-utility-time', '0-5');
+  assert.deepEqual(phaseCounts(), [2, 2, 0]);
+  assert.equal(ui.get('utility-phase-coverage').hidden, true);
+  assert.equal(ui.get('metric-utilities').textContent, '0');
+  assert.equal(ui.get('export-csv').disabled, true);
+  await clickAndSettle(restored, 'clear-selection');
+  assert.equal(restored.get('utility-phase-all')['aria-pressed'], 'true');
+  assert.equal(restored.get('metric-utilities').textContent, '9');
+});
+
 test('unknown utility clocks are labeled separately and reset restores all times without dropping team aliases', async () => {
   const demo = utilityDemo(); const ui = await page([demo], { saved: { utilityTime: 'unknown', aliases: { 'team-a': 'Saved squad' } } });
   assert.equal(ui.get('metric-utilities').textContent, '2'); await ui.get('utility-groups').children[0].click(); await settle();

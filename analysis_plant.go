@@ -12,13 +12,14 @@ import (
 // A confirmed no-plant round has a boundary at +Inf. Unknown rounds never
 // contribute to either phase, while the original all-phase view stays usable.
 type analysisPlantPhases struct {
+	windows  map[int]analysisRoundWindow
 	boundary map[int]float64
 	unknown  map[int]bool
 	series   map[analysisSeriesKey]map[string]*analysisSeriesValue
 }
 
 func newAnalysisPlantPhases(rounds []Round, events []Event, windows map[int]analysisRoundWindow) *analysisPlantPhases {
-	p := &analysisPlantPhases{boundary: map[int]float64{}, unknown: map[int]bool{}, series: map[analysisSeriesKey]map[string]*analysisSeriesValue{}}
+	p := &analysisPlantPhases{windows: windows, boundary: map[int]float64{}, unknown: map[int]bool{}, series: map[analysisSeriesKey]map[string]*analysisSeriesValue{}}
 	unique := analysisTimingRounds(rounds)
 	for number := range windows {
 		p.boundary[number] = math.Inf(1)
@@ -109,13 +110,29 @@ func (p *analysisPlantPhases) movement(key analysisSeriesKey, round int, pos Pos
 	add("pre", start, math.Min(end, split))
 	add("post", math.Max(start, split), end)
 }
-func (p *analysisPlantPhases) event(key analysisSeriesKey, round int, pos Position, metric int, when float64, anchor *float64) {
-	if p.unknown[round] {
-		return
+func (p *analysisPlantPhases) phaseAt(round int, when float64) string {
+	boundary, ok := p.boundary[round]
+	if !ok || p.unknown[round] || !analysisFinite(when) {
+		return "unknown"
 	}
-	phase := "pre"
-	if when >= p.boundary[round] {
-		phase = "post"
+	if when >= boundary {
+		return "post"
+	}
+	return "pre"
+}
+
+func (p *analysisPlantPhases) throwPhase(u Utility) string {
+	w, ok := p.windows[u.Round]
+	if !ok || !u.ThrowObserved || !u.Detonated || !analysisFinite(u.Detonate) || u.Start > u.Detonate || u.Start < w.start || u.Start > w.end {
+		return "unknown"
+	}
+	return p.phaseAt(u.Round, u.Start)
+}
+
+func (p *analysisPlantPhases) event(key analysisSeriesKey, round int, pos Position, metric int, when float64, anchor *float64) {
+	phase := p.phaseAt(round, when)
+	if phase == "unknown" {
+		return
 	}
 	s := p.part(key, phase, round)
 	s.addCell(pos, metric, 1)
