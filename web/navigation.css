@@ -1,0 +1,125 @@
+/* Shared navigation uses the map analysis header as its visual reference.
+   Keep these colors independent of each workspace's content theme. */
+.app-topbar {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 14px;
+  height: 65px;
+  padding: 0 22px;
+  border-bottom: 1px solid #2b323c;
+  background: #171b21;
+  color: #e6e9ed;
+  font: 16px "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+.app-topbar .app-brand {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 10px;
+  color: #e6e9ed;
+  text-decoration: none;
+}
+.app-brand-mark { font-size: 22px; }
+.app-brand-name { font-size: 17px; letter-spacing: -.5px; }
+.app-brand-name b { font-weight: 700; }
+.app-brand-name small {
+  display: block;
+  margin-top: 4px;
+  color: #7b8998;
+  font-size: 7px;
+  font-weight: 400;
+  letter-spacing: 2.7px;
+}
+.app-topbar .app-nav {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 4px;
+  height: 100%;
+  margin-left: 26px;
+}
+.app-topbar .app-nav a {
+  display: block;
+  padding: 10px 15px;
+  border-radius: 5px;
+  color: #88929f;
+  font-size: 12px;
+  line-height: normal;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.app-topbar .app-nav a:hover { background: #222a33; color: #e6e9ed; }
+.app-topbar .app-nav a[aria-current="page"] { background: #27333c; color: #bcece6; }
+.app-topbar a:focus-visible, .app-topbar button:focus-visible {
+  outline: 2px solid #5ed9d1;
+  outline-offset: 3px;
+}
+.app-local { margin-left: auto; color: #92a3ae; font-size: 11px; white-space: nowrap; }
+.app-local i {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: #84b19b;
+}
+
+/* Replay tools are separate from the shared navigation. Flex sizing avoids
+   subtracting a guessed header height when either row wraps. */
+.replay-page { display: flex; flex-direction: column; }
+.replay-toolbar {
+  position: relative;
+  z-index: 9;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 22px;
+  min-height: 54px;
+  padding: 6px 22px;
+  border-bottom: 1px solid #2b323c;
+  background: #1b1c1e;
+}
+.replay-toolbar .match-heading { display: block; min-width: 0; max-width: min(32vw, 540px); }
+.replay-toolbar .match-clock {
+  position: static;
+  display: flex;
+  flex-shrink: 0;
+  margin-left: 0;
+  transform: none;
+}
+.replay-toolbar .header-right { flex-shrink: 0; flex-wrap: wrap; max-width: none; margin-left: 0; justify-self: end; }
+.replay-page > main { flex: 1 1 0; min-height: 0; height: auto; }
+.replay-page .settings-panel, .replay-page .match-sidebar { top: 129px; }
+
+@media (max-width: 1150px) {
+  .app-topbar { gap: 8px; }
+  .app-topbar .app-nav { margin-left: 8px; }
+  .app-topbar .app-local { display: none; }
+  .app-topbar > .button { margin-left: auto; font-size: 9px; }
+  .app-topbar > .button + .button { margin-left: 0; }
+  .replay-toolbar { gap: 14px; }
+  .replay-toolbar .match-heading { max-width: 28vw; }
+}
+@media (max-width: 700px) {
+  .app-topbar { height: auto; min-height: 65px; flex-wrap: wrap; padding: 12px; gap: 9px; }
+  .app-brand-name { font-size: 15px; }
+  .app-topbar .app-nav { height: auto; margin-left: 8px; }
+  .app-topbar .app-nav a { font-size: 10px; padding: 8px; }
+  .app-topbar > .button { margin-left: 0; }
+  .replay-page { height: auto; min-height: 100dvh; overflow: auto; }
+  .replay-toolbar { display: flex; flex-wrap: wrap; padding: 8px 12px; gap: 8px; }
+  .replay-toolbar .match-heading { flex: 1; max-width: none; }
+  .replay-toolbar .match-clock { margin-left: auto; }
+  .replay-toolbar .header-right { flex-basis: 100%; justify-content: flex-end; gap: 8px; }
+  .replay-toolbar .header-right .button, .replay-toolbar .header-action { min-height: 36px; }
+  .replay-page > main { flex: none; min-height: 0; }
+  .replay-page .settings-panel, .replay-page .match-sidebar { top: 12px; bottom: 100px; max-height: calc(100dvh - 124px); }
+  .replay-page.focus-mode .viewer-layout { grid-template-rows: minmax(350px, 63dvh); }
+}
+@media (max-width: 480px) {
+  .app-topbar .app-nav { flex-basis: 100%; margin-left: 0; }
+  .app-topbar .app-nav a { flex: 1; text-align: center; font-size: 12px; padding: 12px 8px; }
+}

@@ -1,8 +1,8 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark"><title>CS2 Replay · 地图分析</title><link rel="stylesheet" href="/analysis.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark"><title>CS2 Replay · 地图分析</title><link rel="stylesheet" href="/analysis.css"><link rel="stylesheet" href="/navigation.css"></head>
 <body>
-<header class="topbar"><a class="brand" href="/">Ⅱ <span>CS2 <b>REPLAY</b><small>LOCAL DEMO ANALYSIS</small></span></a><nav aria-label="工作模式"><a href="/">比赛回放</a><a href="/analysis.html" aria-current="page">地图分析</a><a href="/statistics.html">数据分析</a></nav><span class="local"><i></i> 本机分析 · 文件夹资料库</span><button id="export-image" class="button quiet" disabled>导出地图</button><button id="export-csv" class="button quiet" disabled>导出道具 CSV</button></header>
+<header class="app-topbar"><a class="app-brand" href="/" aria-label="CS2 Replay 首页"><span class="app-brand-mark" aria-hidden="true">Ⅱ</span><span class="app-brand-name">CS2 <b>REPLAY</b><small>LOCAL DEMO ANALYSIS</small></span></a><nav class="app-nav" aria-label="工作模式"><a href="/">比赛回放</a><a href="/analysis.html" aria-current="page">地图分析</a><a href="/statistics.html">数据分析</a></nav><span class="app-local"><i></i> 本机分析 · 文件夹资料库</span><button id="export-image" class="button quiet" disabled>导出地图</button><button id="export-csv" class="button quiet" disabled>导出道具 CSV</button></header>
 <div id="global-error" class="notice error" role="alert" hidden></div>
 <main id="analysis-workspace" class="workspace">
 <aside id="analysis-filter-pane" class="filter-pane" aria-label="分析数据与筛选"><button id="sidebar-width-handle" class="filter-width-handle" type="button" role="separator" aria-label="调整左侧筛选栏宽度" aria-orientation="vertical" aria-controls="analysis-filter-pane" title="拖动调整左栏宽度；左右键微调；双击或 Enter 复位"><span aria-hidden="true">⋮</span></button><div class="filter-scroll">

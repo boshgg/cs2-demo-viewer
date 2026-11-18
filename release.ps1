@@ -1,4 +1,4 @@
-param([string]$Version = '4.1.7')
+param([string]$Version = '4.1.8')
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Use a numeric semantic version, for example 4.0.0.' }
