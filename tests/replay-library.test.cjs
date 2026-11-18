@@ -88,7 +88,7 @@ test('folder keys use normalized physical parents, preserve nested directories a
     { path: './archive.zip', member: 'remote/folder/third.dem', kind: 'zip' },
   ] });
   assert.deepEqual(library.folderKeys(item), ['root', 'path:练习/上周']);
-  assert.equal(library.folderLabel('root'), 'demo 根目录');
+  assert.equal(library.folderLabel('root'), '录像根目录');
   assert.equal(library.folderLabel('path:练习/上周'), '练习/上周');
   assert.equal(library.inFolder(item, 'path:different/map/deep'), false);
   assert.equal(library.inFolder(item, 'path:练习/上周'), true);

@@ -190,7 +190,7 @@
           button.addEventListener('click', () => selectDemo(demo)); row.append(button); target.append(row);
         }
       }
-      if (!shown.length) list.append(make('p', state.catalog.length ? '没有匹配的录像。' : '将 .dem 或 .zip 放入 demo 文件夹或其子文件夹，再点击刷新。', 'micro'));
+      if (!shown.length) list.append(make('p', state.catalog.length ? '没有匹配的录像。' : '选择存放 .dem 或 .zip 的文件夹，或在添加录像后点击刷新。', 'micro'));
       updateFolderExpansion();
       renderReparse();
     }
@@ -205,7 +205,8 @@
         if (request !== state.catalogRequest) return;
         state.catalog = [...new Map((Array.isArray(catalog.demos) ? catalog.demos : []).map(demo => [demo.id, demo])).values()]; state.scanning = catalog.scanning === true || info.scanning === true;
         for (const demo of state.catalog) if (state.reparseTracked.has(demo.id) && demo.reparse) state.reparseTracked.set(demo.id, demo);
-        $('stats-library-directory').textContent = info.directory || '本地 Demo 文件夹';
+        $('stats-library-directory').textContent = info.directory || '本地录像文件夹';
+        $('stats-library-directory').title = info.directory || '';
         const errors = (info.result?.errors || []).map(error => typeof error === 'string' ? error : error.message || error.error || '文件读取失败');
         $('stats-library-message').textContent = state.scanning ? '正在扫描子文件夹与 ZIP；扫描不会解析比赛。' : errors.length ? errors.join('；') : '选择一场后解析；已有缓存直接读取统计。';
         const current = state.catalog.find(demo => demo.id === state.selected);
@@ -402,6 +403,7 @@
     $('stats-library-search').addEventListener('input', renderLibrary);
     for (const [id, key] of [['stats-library-view', 'libraryView'], ['stats-library-folder', 'libraryFolder']]) $(id).addEventListener('change', () => { state[key] = $(id).value; saveLibraryView(); renderLibrary(); });
     for (const [id, expanded] of [['stats-library-collapse-all', false], ['stats-library-expand-all', true]]) $(id).addEventListener('click', () => { folderExpansion.setAll(expanded); saveLibraryView(); updateFolderExpansion(); });
+    doc.addEventListener?.('library-directory-change', reloadLibrary);
     $('stats-refresh-library').addEventListener('click', refreshLibrary);
     $('stats-reparse-current').addEventListener('click', () => requestReparse([state.selected]));
     $('stats-reparse-all').addEventListener('click', () => requestReparse(state.catalog.filter(demo => demo.status === 'ready').map(demo => demo.id)));

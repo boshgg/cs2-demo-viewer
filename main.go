@@ -40,7 +40,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defaultDemoDir, defaultDataDir := installationDirectories(executable)
-	demoDir := flag.String("demo-dir", defaultDemoDir, "Directory automatically scanned for local .dem files")
+	demoDir := flag.String("demo-dir", "", "Override the saved directory scanned for local .dem files")
 	dataDir := flag.String("data-dir", defaultDataDir, "Persistent parsed demo library directory")
 	flag.Parse()
 	if *mcp {
@@ -71,7 +71,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	a, err := openLibrary(*dataDir, *demoDir, assets)
+	a, err := openLibraryWithOverride(*dataDir, defaultDemoDir, assets, *demoDir)
 	if err != nil {
 		_ = listener.Close()
 		// An earlier port may have become free since this viewer started on a

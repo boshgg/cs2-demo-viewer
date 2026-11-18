@@ -69,7 +69,7 @@
     return parts.length ? `path:${parts.join('/')}` : 'root';
   }
   function folderLabel(key) {
-    if (key === 'root') return 'demo 根目录';
+    if (key === 'root') return '录像根目录';
     if (key === 'unavailable') return '仅缓存或源文件不可用';
     if (typeof key === 'string' && key.startsWith('path:')) return key.slice(5);
     return key === 'all' ? '全部文件夹' : '未知文件夹';
@@ -189,7 +189,7 @@
         row.append(details, action); container.append(row);
         }
       }
-      if (!shown.length) list.append(make('p', demos.length ? '当前文件夹或搜索没有匹配的录像，可切换文件夹或显示全部。' : scanning ? '正在发现录像，请稍候…' : '把 .dem 或 .zip 放入 demo 文件夹或其子文件夹，再点击刷新。', 'replay-library-empty'));
+      if (!shown.length) list.append(make('p', demos.length ? '当前文件夹或搜索没有匹配的录像，可切换文件夹或显示全部。' : scanning ? '正在发现录像，请稍候…' : '选择存放 .dem 或 .zip 的文件夹，或在添加录像后点击刷新。', 'replay-library-empty'));
     }
     function poll() {
       unschedule(timer); timer = null;
@@ -205,7 +205,8 @@
         if (!open || current !== request) return;
         demos = Array.isArray(catalog) ? catalog : Array.isArray(catalog.demos) ? catalog.demos : [];
         scanning = catalog.scanning === true || info.scanning === true;
-        $('replay-library-directory').textContent = info.directory || '本地 Demo 文件夹';
+        $('replay-library-directory').textContent = info.directory || '本地录像文件夹';
+        $('replay-library-directory').title = info.directory || '';
         const errors = Array.isArray(info.result?.errors) ? info.result.errors : [];
         $('replay-library-message').textContent = scanning ? '正在扫描文件夹及所有子文件夹，校验并合并相同录像…' : errors.length ? errors.map(item => typeof item === 'string' ? item : item.message || item.error || '读取失败').join('；') : '只在选择后解析；已有缓存直接载入，其他录像不会自动解析。';
         $('replay-library-message').classList.toggle('is-error', errors.length > 0);
@@ -241,6 +242,7 @@
     const setAllExpanded = value => { expansion.setAll(value); saveView(); for (const update of renderedGroups.values()) update(); };
     $('replay-library-collapse-all').addEventListener('click', () => setAllExpanded(false));
     $('replay-library-expand-all').addEventListener('click', () => setAllExpanded(true));
+    doc.addEventListener?.('library-directory-change', () => { if (open) void reload(); });
     $('replay-library-refresh').addEventListener('click', () => { void refresh(); });
     dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
     dialog.addEventListener('click', event => { if (event.target === dialog) close(); });

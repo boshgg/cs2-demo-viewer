@@ -9,6 +9,7 @@
   let playbackLength = playback.defaultWindowLength, playbackSpeed = 1, playbackMessage = '已暂停。固定窗口逐秒前进，计算完成后再更新下一帧。';
   state.movementTime = null;
   let initializing = true, migratedSessionId = '', libraryEnabled = false, libraryRefreshing = false, libraryScanning = false, syncPromise = null, libraryTimer, restoredView = null;
+  let libraryInfoRequest = 0;
   const loadingJobs = new Map();
   const catalog = new Map(), catalogSelection = new Set();
   const sourceView = { mode: 'all', folder: 'all', query: '' }, libraryView = { mode: 'all', folder: 'all', query: '', map: 'all' };
@@ -572,7 +573,9 @@
       const [response, library] = await Promise.all([json(await fetch('/api/analyses', { cache: 'no-store' })), json(await fetch('/api/library/demos', { cache: 'no-store' }))]);
       catalog.clear();
       for (const demo of library.demos || []) catalog.set(demo.id, demo);
-      for (const id of catalogSelection) if (!catalog.has(id)) catalogSelection.delete(id);
+      if (!library.scanning) {
+        for (const id of catalogSelection) if (!catalog.has(id)) catalogSelection.delete(id);
+      }
       const jobs = Array.isArray(response) ? response : response.demos || [];
       // Keep changed, previously selected sources visible without reusing their stale summary.
       for (const demo of catalog.values()) if (demo.analysis && demo.status === 'discovered' && !jobs.some(job => job.id === demo.id)) jobs.push({ ...demo, message: '来源已更新，请从录像库选择后重新解析' });
@@ -622,14 +625,18 @@
     return `发现新增 ${number(result.added)} 场 · ${number(result.unchanged)} 场已在库中。选择录像后才解析${errors.length ? `。${errors.join('；')}` : '；已有筛选已保留。'}`;
   }
   async function loadLibraryInfo(strict = false) {
+    const request = ++libraryInfoRequest;
     try {
       const info = await json(await fetch('/api/library', { cache: 'no-store' }));
+      if (request !== libraryInfoRequest) return;
       libraryEnabled = info.enabled === true;
       libraryScanning = info.scanning === true;
-      $('library-directory').textContent = info.directory || '未配置 Demo 文件夹';
-      $('library-directory').title = info.directory || '';
+      for (const id of ['library-directory', 'analysis-dialog-directory']) {
+        $(id).textContent = info.directory || '未配置录像文件夹';
+        $(id).title = info.directory || '';
+      }
       $('library-status').textContent = libraryScanning ? '正在递归扫描子文件夹、读取 ZIP 并检查重复录像；扫描不会解析比赛…' : info.result ? libraryResultText(info.result) : libraryEnabled ? '自动扫描所有子文件夹中的 .dem 和 .zip；新增后点击刷新，再从录像库选择要分析的比赛。' : info.message || '此服务未启用文件夹读取。';
-    } catch (error) { if (strict) throw error; $('library-status').textContent = '无法读取文件夹信息；仍可手动导入 Demo。'; }
+    } catch (error) { if (request !== libraryInfoRequest) return; if (strict) throw error; $('library-status').textContent = '无法读取文件夹信息；仍可手动导入 Demo。'; }
     $('refresh-library').disabled = !libraryEnabled || libraryRefreshing || libraryScanning || state.uploading || catalogAdding;
     renderCatalog();
   }
@@ -694,7 +701,7 @@
       if (demo.available === false) words.append(node('small', demo.status === 'ready' ? '源文件已移走，仍可使用解析缓存' : '源文件不可用，请恢复文件后刷新', 'micro'));
       row.append(check, words); target.append(row);
     }, 'catalog');
-    if (!visible.length) list.append(node('p', catalogLoading ? '正在读取录像库…' : catalog.size ? '当前地图、文件夹或搜索没有匹配录像；已选录像仍保留。' : '录像库为空。将 .dem 或 .zip 放入 Demo 文件夹（支持所有子文件夹），然后点击刷新。', 'muted'));
+    if (!visible.length) list.append(node('p', catalogLoading ? '正在读取录像库…' : catalog.size ? '当前地图、文件夹或搜索没有匹配录像；已选录像仍保留。' : '录像库为空。请选择存放 .dem 或 .zip 的文件夹，系统会递归扫描。', 'muted'));
   }
   async function openCatalog(event) {
     if (catalogAdding || state.uploading) return;
@@ -949,6 +956,14 @@
   }
   function download(blob, filename) { const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(url), 30000); }
   $('analysis-files').addEventListener('change', event => importFiles(event.target.files));
+  document.addEventListener?.('library-directory-change', async () => {
+    try {
+      await loadLibraryInfo(true);
+      // Finish any snapshot of the old folder before fetching the new catalog.
+      if (syncPromise) await syncPromise;
+      await syncServerJobs();
+    } catch (error) { $('library-status').textContent = `更新录像库失败：${error.message}`; }
+  });
   $('refresh-library').addEventListener('click', refreshLibrary);
   $('reparse-analyses').addEventListener('click', () => requestReparse(importedReadyJobs().map(job => job.id)));
   $('retry-reparse-failures').addEventListener('click', () => requestReparse([...reparseFailures().keys()]));

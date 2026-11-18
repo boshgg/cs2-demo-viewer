@@ -1,0 +1,43 @@
+.directory-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin: 8px 0;
+}
+.directory-picker button {
+  cursor: pointer;
+  color: #deebf0;
+  background: #232e38;
+  border: 1px solid #40515c;
+  border-radius: 5px;
+  padding: 7px 11px;
+  font: inherit;
+  font-size: 12px;
+}
+.directory-picker button:hover { border-color: #88d8cf; }
+.directory-picker button:disabled { opacity: .55; cursor: wait; }
+.directory-picker [data-enter-directory], .directory-picker button[type="button"].directory-cancel {
+  background: transparent;
+  border-color: transparent;
+  color: #a9c4d2;
+}
+.directory-path-form { flex: 0 0 100%; min-width: 0; display: grid; gap: 6px; margin: 4px 0; }
+.directory-path-form[hidden] { display: none; }
+.directory-path-form label, .directory-picker-status { font-size: 12px; color: #b3c2ce; }
+.directory-path-form input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #475864;
+  border-radius: 4px;
+  background: #151b21;
+  color: #eef3f5;
+  font: inherit;
+  font-size: 13px;
+  padding: 8px;
+}
+.directory-picker :is(button, input):focus-visible { outline: 2px solid #8cdfd4; outline-offset: 2px; }
+.directory-form-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.directory-picker-status { flex: 0 0 100%; margin: 0; overflow-wrap: anywhere; }
+.directory-picker-status:empty { display: none; }

@@ -69,6 +69,7 @@ type app struct {
 	sessionSettings         json.RawMessage
 	persistent              bool
 	demoDir                 string
+	defaultDemoDir          string
 	persistMu               sync.Mutex
 	scanMu                  sync.Mutex
 	scanning                bool
@@ -145,6 +146,8 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("DELETE /api/analyses/{id}", a.removeAnalysis)
 	mux.HandleFunc("GET /api/session-settings", a.sessionSettingsResult)
 	mux.HandleFunc("GET /api/library", a.libraryInfo)
+	mux.HandleFunc("POST /api/library/directory", a.changeLibraryDirectory)
+	mux.HandleFunc("POST /api/library/directory/pick", a.pickLibraryDirectory)
 	mux.HandleFunc("GET /api/library/demos", a.libraryDemos)
 	mux.HandleFunc("POST /api/library/demos/{id}/parse", a.parseLibraryDemo)
 	mux.HandleFunc("DELETE /api/library/demos/{id}", a.removeLibraryDemo)

@@ -40,7 +40,7 @@ type reparseResponse struct {
 	Skipped []reparseSkip `json:"skipped"`
 }
 
-const reparseMissingSource = "原始录像不可用或已改变；请将原 DEM 或 ZIP 放回 demo 文件夹并刷新后重试。旧缓存已保留。"
+const reparseMissingSource = "原始录像不可用或已改变。请将原 DEM 或 ZIP 放回当前录像目录，刷新后重试。旧缓存已保留。"
 
 // Caller holds a.mu and j.mu. A ready cache alone is not a reparse source.
 func (a *app) hasReparseSourceLocked(j *job) bool {

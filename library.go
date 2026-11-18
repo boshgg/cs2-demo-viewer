@@ -37,7 +37,10 @@ type libraryRecord struct {
 	Created       time.Time     `json:"created"`
 }
 type libraryManifest struct {
-	Version   int             `json:"version"`
+	Version int `json:"version"`
+	// A nil directory identifies a legacy manifest. Empty selects the
+	// installation's portable default. Custom roots are absolute.
+	Directory *string         `json:"directory,omitempty"`
 	Jobs      []libraryRecord `json:"jobs"`
 	Sources   []librarySource `json:"sources,omitempty"`
 	SessionID string          `json:"sessionId,omitempty"`
@@ -80,6 +83,10 @@ func jobCachePaths(root, id, revision string) (string, string) {
 var errLibraryLocked = errors.New("data directory is already in use or unavailable")
 
 func openLibrary(root, demoDir string, assets fs.FS) (*app, error) {
+	return openLibraryWithOverride(root, demoDir, assets, "")
+}
+
+func openLibraryWithOverride(root, demoDir string, assets fs.FS, override string) (*app, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -91,9 +98,6 @@ func openLibrary(root, demoDir string, assets fs.FS) (*app, error) {
 	if err = os.MkdirAll(root, 0700); err != nil {
 		return nil, err
 	}
-	if err = os.MkdirAll(demoDir, 0755); err != nil {
-		return nil, err
-	}
 	lock, err := lockLibrary(root)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errLibraryLocked, err)
@@ -101,8 +105,20 @@ func openLibrary(root, demoDir string, assets fs.FS) (*app, error) {
 	a := newApp(root, assets)
 	a.persistent = true
 	a.demoDir = demoDir
+	a.defaultDemoDir = demoDir
 	a.libraryLock = lock
-	if err = a.loadLibrary(); err != nil {
+	if override != "" {
+		override, err = filepath.Abs(override)
+	}
+	if err == nil {
+		err = a.loadLibrary(override)
+	}
+	// An unavailable saved external drive must not be recreated at a new
+	// location. The UI remains usable and can select a different directory.
+	if err == nil && (a.demoDir == a.defaultDemoDir || override != "") {
+		err = os.MkdirAll(a.demoDir, 0755)
+	}
+	if err != nil {
 		a.cancel()
 		a.wg.Wait()
 		_ = lock.Close()
@@ -177,7 +193,7 @@ func (a *app) persistLibrary() error {
 // Caller holds a.mu. A replacement lets reparse persist a complete new revision
 // before exposing it to readers, while retaining all current session metadata.
 func (a *app) libraryManifestLocked(replacement *job) libraryManifest {
-	m := libraryManifest{Version: 1, Jobs: []libraryRecord{}, SessionID: a.sessionID, Settings: append(json.RawMessage(nil), a.sessionSettings...)}
+	m := libraryManifest{Version: 1, Directory: a.manifestDirectory(a.demoDir), Jobs: []libraryRecord{}, SessionID: a.sessionID, Settings: append(json.RawMessage(nil), a.sessionSettings...)}
 	for _, j := range a.jobs {
 		if replacement != nil && j.ID == replacement.ID {
 			j = replacement
@@ -241,10 +257,13 @@ func (a *app) writeLibraryManifest(m libraryManifest) error {
 	return os.Rename(temp, filepath.Join(a.root, "library.json"))
 }
 
-func (a *app) loadLibrary() error {
+func (a *app) loadLibrary(override string) error {
 	path := filepath.Join(a.root, "library.json")
 	f, err := os.Open(path)
 	if os.IsNotExist(err) {
+		if override != "" {
+			a.demoDir = override
+		}
 		return nil
 	}
 	if err != nil {
@@ -259,6 +278,20 @@ func (a *app) loadLibrary() error {
 	var extra any
 	if d.Decode(&extra) != io.EOF || m.Version != 1 {
 		return fmt.Errorf("unsupported library manifest")
+	}
+	if m.Directory != nil && *m.Directory != "" {
+		if !filepath.IsAbs(*m.Directory) {
+			return fmt.Errorf("invalid saved library directory")
+		}
+		a.demoDir = filepath.Clean(*m.Directory)
+	}
+	if override != "" {
+		// In a legacy manifest relative paths have no recorded root. A fresh
+		// scan verifies content before linking caches to this explicit root.
+		if m.Directory == nil || !sameDirectory(a.demoDir, override) {
+			m.detachDirectorySources()
+		}
+		a.demoDir = override
 	}
 	seen := map[string]bool{}
 	for i := range m.Jobs {
@@ -348,11 +381,12 @@ func regularDemo(path string) bool {
 func (a *app) libraryInfo(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	count := len(a.jobs)
+	directory := a.demoDir
 	scanning := a.scanning
 	result := a.scanResult
 	result.Errors = append([]string{}, result.Errors...)
 	a.mu.Unlock()
-	jsonResponse(w, 200, map[string]any{"directory": a.demoDir, "enabled": a.persistent, "scanning": scanning, "count": count, "result": result, "message": "递归发现 .dem 和 ZIP 中的录像，校验去重后等待选择，不会自动解析"})
+	jsonResponse(w, 200, map[string]any{"directory": directory, "enabled": a.persistent, "scanning": scanning, "count": count, "result": result, "message": "递归发现 .dem 和 ZIP 中的录像，校验去重后等待选择，不会自动解析"})
 }
 func (a *app) refreshLibrary(w http.ResponseWriter, r *http.Request) {
 	if !a.persistent {
@@ -364,9 +398,9 @@ func (a *app) refreshLibrary(w http.ResponseWriter, r *http.Request) {
 func (a *app) scanLibrary() (result libraryScan, err error) {
 	a.scanMu.Lock()
 	defer a.scanMu.Unlock()
-	result = libraryScan{Directory: a.demoDir, Errors: []string{}}
 	a.mu.Lock()
 	a.scanning = true
+	result = libraryScan{Directory: a.demoDir, Errors: []string{}}
 	a.mu.Unlock()
 	defer func() {
 		if err != nil && a.ctx.Err() == nil {
@@ -420,25 +454,29 @@ func (a *app) scanLibrary() (result libraryScan, err error) {
 
 // A parser reads a private stable snapshot, never the user's original path.
 func (a *app) snapshotDemo(j *job) (string, func(), error) {
+	a.mu.Lock()
+	directory := a.demoDir
+	sources := a.sourcesForJobLocked(j.ID)
+	a.mu.Unlock()
 	// A fresh explicit upload is already a private verified copy. Prefer it when
 	// deduplication reuses an ID whose previous catalog origins are now missing.
 	if j.ownedSource && safeSourcePath(a.root, j.source) {
-		return a.snapshotDirectDemo(j)
+		return a.snapshotDirectDemo(j, directory)
 	}
-	if sources := a.sourcesForJob(j.ID); len(sources) > 0 {
-		return a.snapshotSelectedSource(j, sources)
+	if len(sources) > 0 {
+		return a.snapshotSelectedSource(j, sources, directory)
 	}
-	return a.snapshotDirectDemo(j)
+	return a.snapshotDirectDemo(j, directory)
 }
 
-func (a *app) snapshotDirectDemo(j *job) (string, func(), error) {
+func (a *app) snapshotDirectDemo(j *job, directory string) (string, func(), error) {
 	if j.ownedSource {
 		if !safeSourcePath(a.root, j.source) {
 			return "", func() {}, fmt.Errorf("本机上传副本不可用")
 		}
 		return j.source, func() {}, nil
 	}
-	if !safeSourcePath(a.demoDir, j.source) {
+	if !safeSourcePath(directory, j.source) {
 		return "", func() {}, fmt.Errorf("原始 Demo 不可用或路径包含链接")
 	}
 	if !regularDemo(j.source) {

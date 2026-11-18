@@ -97,7 +97,7 @@
           label.append(check, text); target.append(label);
         }
       }
-      if (!visible.length) list.append(node('p', state.catalog.length ? '当前文件夹、地图或搜索没有匹配录像。其他录像的勾选仍保留。' : '将录像放入 demo 文件夹，再点击刷新。', 'micro'));
+      if (!visible.length) list.append(node('p', state.catalog.length ? '当前文件夹、地图或搜索没有匹配录像。其他录像的勾选仍保留。' : '请选择存放录像的文件夹。添加录像后可点击刷新。', 'micro'));
       updateFolderExpansion();
       for (const id of ['multi-demos-all', 'multi-demos-none', 'multi-demos-invert']) $(id).disabled = state.loading;
       $('multi-analyze').disabled = state.loading || !scopedCatalog().some(available);
@@ -193,10 +193,15 @@
         if (epoch !== state.reportEpoch) return await reloadLibrary();
         state.catalog = [...new Map((catalog.demos || []).map(demo => [demo.id, demo])).values()]; state.scanning = catalog.scanning === true || info.scanning === true;
         state.catalogGeneration++;
-        const knownIds = new Set(state.catalog.map(demo => demo.id)); state.demos = new Set([...state.demos].filter(id => knownIds.has(id))); state.previous = new Set([...state.previous].filter(id => knownIds.has(id)));
+        if (!state.scanning) {
+          const knownIds = new Set(state.catalog.map(demo => demo.id));
+          state.demos = new Set([...state.demos].filter(id => knownIds.has(id)));
+          state.previous = new Set([...state.previous].filter(id => knownIds.has(id)));
+        }
         for (const demo of state.catalog) if (state.reports.has(demo.id) && (demo.status === 'discovered' || demo.revision && demo.revision !== state.revisions.get(demo.id))) { state.reports.delete(demo.id); state.revisions.delete(demo.id); }
         save();
-        $('multi-library-directory').textContent = info.directory || '本地 Demo 文件夹'; $('multi-library-message').textContent = state.scanning ? '正在扫描文件夹与 ZIP，扫描不会解析比赛。' : '只在点击分析后解析所选比赛；已有缓存直接读取。';
+        $('multi-library-directory').title = info.directory || '';
+        $('multi-library-directory').textContent = info.directory || '本地录像文件夹'; $('multi-library-message').textContent = state.scanning ? '正在扫描文件夹与 ZIP，扫描不会解析比赛。' : '只在点击分析后解析所选比赛；已有缓存直接读取。';
         const errors = info.result?.errors || []; if (errors.length) $('multi-library-message').textContent += ` ${errors.map(item => typeof item === 'string' ? item : item.error || item.message).join('；')}`;
         return true;
       } catch (error) { if (request === state.catalogRequest) $('multi-library-message').textContent = `读取录像库失败：${error.message}。已有选择保留，可重试。`; return false; }
@@ -246,6 +251,7 @@
       if (!multi) { stop(); unschedule(state.timer); ++state.catalogRequest; return; }
       if (!state.initialized) { state.initialized = true; const loaded = await reloadLibrary(); if (loaded && state.active) await analyze(true); } else { await reloadLibrary(); }
     }
+    doc.addEventListener?.('library-directory-change', () => { if (state.active) void reloadLibrary(); });
     $('stats-mode-single').addEventListener('click', () => mode(false)); $('stats-mode-multi').addEventListener('click', () => mode(true));
     $('multi-analyze').addEventListener('click', () => analyze()); $('multi-stop').addEventListener('click', stop);
     $('multi-refresh-library').addEventListener('click', async () => { if (state.loading || state.scanning || state.refreshing) return; state.refreshing = true; renderLibrary(); try { const result = await json(await fetcher('/api/library/refresh', { method: 'POST' })); state.scanning = result.scanning === true; await reloadLibrary(); } catch (error) { setError(`刷新失败：${error.message}。已有选择与结果保留。`); } finally { state.refreshing = false; renderLibrary(); pollCatalog(); } });

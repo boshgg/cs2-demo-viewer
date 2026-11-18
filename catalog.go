@@ -114,7 +114,11 @@ func (a *app) sourcesForJobLocked(id string) []librarySource {
 	return sources
 }
 func (a *app) sourceAvailable(source librarySource) bool {
-	if !safeSourcePath(a.demoDir, source.Source) {
+	return sourceAvailableIn(a.demoDir, source)
+}
+
+func sourceAvailableIn(directory string, source librarySource) bool {
+	if !safeSourcePath(directory, source.Source) {
 		return false
 	}
 	info, err := os.Lstat(source.Source)
@@ -246,7 +250,7 @@ func (a *app) parseLibraryDemo(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusAccepted, map[string]any{"id": next.ID, "status": "queued", "revision": next.Revision, "analysis": analysisSelected, "cached": false})
 }
 
-func (a *app) snapshotSelectedSource(j *job, sources []librarySource) (string, func(), error) {
+func (a *app) snapshotSelectedSource(j *job, sources []librarySource, directory string) (string, func(), error) {
 	j.mu.Lock()
 	expectedHash := j.contentSHA256
 	j.mu.Unlock()
@@ -255,12 +259,12 @@ func (a *app) snapshotSelectedSource(j *job, sources []librarySource) (string, f
 		if j.ctx.Err() != nil {
 			return "", func() {}, j.ctx.Err()
 		}
-		if !a.sourceAvailable(source) || (expectedHash != "" && expectedHash != source.ContentSHA256) {
+		if !sourceAvailableIn(directory, source) || (expectedHash != "" && expectedHash != source.ContentSHA256) {
 			continue
 		}
 		if source.Member == "" {
 			candidate := &job{source: source.Source, sourceSize: source.SourceSize, sourceModTime: source.SourceModTime, contentSHA256: source.ContentSHA256, ctx: j.ctx}
-			file, cleanup, err := a.snapshotDirectDemo(candidate)
+			file, cleanup, err := a.snapshotDirectDemo(candidate, directory)
 			if err == nil {
 				return file, cleanup, nil
 			}

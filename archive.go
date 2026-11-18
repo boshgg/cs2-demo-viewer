@@ -58,6 +58,10 @@ func validLibrarySource(dir string, s librarySource) bool {
 func (a *app) startLibraryScan() libraryScan {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.startLibraryScanLocked()
+}
+
+func (a *app) startLibraryScanLocked() libraryScan {
 	if a.scanning || a.ctx.Err() != nil {
 		result := a.scanResult
 		result.Scanning = a.scanning
