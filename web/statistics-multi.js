@@ -29,12 +29,11 @@
     const mapOf = demo => state.reports.get(demo.id)?.map || demo.map || '';
     const inMap = demo => state.map === 'all' || !mapOf(demo) || mapOf(demo) === state.map;
     const scopedCatalog = () => state.catalog.filter(demo => state.demos.has(demo.id) && inMap(demo));
-    const visibleCatalog = () => state.catalog.filter(demo => inMap(demo) && library.matches({ ...demo, map: mapOf(demo) }, $('multi-library-search').value) && (state.libraryView !== 'folders' || library.inFolder(demo, state.libraryFolder)));
-    const folderMembers = key => [...new Map(state.catalog.filter(demo => library.inFolder(demo, key)).map(demo => [demo.id, demo])).values()];
+    const visibleCatalog = () => state.catalog.filter(demo => inMap(demo) && library.matches({ ...demo, map: mapOf(demo) }, $('multi-library-search').value) && (state.libraryView !== 'folders' || library.inFolder(demo, state.libraryFolder, true)));
     const folderBusy = () => state.loading || state.refreshing || state.scanning;
-    function selectFolder(key, action) {
+    function selectFolder(members, action) {
       if (folderBusy() || !['all', 'none', 'invert'].includes(action)) return;
-      for (const demo of folderMembers(key)) {
+      for (const demo of members) {
         if (action === 'none' || action === 'invert' && state.demos.has(demo.id)) state.demos.delete(demo.id);
         else if (available(demo)) state.demos.add(demo.id);
       }
@@ -60,39 +59,42 @@
     }
     function renderLibrary() {
       renderMaps(); const list = $('multi-demo-list'); list.replaceChildren(); folderBodies.clear();
-      const folders = library.folderOptions(state.catalog), folder = $('multi-library-folder'); folder.replaceChildren();
+      const folders = library.folderOptions(state.catalog, true), folder = $('multi-library-folder'); folder.replaceChildren();
       const addFolder = (value, label) => { const item = node('option', label); item.value = value; folder.append(item); }; addFolder('all', '全部文件夹');
       for (const item of folders) addFolder(item.key, `${item.label} · ${item.count} 场`);
       if (state.libraryFolder !== 'all' && !folders.some(item => item.key === state.libraryFolder)) addFolder(state.libraryFolder, `${library.folderLabel(state.libraryFolder)} · 当前无录像`);
       folder.value = state.libraryFolder; $('multi-library-view').value = state.libraryView; $('multi-library-folder-field').hidden = state.libraryView !== 'folders'; $('multi-library-folder-note').hidden = state.libraryView !== 'folders';
       $('multi-library-fold-controls').hidden = state.libraryView !== 'folders';
       const visible = visibleCatalog(); $('multi-demo-count').textContent = `已选 ${state.demos.size} · 显示 ${visible.length} / ${state.catalog.length}`;
-      for (const group of library.groupByFolder(visible, state.libraryView, state.libraryView === 'folders' ? state.libraryFolder : 'all')) {
+      const visibleIDs = new Set(visible.map(demo => demo.id));
+      for (const group of library.viewFolderGroups(state.catalog, state.libraryView, state.libraryFolder)) {
+        const members = group.demos, shown = members.filter(demo => visibleIDs.has(demo.id));
+        if (!shown.length && group.key !== state.libraryFolder) continue;
         let target = list;
         if (state.libraryView === 'folders') {
-          const members = folderMembers(group.key), hiddenCount = Math.max(0, members.length - group.demos.length);
+          const hiddenCount = members.length - shown.length;
           target = node('section', null, 'statistics-folder-group'); target.dataset.folderKey = group.key;
           const header = node('div', null, 'multi-folder-header'), heading = node('h3'), button = node('button', null, 'statistics-folder-toggle'), arrow = node('span', null, 'statistics-folder-arrow'); arrow.setAttribute('aria-hidden', 'true');
           button.type = 'button'; button.dataset.folderToggle = group.key; button.append(arrow, node('span', `${group.label} · ${members.length} 场`)); heading.append(button); header.append(heading);
-          header.append(node('small', `当前显示 ${group.demos.length} 场；本组操作含隐藏的 ${hiddenCount} 场。`));
+          header.append(node('small', `当前显示 ${shown.length} 场；本组操作含隐藏的 ${hiddenCount} 场。`));
           const actions = node('div', null, 'multi-folder-actions'); actions.setAttribute('role', 'group'); actions.setAttribute('aria-label', `${group.label} 文件夹选择`);
           for (const [action, label] of [['all', '全选'], ['none', '清空'], ['invert', '反选']]) {
             const button = node('button', label, 'text-button'); button.type = 'button'; button.dataset.folderAction = action; button.dataset.folderKey = group.key; button.disabled = folderBusy();
             button.title = `${label}“${group.label}”内全部 ${members.length} 场，包括被搜索或地图隐藏的 ${hiddenCount} 场。其他文件夹独有录像保持原选择；多来源同一录像联动。无法读取且未选的录像不会新增勾选。只改变勾选，点击分析后才读取。`;
             button.setAttribute('aria-label', `${label} ${group.label} 文件夹全部 ${members.length} 场（含隐藏 ${hiddenCount} 场）`);
-            button.addEventListener('click', () => selectFolder(group.key, action)); actions.append(button);
+            button.addEventListener('click', () => selectFolder(members, action)); actions.append(button);
           }
           header.append(actions); target.append(header); list.append(target);
           const body = node('div', null, 'statistics-folder-body'); body.dataset.folderBody = group.key; body.id = `multi-library-folder-body-${encodeURIComponent(group.key)}`; button.setAttribute('aria-controls', body.id);
           button.addEventListener('click', () => { folderExpansion.setExpanded(group.key, !folderExpansion.isExpanded(group.key)); save(); updateFolderExpansion(); });
           folderBodies.set(group.key, { button, body, arrow }); target.append(body); target = body;
         }
-        for (const demo of group.demos) {
+        for (const demo of shown) {
           const label = node('label', null, 'multi-demo-item'), check = node('input'); check.type = 'checkbox'; check.dataset.demoId = demo.id; check.checked = state.demos.has(demo.id); check.disabled = state.loading || !available(demo) && !check.checked; check.setAttribute('aria-label', `选择 ${demo.name || demo.id}`);
           check.addEventListener('change', () => { if (check.checked) state.demos.add(demo.id); else state.demos.delete(demo.id); state.page = 0; save(); renderLibrary(); recompute(); });
           const text = node('span'), title = node('strong', demo.name || demo.id); text.append(title);
           text.append(node('small', `${mapOf(demo) || '地图待解析'} · ${state.reports.has(demo.id) ? '已载入统计' : isReady(demo) ? '已有解析缓存' : demo.status === 'error' ? '解析失败，可重试' : '选择后解析'}${!available(demo) ? ' · 源文件不可用' : ''}`));
-          const paths = library.sourcePaths(demo), groupPaths = group.key === 'all' ? paths : library.sourcePaths({ sources: (demo.sources || []).filter(source => library.folderKeys({ sources: [source] }).includes(group.key)) });
+          const paths = library.sourcePaths(demo), groupPaths = library.folderSourcePaths(demo, group.key, state.libraryFolder === group.key);
           if (paths.length) { const path = node('small', groupPaths[0] || paths[0], 'multi-source-path'); path.title = paths.join('\n'); text.append(path); }
           label.append(check, text); target.append(label);
         }

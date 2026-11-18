@@ -620,6 +620,10 @@ test('single statistics library groups physical folders, root ZIPs and unavailab
   assert.deepEqual(ui.get('stats-library-list').children.map(group => group.dataset.folderKey).sort(), ['root', 'path:赛事/决赛', 'path:备份', 'unavailable'].sort());
   assert.equal(visibleStatisticsIds(ui).filter(id => id === 'a').length, 2); assert.equal(ui.get('stats-library-count').textContent, '3 / 3 场');
   assert.equal(ui.get('stats-library-folder').children.some(option => /内部|正赛/.test(option.value)), false);
+  assert.ok(ui.get('stats-library-folder').children.some(option => option.value === 'path:赛事'));
+  await ui.change('stats-library-folder', 'path:赛事'); assert.deepEqual(visibleStatisticsIds(ui), ['a']);
+  assert.match(content(ui.get('stats-library-list')), /赛事\/决赛\/a.dem/);
+  assert.equal(ui.get('stats-library-count').textContent, '1 / 3 场');
   await ui.change('stats-library-folder', 'root'); assert.deepEqual(visibleStatisticsIds(ui), ['b']);
   await ui.change('stats-library-folder', 'unavailable'); assert.deepEqual(visibleStatisticsIds(ui), ['c']); await ui.choose('c'); assert.equal(ui.get('stats-total-score').textContent, '+4'); assert.equal(ui.payloads.length, 0);
 });

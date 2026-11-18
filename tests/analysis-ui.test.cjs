@@ -108,7 +108,7 @@ async function page(datasets = [dataset('one')], pageOptions = {}) {
   const fetch = async (url, options = {}) => {
     requests.push([url, options.method || 'GET']);
     if (url === '/api/session-settings') return response(pageOptions.session || { sessionId: '', settings: null });
-    if (url === '/api/library') return response({ count: libraryFiles.size, ...libraryInfo });
+    if (url === '/api/library') return response({ count: catalogDemos().length, ...libraryInfo });
     if (url === '/api/library/demos') return response({ demos: catalogDemos(), scanning: libraryInfo.scanning === true });
     if (url === '/api/library/reparse' && options.method === 'POST') {
       const body = JSON.parse(options.body); reparseBodies.push(body);
@@ -562,7 +562,7 @@ test('folder refresh only discovers demos and preserves the explicit subset, map
   const calls = ui.analysisCalls();
   await clickAndSettle(ui, 'refresh-library');
   assert.equal(ui.analysisCalls(), calls, 'unchanged refresh needs no aggregation');
-  assert.match(ui.get('library-status').textContent, /新增 0 场 · 2 场已在库中/);
+  assert.match(ui.get('library-status').textContent, /录像库共 2 场.*新增 0 场.*2 个来源/);
   assert.equal(ui.requests.filter(([url]) => url === `/api/demos/${old.id}/analysis`).length, 1);
   assert.equal(ui.requests.filter(([url]) => url === `/api/demos/${incoming.id}/analysis`).length, 0);
   assert.equal(ui.parseBodies.length, 0);
@@ -723,7 +723,7 @@ test('an async refresh with only duplicates or ZIP errors still finishes and sho
   assert.equal(ui.get('refresh-library').disabled, true); assert.match(ui.get('library-status').textContent, /扫描/);
   await ui.pollLibrary(); assert.equal(ui.get('refresh-library').disabled, true, 'no queued jobs does not end an active ZIP scan');
   ui.setLibraryInfo({ scanning: false, result: { added: 0, unchanged: 2, queued: 0, errors: ['broken.zip：压缩包损坏'] } }); await ui.pollLibrary();
-  assert.equal(ui.get('refresh-library').disabled, false); assert.match(ui.get('library-status').textContent, /新增 0 场 · 2 场已在库中/);
+  assert.equal(ui.get('refresh-library').disabled, false); assert.match(ui.get('library-status').textContent, /录像库共 1 场.*新增 0 场.*2 个来源/);
   assert.match(ui.get('library-status').textContent, /broken.zip：压缩包损坏/); assert.deepEqual(ui.saved(), before);
   const calls = ui.requests.length; await ui.pollLibrary(); assert.equal(ui.requests.length, calls, 'idle completed scans stop polling');
 });
@@ -789,6 +789,72 @@ test('source folder classification uses catalog paths and leaves the heatmap and
   assert.deepEqual(viewIndependentSettings(ui.saved()), initial);
 });
 
+test('the source sidebar browses a discovered-only library by physical folder and submits only checked recordings', async () => {
+  const group = 'de_ancient/战队 A';
+  const shared = folderDemo('shared', [
+    `${group}/半决赛/shared.dem`,
+    `${group}/决赛/copy.dem`,
+    'de_ancient/战队 B/shared.dem',
+  ]);
+  const second = folderDemo('second', [`${group}/决赛/second.dem`]);
+  const unrelated = folderDemo('unrelated', ['de_nuke/其他比赛/unrelated.dem']);
+  const ui = await page([], { libraryDemos: [shared, second, unrelated] });
+  const inputs = () => ui.get('source-catalog-list').querySelectorAll('input');
+  await ui.change('demo-view-mode', 'folders');
+  const options = ui.get('demo-folder').children.map(option => option.value);
+  for (const folder of ['de_ancient', group, `${group}/决赛`, 'de_nuke/其他比赛']) {
+    assert.ok(options.includes('path:' + folder), `missing scanned folder ${folder}`);
+  }
+  await ui.change('demo-folder', 'path:' + group);
+  assert.deepEqual(inputs().map(item => item.dataset.demoId).sort(), ['second', 'shared']);
+  await ui.input('demo-search', 'second');
+  assert.deepEqual(inputs().map(item => item.dataset.demoId), ['second']);
+  const check = inputs()[0];
+  check.checked = true;
+  await check.dispatch('change');
+  await ui.input('demo-search', '');
+  assert.equal(ui.parseBodies.length, 0);
+  assert.equal(ui.hasVisibleHeat(), false);
+  assert.equal(ui.get('analysis-library-dialog').hidden, true);
+  await clickAndSettle(ui, 'source-catalog-add');
+  assert.deepEqual(ui.parseBodies, [['second', { mode: 'analysis' }]]);
+  assert.deepEqual(visibleDemoNames(ui), ['second.dem']);
+  assert.ok(ui.hasVisibleHeat());
+});
+
+test('browsing further source pages preserves analysis filters and never requests a recording summary', async () => {
+  const loaded = folderDemo('loaded', ['trained/loaded.dem'], 'de_nuke');
+  const recordings = Array.from({ length: 63 }, (_, i) => {
+    const id = `unparsed-${String(i).padStart(2, '0')}`;
+    return folderDemo(id, [`incoming/qualifiers/${id}.dem`]);
+  });
+  const ui = await page([loaded], {
+    libraryDemos: recordings,
+    saved: { map: 'de_nuke', selectedDemos: [loaded.id], selectedTeams: ['team-a'], side: '3' },
+  });
+  const initial = viewIndependentSettings(ui.saved()), calls = ui.analysisCalls();
+  await ui.change('demo-view-mode', 'folders');
+  await ui.change('demo-folder', 'path:incoming');
+  const visible = () => ui.get('source-catalog-list').querySelectorAll('input').map(item => item.dataset.demoId);
+  const firstPage = visible();
+  assert.ok(firstPage.length > 0 && firstPage.length < recordings.length);
+  assert.equal(ui.get('source-catalog-next').disabled, false);
+  await clickAndSettle(ui, 'source-catalog-next');
+  assert.ok(visible().some(id => !firstPage.includes(id)));
+  await clickAndSettle(ui, 'source-catalog-all');
+  assert.ok(visible().every(id => recordings.some(demo => demo.id === id)));
+  assert.ok(ui.get('source-catalog-list').querySelectorAll('input').every(input => input.checked));
+  assert.match(ui.get('source-catalog-add').textContent, /63/);
+  await clickAndSettle(ui, 'source-catalog-clear');
+  assert.equal(ui.get('source-catalog-add').disabled, true);
+  assert.deepEqual(visibleDemoNames(ui), []);
+  assert.equal(deaths(ui), 1);
+  assert.deepEqual(viewIndependentSettings(ui.saved()), initial);
+  assert.equal(ui.analysisCalls(), calls);
+  assert.equal(ui.parseBodies.length, 0);
+  assert.ok(ui.requests.every(([url]) => !url.includes('/unparsed-')));
+});
+
 test('source bulk selection acts once per visible ID and leaves hidden map, folder and roster choices intact', async () => {
   const shared = folderDemo('shared', ['A/shared.dem', 'B/shared.dem']), one = folderDemo('one', ['B/one.dem']);
   const hidden = folderDemo('hidden', ['A/hidden.dem'], 'de_nuke');
@@ -821,7 +887,7 @@ test('source folder actions include search-hidden and other-map members exactly 
   await ui.change('demo-view-mode', 'folders'); await ui.change('demo-folder', 'path:A');
   ui.get('demo-search').value = 'shared'; await ui.get('demo-search').dispatch('input'); await settle();
   assert.deepEqual(visibleDemoNames(ui), ['shared.dem']);
-  assert.match(folderButton(ui, 'demo-list', 'path:A', 'all').title, /本文件夹共 4 场.*当前显示 1 场.*地图或搜索隐藏项/);
+  assert.match(folderButton(ui, 'demo-list', 'path:A', 'all').title, /本文件夹共 4 场.*当前显示 1 场.*隐藏项/);
   const before = ui.saved();
   await selectFolder(ui, 'demo-list', 'path:A', 'all');
   assert.deepEqual(ui.saved().selectedDemos.sort(), ['other-map', 'outside', 'search-hidden', 'shared']);
@@ -923,18 +989,45 @@ test('library map, search and folder views intersect while selection and per-ID 
   assert.equal(ui.requests.some(([url]) => url.includes('/unknown/')), false);
 });
 
+test('the analysis library dialog can select any folder level and add its descendants once per match', async () => {
+  const parent = '训练/2026/队伍 A';
+  const shared = folderDemo('shared', [`${parent}/赛季/周一/match.dem`, `${parent}/友谊赛/copy.dem`]);
+  const direct = folderDemo('direct', [`${parent}/direct.dem`]);
+  const sibling = folderDemo('sibling', ['训练/2026/队伍 AA/sibling.dem']);
+  const ui = await page([], { libraryDemos: [shared, direct, sibling] });
+  await clickAndSettle(ui, 'open-analysis-library');
+  await ui.change('analysis-library-view-mode', 'folders');
+  const optionValues = ui.get('analysis-library-folder').children.map(option => option.value);
+  for (const name of ['训练', '训练/2026', parent, `${parent}/赛季`, `${parent}/赛季/周一`]) {
+    assert.ok(optionValues.includes('path:' + name), `missing selectable folder level ${name}`);
+  }
+  await ui.change('analysis-library-folder', 'path:' + parent);
+  const rows = ui.get('analysis-library-list').querySelectorAll('input');
+  assert.deepEqual([...new Set(rows.map(input => input.dataset.demoId))].sort(), ['direct', 'shared']);
+  assert.match(ui.get('analysis-library-count').textContent, /显示 2 \/ 3 场/);
+  await searchLibrary(ui, 'direct');
+  assert.match(ui.get('analysis-library-count').textContent, /显示 1 \/ 3 场/);
+  await selectFolder(ui, 'analysis-library-list', 'path:' + parent, 'all');
+  assert.match(ui.get('analysis-library-count').textContent, /已选 2 场/);
+  assert.deepEqual(ui.parseBodies, []);
+  await clickAndSettle(ui, 'analysis-library-add');
+  assert.deepEqual(ui.parseBodies.map(([id]) => id).sort(), ['direct', 'shared']);
+});
+
 test('folder view preferences restore independently without changing existing analysis groups or selections', async () => {
   const first = folderDemo('first', ['中文/比赛/first.dem']), second = folderDemo('second', ['训练/second.dem'], 'de_nuke');
   const ui = await page([first, second], { saved: { map: 'de_mirage', selectedDemos: ['first', 'second'], selectedTeams: ['team-a'], selectedPlayers: ['76561198000000001'], aliases: { saved: 'My squad' }, side: '3' } });
   const initial = viewIndependentSettings(ui.saved());
   await ui.change('demo-view-mode', 'folders'); await ui.change('demo-folder', 'path:中文/比赛');
   ui.get('demo-search').value = 'first'; await ui.get('demo-search').dispatch('input'); await settle();
+  await clickAndSettle(ui, 'open-analysis-library');
   await ui.change('analysis-library-view-mode', 'folders'); await ui.change('analysis-library-folder', 'path:训练'); await ui.change('analysis-library-map', 'de_nuke'); await searchLibrary(ui, 'second');
   const saved = ui.saved(), restored = await page([first, second], { saved });
   assert.deepEqual(restored.saved().sourceView, { mode: 'folders', folder: 'path:中文/比赛', query: 'first', folderExpansion: { defaultExpanded: true, overrides: {} } });
   assert.deepEqual(restored.saved().libraryView, { mode: 'folders', folder: 'path:训练', query: 'second', map: 'de_nuke', folderExpansion: { defaultExpanded: true, overrides: {} } });
   assert.deepEqual(viewIndependentSettings(restored.saved()), initial);
   assert.deepEqual(visibleDemoNames(restored), ['first.dem']);
+  await clickAndSettle(restored, 'open-analysis-library');
   assert.deepEqual(restored.get('analysis-library-list').querySelectorAll('input').map(input => input.dataset.demoId), ['second']);
   assert.equal(restored.parseBodies.length, 0);
 });
@@ -960,6 +1053,7 @@ test('refresh updates folder metadata for cached IDs without reparsing or losing
 test('individual folder disclosure has independent source/library state and never changes selection or recomputes the heatmap', async () => {
   const ui = await page([folderDemo('one', ['A/one.dem']), folderDemo('two', ['B/two.dem'])], { saved: { selectedDemos: ['one'], selectedTeams: ['team-a'], selectedPlayers: ['76561198000000001'], aliases: { kept: 'My team' } } });
   assert.equal(ui.get('demo-folder-expansion-actions').hidden, true); assert.equal(ui.get('analysis-library-folder-expansion-actions').hidden, true);
+  await clickAndSettle(ui, 'open-analysis-library');
   await ui.change('demo-view-mode', 'folders'); await ui.change('analysis-library-view-mode', 'folders');
   const before = viewIndependentSettings(ui.saved()), calls = ui.analysisCalls(), requestCount = ui.requests.length, total = deaths(ui);
   const toggle = folderToggle(ui, 'demo-list', 'path:A'), body = folderBody(ui, 'demo-list', 'path:A');
@@ -989,6 +1083,7 @@ test('collapsed folder rows retain full-folder and global filtered selection beh
   await selectFolder(ui, 'demo-list', 'path:A', 'none'); assert.deepEqual(ui.saved().selectedDemos, []);
   await clickAndSettle(ui, 'demos-all'); assert.deepEqual(ui.saved().selectedDemos.sort(), ['outside', 'shared'], 'global visible action still means map/search/folder scope, not disclosure visibility');
   assert.equal(folderBody(ui, 'demo-list', 'path:B').hidden, true);
+  await clickAndSettle(ui, 'open-analysis-library');
   await ui.change('analysis-library-view-mode', 'folders'); await clickAndSettle(ui, 'analysis-library-collapse-all');
   await selectFolder(ui, 'analysis-library-list', 'path:A', 'all'); assert.match(ui.get('analysis-library-count').textContent, /已选 2 场/);
   await selectFolder(ui, 'analysis-library-list', 'path:A', 'invert'); assert.match(ui.get('analysis-library-count').textContent, /已选 0 场/);
@@ -1001,6 +1096,7 @@ test('collapsed folder rows retain full-folder and global filtered selection beh
 test('all-folder defaults apply to newly discovered folders and survive resets, refresh and reload independently', async () => {
   const one = folderDemo('one', ['A/one.dem']), two = folderDemo('two', ['B/two.dem']);
   const ui = await page([one, two]);
+  await clickAndSettle(ui, 'open-analysis-library');
   await ui.change('demo-view-mode', 'folders'); await ui.change('analysis-library-view-mode', 'folders');
   await clickAndSettle(ui, 'demo-collapse-all'); await clickAndSettle(ui, 'analysis-library-collapse-all');
   await toggleFolder(ui, 'demo-list', 'path:A');
@@ -1013,6 +1109,7 @@ test('all-folder defaults apply to newly discovered folders and survive resets, 
   assert.equal(folderBody(ui, 'demo-list', 'path:新文件夹/C').hidden, true); assert.equal(folderBody(ui, 'analysis-library-list', 'path:新文件夹/C').hidden, true);
   assert.equal(folderBody(ui, 'demo-list', 'path:A').hidden, false); assert.equal(folderBody(ui, 'analysis-library-list', 'path:A').hidden, true);
   const restored = await page([one, two, third], { saved: ui.saved() });
+  await clickAndSettle(restored, 'open-analysis-library');
   assert.equal(folderBody(restored, 'demo-list', 'path:A').hidden, false); assert.equal(folderBody(restored, 'demo-list', 'path:B').hidden, true); assert.equal(folderBody(restored, 'demo-list', 'path:新文件夹/C').hidden, true);
   assert.equal(folderBody(restored, 'analysis-library-list', 'path:A').hidden, true); assert.equal(restored.parseBodies.length, 0);
   const calls = restored.analysisCalls(), total = deaths(restored);
@@ -1044,6 +1141,7 @@ test('malformed disclosure preferences fall back safely and snapshots contain on
     sourceView: { mode: 'folders', folderExpansion: ['invalid'] },
     libraryView: { mode: 'folders', folderExpansion: { defaultExpanded: 'false', overrides: { 'path:A': 'false', 'path:B': false } } },
   } });
+  await clickAndSettle(ui, 'open-analysis-library');
   assert.equal(folderBody(ui, 'demo-list', 'path:A').hidden, false); assert.equal(folderBody(ui, 'demo-list', 'path:B').hidden, false);
   assert.equal(folderBody(ui, 'analysis-library-list', 'path:A').hidden, false); assert.equal(folderBody(ui, 'analysis-library-list', 'path:B').hidden, true);
   assert.deepEqual(ui.saved().sourceView.folderExpansion, { defaultExpanded: true, overrides: {} });

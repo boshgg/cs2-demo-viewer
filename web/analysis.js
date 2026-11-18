@@ -12,6 +12,9 @@
   let libraryInfoRequest = 0;
   const loadingJobs = new Map();
   const catalog = new Map(), catalogSelection = new Set();
+  const sourceCatalogSelection = new Set(), sourcePageSize = 40;
+  const folderOptionSignatures = new WeakMap();
+  let sourcePage = 0;
   const sourceView = { mode: 'all', folder: 'all', query: '' }, libraryView = { mode: 'all', folder: 'all', query: '', map: 'all' };
   let sourceExpansion = library.createFolderExpansion(), libraryExpansion = library.createFolderExpansion();
   let catalogAdding = false, catalogLoading = false, catalogOpener = null;
@@ -236,18 +239,26 @@
     return { ...source, ...job, sources: source ? source.sources : job.sources, sourceCount: source ? source.sourceCount : job.sourceCount, available: source ? source.available : job.available, map: job.map || state.demos.get(job.id)?.map || source?.map || '' };
   }
   function filterList(demos, view) {
-    return demos.filter(demo => library.matches(demo, view.query) && (view.mode !== 'folders' || library.inFolder(demo, view.folder)));
+    return demos.filter(demo => (!view.query || library.matches(demo, view.query)) && (view.mode !== 'folders' || library.inFolder(demo, view.folder, true)));
   }
   function renderFolderControls(prefix, demos, view) {
-    const select = $(`${prefix}-folder`), options = library.folderOptions(demos); select.replaceChildren(new Option('全部文件夹', 'all'));
-    for (const option of options) select.append(new Option(`${option.label} · ${number(option.count)} 场`, option.key));
-    if (view.folder !== 'all' && !options.some(option => option.key === view.folder)) select.append(new Option(`${library.folderLabel(view.folder)} · 当前范围暂无录像`, view.folder));
-    select.value = view.folder; $(`${prefix}-folder-field`).hidden = view.mode !== 'folders'; $(`${prefix}-view-mode`).value = view.mode;
+    const select = $(`${prefix}-folder`);
+    $(`${prefix}-folder-field`).hidden = view.mode !== 'folders'; $(`${prefix}-view-mode`).value = view.mode;
     $(`${prefix}-folder-expansion-actions`).hidden = view.mode !== 'folders';
+    if (view.mode !== 'folders') return;
+    const options = library.folderOptions(demos, true);
+    if (view.folder !== 'all' && !options.some(option => option.key === view.folder)) options.push({ key: view.folder, label: `${library.folderLabel(view.folder)} · 当前范围暂无录像`, count: 0 });
+    const signature = JSON.stringify(options);
+    if (folderOptionSignatures.get(select) !== signature) {
+      select.replaceChildren(new Option('全部文件夹', 'all'), ...options.map(option => new Option(`${option.label} · ${number(option.count)} 场`, option.key)));
+      folderOptionSignatures.set(select, signature);
+    }
+    select.value = view.folder;
   }
   function folderMembers(scope, key) {
     const demos = scope === 'catalog' ? [...catalog.values()] : [...state.jobs.values()].map(sourceDemo);
-    return [...new Map(demos.filter(demo => library.inFolder(demo, key)).map(demo => [demo.id, demo])).values()];
+    const view = scope === 'catalog' ? libraryView : sourceView;
+    return demos.filter(demo => library.inFolder(demo, key, view.folder === key));
   }
   function folderSelectable(scope, demo) { return scope === 'catalog' ? catalogSelectable(demo) : state.demos.has(demo.id); }
   function folderSelectionBusy(scope) { return state.uploading || catalogAdding || scope === 'catalog' && catalogLoading; }
@@ -272,11 +283,17 @@
     save();
   }
   function appendFolderGroups(list, demos, view, appendRow, scope) {
-    for (const group of library.groupByFolder(demos, view.mode, view.folder)) {
+    const groups = library.viewFolderGroups(demos, view.mode, view.folder);
+    const allMembers = new Map();
+    if (view.mode === 'folders' && groups.length) {
+      const all = scope === 'catalog' ? [...catalog.values()] : [...state.jobs.values()].map(sourceDemo);
+      for (const group of library.viewFolderGroups(all, 'folders', view.folder)) allMembers.set(group.key, group.demos);
+    }
+    for (const group of groups) {
       let target = list;
       if (view.mode === 'folders') {
         target = node('section', null, 'analysis-folder-group'); target.dataset.folderKey = group.key;
-        const members = folderMembers(scope, group.key), count = members.length, shown = new Set(group.demos.map(demo => demo.id)).size;
+        const members = allMembers.get(group.key) || [], count = members.length, shown = group.demos.length;
         const expanded = folderExpansion(scope).isExpanded(group.key), body = node('div', null, 'analysis-folder-body');
         body.id = `${list.id}-folder-${encodeURIComponent(group.key)}`; body.dataset.folderBody = group.key; body.hidden = !expanded;
         const header = node('header', null, 'analysis-folder-header'), heading = node('h3', null, 'analysis-folder-heading'); heading.title = group.label;
@@ -302,9 +319,47 @@
       for (const demo of group.demos) appendRow(demo, target, group.key);
     }
   }
-  function groupSourcePaths(demo, key) {
-    if (key === 'all') return library.sourcePaths(demo);
-    return library.sourcePaths({ sources: (Array.isArray(demo.sources) ? demo.sources : []).filter(source => library.folderKeys({ sources: [source] }).includes(key)) });
+  function canAddSource(demo) {
+    return catalogSelectable(demo) && (!demo.analysis || demo.status === 'error' || demo.status === 'discovered');
+  }
+  function renderSourceActions(matches) {
+    const busy = catalogAdding || state.uploading;
+    $('source-catalog-add').textContent = `加入分析（${number(sourceCatalogSelection.size)}）`;
+    $('source-catalog-add').disabled = busy || !sourceCatalogSelection.size;
+    $('source-catalog-all').disabled = busy || !matches.some(demo => canAddSource(demo) && !sourceCatalogSelection.has(demo.id));
+    $('source-catalog-clear').disabled = busy || !sourceCatalogSelection.size;
+  }
+  function renderSourceCatalog() {
+    const matches = filterList([...catalog.values()], sourceView);
+    const pages = Math.max(1, Math.ceil(matches.length / sourcePageSize));
+    sourcePage = Math.min(sourcePage, pages - 1);
+    const start = sourcePage * sourcePageSize;
+    $('source-catalog-count').textContent = `${number(matches.length)} / ${number(catalog.size)} 场`;
+    $('source-catalog-pages').hidden = pages <= 1;
+    $('source-catalog-page').textContent = `${sourcePage + 1} / ${pages} 页`;
+    $('source-catalog-prev').disabled = sourcePage === 0;
+    $('source-catalog-next').disabled = sourcePage >= pages - 1;
+    renderSourceActions(matches);
+    const list = $('source-catalog-list');
+    list.replaceChildren();
+    for (const demo of matches.slice(start, start + sourcePageSize)) {
+      const row = node('label', null, 'analysis-library-row'), words = node('span', null, 'analysis-library-words'), check = document.createElement('input');
+      row.dataset.demoId = demo.id; check.type = 'checkbox'; check.dataset.demoId = demo.id;
+      check.checked = sourceCatalogSelection.has(demo.id);
+      check.disabled = state.uploading || catalogAdding || !canAddSource(demo);
+      check.setAttribute('aria-label', `选择 ${demo.name || demo.id} 加入分析`);
+      check.addEventListener('change', () => {
+        if (check.checked) sourceCatalogSelection.add(demo.id); else sourceCatalogSelection.delete(demo.id);
+        renderSourceActions(matches);
+      });
+      const paths = library.folderSourcePaths(demo, sourceView.mode === 'folders' ? sourceView.folder : 'all', true);
+      const title = node('strong', demo.name || demo.id);
+      const location = node('small', paths[0] || '仅有本机记录', 'source-catalog-path'); location.title = paths.join('\n');
+      const states = { discovered: '待加入分析', queued: '等待解析', parsing: '正在解析', error: '解析失败，可重试', ready: demo.analysis ? '已加入分析' : '已有缓存，可加入分析' };
+      const status = !catalogSelectable(demo) ? '原始文件不可用' : states[demo.status] || '待加入分析';
+      words.append(title, location, node('small', status)); row.append(check, words); list.append(row);
+    }
+    if (!matches.length) list.append(node('p', catalog.size ? '此文件夹或搜索条件下没有匹配的录像。' : '录像库中暂无比赛。', 'muted'));
   }
   function sourceScope() {
     const activeMap = state.map || restoredView?.map || '', jobs = [...state.jobs.values()].map(sourceDemo);
@@ -323,7 +378,8 @@
   }
   function renderJobs() {
     const scope = sourceScope(), { activeMap, jobs } = scope, mapOf = job => job.map;
-    renderFolderControls('demo', [...scope.current, ...scope.unmapped], sourceView);
+    renderFolderControls('demo', [...catalog.values(), ...jobs.filter(job => !catalog.has(job.id))], sourceView);
+    renderSourceCatalog();
     const current = filterList(scope.current, sourceView), unmapped = filterList(scope.unmapped, sourceView);
     $('demo-count').textContent = `本图 ${number(scope.current.length)} / 共 ${number(state.jobs.size + state.pendingCount)} 场`;
     $('demo-scope').textContent = (activeMap ? `只显示 ${activeMap}；切换下方地图查看其他比赛。` : '选择下方地图查看对应比赛；地图未识别的任务列在下面。') + ` 当前列表 ${number(new Set([...current, ...unmapped].map(job => job.id)).size)} 场；列表分类与搜索不会改变分析勾选。`;
@@ -338,7 +394,7 @@
       const info = node('small', job.status === 'ready' ? `${job.map || ''}${job.synthetic ? ' · 合成示例' : ''}` : [mapOf(job), job.error || job.message || '正在处理…'].filter(Boolean).join(' · '), job.synthetic ? 'badge-synthetic' : job.status === 'error' ? 'status-error' : '');
       words.append(title, info);
       const paths = library.sourcePaths(job);
-      if (paths.length) { const source = node('small', groupSourcePaths(job, groupKey)[0] || paths[0], 'demo-source-path'); source.title = paths.join('\n'); words.append(source); }
+      if (paths.length) { const source = node('small', library.folderSourcePaths(job, groupKey, sourceView.folder === groupKey)[0] || paths[0], 'demo-source-path'); source.title = paths.join('\n'); words.append(source); }
       if (job.summaryError) words.append(node('small', `新摘要读取失败，暂用旧结果：${job.summaryError}`, 'warning-inline'));
       if (job.warnings?.length) { const warning = node('small', `⚠ ${job.warnings[0]}${job.warnings.length > 1 ? `（另有 ${job.warnings.length - 1} 条提示）` : ''}`, 'warning-inline'); warning.title = job.warnings.join('\n'); words.append(warning); }
       label.append(check, words); row.append(label);
@@ -348,7 +404,7 @@
     };
     appendFolderGroups(list, current, sourceView, appendRow, 'source'); appendFolderGroups(pendingList, unmapped, sourceView, appendRow, 'source');
     for (const action of ['all', 'none', 'invert']) $(`demos-${action}`).disabled = ![...current, ...unmapped].some(job => state.demos.has(job.id));
-    if (!current.length) list.append(node('p', activeMap ? '当前地图、文件夹或搜索没有匹配比赛；已有勾选仍保留。' : jobs.length ? '等待识别地图，或在下方选择已有地图。' : '从本地录像库选择比赛，加入后才开始分析。', 'muted'));
+    if (!current.length) list.append(node('p', activeMap ? '当前地图、文件夹或搜索没有匹配的已加入比赛。' : jobs.length ? '等待识别地图，或在下方选择已有地图。' : '在上方录像库勾选比赛，点击「加入分析」。', 'muted'));
     $('sample-analysis').disabled = state.uploading || catalogAdding;
     $('refresh-library').disabled = !libraryEnabled || libraryRefreshing || libraryScanning || state.uploading || catalogAdding;
     renderCatalog();
@@ -575,6 +631,7 @@
       for (const demo of library.demos || []) catalog.set(demo.id, demo);
       if (!library.scanning) {
         for (const id of catalogSelection) if (!catalog.has(id)) catalogSelection.delete(id);
+        for (const id of sourceCatalogSelection) if (!catalog.has(id) || !canAddSource(catalog.get(id))) sourceCatalogSelection.delete(id);
       }
       const jobs = Array.isArray(response) ? response : response.demos || [];
       // Keep changed, previously selected sources visible without reusing their stale summary.
@@ -620,9 +677,9 @@
     })();
     try { return await syncPromise; } finally { syncPromise = null; }
   }
-  function libraryResultText(result) {
+  function libraryResultText(result, count = catalog.size) {
     const errors = Array.isArray(result.errors) ? result.errors.map(item => typeof item === 'string' ? item : item.message || item.error || '文件暂不可读取') : [];
-    return `发现新增 ${number(result.added)} 场 · ${number(result.unchanged)} 场已在库中。选择录像后才解析${errors.length ? `。${errors.join('；')}` : '；已有筛选已保留。'}`;
+    return `录像库共 ${number(count)} 场（按内容去重）。本次新增 ${number(result.added)} 场，${number(result.unchanged)} 个来源匹配已有录像。${errors.join('；')}`;
   }
   async function loadLibraryInfo(strict = false) {
     const request = ++libraryInfoRequest;
@@ -635,7 +692,7 @@
         $(id).textContent = info.directory || '未配置录像文件夹';
         $(id).title = info.directory || '';
       }
-      $('library-status').textContent = libraryScanning ? '正在递归扫描子文件夹、读取 ZIP 并检查重复录像；扫描不会解析比赛…' : info.result ? libraryResultText(info.result) : libraryEnabled ? '自动扫描所有子文件夹中的 .dem 和 .zip；新增后点击刷新，再从录像库选择要分析的比赛。' : info.message || '此服务未启用文件夹读取。';
+      $('library-status').textContent = libraryScanning ? '正在递归扫描子文件夹、读取 ZIP 并检查重复录像；扫描不会解析比赛…' : info.result ? libraryResultText(info.result, info.count) : libraryEnabled ? '自动扫描所有子文件夹中的 .dem 和 .zip；新增后点击刷新，再从录像库选择要分析的比赛。' : info.message || '此服务未启用文件夹读取。';
     } catch (error) { if (request !== libraryInfoRequest) return; if (strict) throw error; $('library-status').textContent = '无法读取文件夹信息；仍可手动导入 Demo。'; }
     $('refresh-library').disabled = !libraryEnabled || libraryRefreshing || libraryScanning || state.uploading || catalogAdding;
     renderCatalog();
@@ -670,15 +727,16 @@
     renderCatalog();
   }
   function renderCatalog() {
+    const busy = catalogAdding || state.uploading;
+    $('open-analysis-library').disabled = busy;
+    $('empty-open-analysis-library').disabled = busy;
+    if ($('analysis-library-dialog').hidden) return;
     const maps = new Map(); for (const demo of catalog.values()) maps.set(demo.map || 'unknown', (maps.get(demo.map || 'unknown') || 0) + 1);
     const select = $('analysis-library-map'); select.replaceChildren(new Option('全部地图', 'all'));
     for (const [map, count] of [...maps].sort(([a], [b]) => a.localeCompare(b))) select.append(new Option(`${map === 'unknown' ? '地图待解析' : map} · ${number(count)} 场`, map));
     if (libraryView.map !== 'all' && !maps.has(libraryView.map)) select.append(new Option(`${libraryView.map} · 暂无录像`, libraryView.map));
     select.value = libraryView.map; renderFolderControls('analysis-library', catalogMapScope(), libraryView);
     const visible = visibleCatalog(), list = $('analysis-library-list'); list.replaceChildren();
-    const busy = catalogAdding || state.uploading;
-    $('open-analysis-library').disabled = busy;
-    $('empty-open-analysis-library').disabled = busy;
     $('analysis-library-count').textContent = `显示 ${visible.length} / ${catalog.size} 场 · 已选 ${catalogSelection.size} 场`;
     $('analysis-library-add').textContent = catalogAdding ? '正在加入…' : `加入分析（${catalogSelection.size}）`;
     $('analysis-library-add').disabled = busy || !catalogSelection.size;
@@ -692,7 +750,7 @@
       check.setAttribute('aria-label', `选择 ${demo.name || demo.id} 加入分析`);
       check.addEventListener('change', () => { if (check.checked) catalogSelection.add(demo.id); else catalogSelection.delete(demo.id); renderCatalog(); });
       const title = node('strong', demo.name || demo.id); title.title = demo.name || demo.id;
-      const sources = library.sourcePaths(demo), path = node('small', groupSourcePaths(demo, groupKey)[0] || sources[0] || '本机已解析记录', 'analysis-library-path'); path.title = sources.join('\n');
+      const sources = library.sourcePaths(demo), path = node('small', library.folderSourcePaths(demo, groupKey, libraryView.folder === groupKey)[0] || sources[0] || '本机已解析记录', 'analysis-library-path'); path.title = sources.join('\n');
       const statuses = { discovered: '待选择解析', queued: '等待解析', parsing: '正在解析', error: '解析失败，可重试' };
       const status = demo.status === 'ready' ? demo.analysis ? '已加入分析 · 可直接复用' : '已解析缓存 · 可直接加入' : statuses[demo.status] || demo.message || '等待处理';
       const detail = node('small', `${demo.map || '地图待解析'} · ${status}${demo.sourceCount > 1 ? ` · ${demo.sourceCount} 个来源已去重` : ''}`, demo.status === 'error' ? 'status-error' : '');
@@ -725,7 +783,7 @@
       for (const id of new Set(ids)) {
         try {
           const result = await json(await fetch(`/api/library/demos/${encodeURIComponent(id)}/parse`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'analysis' }) }));
-          state.selectedDemos?.add(result.id); catalogSelection.delete(id); added++;
+          state.selectedDemos?.add(result.id); catalogSelection.delete(id); sourceCatalogSelection.delete(id); added++;
         } catch (error) { errors.push(`${catalog.get(id)?.name || id}：${error.message}`); }
       }
       if (syncPromise) await syncPromise;
@@ -972,14 +1030,24 @@
   $('analysis-library-close').addEventListener('click', closeCatalog);
   $('analysis-library-dialog').addEventListener('cancel', event => { event.preventDefault(); closeCatalog(); });
   for (const [prefix, view, render] of [['demo', sourceView, renderJobs], ['analysis-library', libraryView, renderCatalog]]) {
-    $(`${prefix}-search`).addEventListener('input', () => { view.query = $(`${prefix}-search`).value; render(); save(); });
-    $(`${prefix}-view-mode`).addEventListener('change', () => { view.mode = $(`${prefix}-view-mode`).value === 'folders' ? 'folders' : 'all'; render(); save(); });
-    $(`${prefix}-folder`).addEventListener('change', () => { view.folder = $(`${prefix}-folder`).value; render(); save(); });
+    const refreshView = () => { if (view === sourceView) sourcePage = 0; render(); save(); };
+    $(`${prefix}-search`).addEventListener('input', () => { view.query = $(`${prefix}-search`).value; refreshView(); });
+    $(`${prefix}-view-mode`).addEventListener('change', () => { view.mode = $(`${prefix}-view-mode`).value === 'folders' ? 'folders' : 'all'; refreshView(); });
+    $(`${prefix}-folder`).addEventListener('change', () => { view.folder = $(`${prefix}-folder`).value; refreshView(); });
     const scope = prefix === 'demo' ? 'source' : 'catalog';
     $(`${prefix}-collapse-all`).addEventListener('click', () => changeFolderExpansion(scope, null, false));
     $(`${prefix}-expand-all`).addEventListener('click', () => changeFolderExpansion(scope, null, true));
   }
   $('analysis-library-map').addEventListener('change', () => { libraryView.map = $('analysis-library-map').value; renderCatalog(); save(); });
+  $('source-catalog-prev').addEventListener('click', () => { sourcePage = Math.max(0, sourcePage - 1); renderSourceCatalog(); });
+  $('source-catalog-next').addEventListener('click', () => { sourcePage++; renderSourceCatalog(); });
+  $('source-catalog-all').addEventListener('click', () => {
+    if (catalogAdding || state.uploading) return;
+    for (const demo of filterList([...catalog.values()], sourceView)) if (canAddSource(demo)) sourceCatalogSelection.add(demo.id);
+    renderSourceCatalog();
+  });
+  $('source-catalog-clear').addEventListener('click', () => { if (!catalogAdding) { sourceCatalogSelection.clear(); renderSourceCatalog(); } });
+  $('source-catalog-add').addEventListener('click', () => addCatalogDemos([...sourceCatalogSelection], { keepOpen: true }));
   for (const action of ['all', 'none', 'invert']) $(`demos-${action}`).addEventListener('click', () => changeSourceSelection(action));
   $('analysis-library-refresh').addEventListener('click', refreshLibrary);
   $('analysis-library-all').addEventListener('click', () => changeCatalogSelection('all'));

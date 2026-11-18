@@ -125,6 +125,35 @@ test('folder options and grouping count each ID once per physical folder and sup
   assert.deepEqual(library.folderOptions(null), []); assert.deepEqual(library.groupByFolder([], 'all'), [{ key: 'all', label: '', demos: [] }]);
 });
 
+test('recursive folder options include ancestors and count multi-source recordings once in each subtree', () => {
+  const shared = demo('shared', 'discovered', { sources: [
+    { path: 'de_nuke\\Top1\\周一\\map.dem' }, { path: 'de_nuke/Top1/周二/maps.zip', member: 'zip-only/map.dem' },
+    { path: 'de_mirage/Top10/周二/map.dem' }, { path: 'missing/map.dem', available: false },
+  ] });
+  const direct = demo('direct', 'discovered', { sources: [{ path: 'de_nuke/Top1/./map.dem' }] });
+  const sibling = demo('sibling', 'discovered', { sources: [{ path: 'de_nuke/Top10/map.dem' }] });
+  const root = demo('root', 'discovered', { sources: [{ path: 'map.dem' }] });
+  const cached = demo('cached', 'ready', { sources: [] });
+  const demos = [shared, shared, direct, sibling, root, cached];
+
+  const options = library.folderOptions(demos, true);
+  assert.deepEqual(Object.fromEntries(options.map(row => [row.key, row.count])), {
+    root: 1, 'path:de_nuke': 3, 'path:de_nuke/Top1': 2, 'path:de_nuke/Top1/周一': 1, 'path:de_nuke/Top1/周二': 1,
+    'path:de_nuke/Top10': 1, 'path:de_mirage': 1, 'path:de_mirage/Top10': 1, 'path:de_mirage/Top10/周二': 1, unavailable: 1,
+  });
+  assert.equal(options[0].key, 'root'); assert.equal(options.at(-1).key, 'unavailable');
+  assert.ok(!library.folderOptions(demos).some(row => row.key === 'path:de_nuke'));
+  assert.equal(library.inFolder(shared, 'path:de_nuke/Top1', true), true);
+  assert.equal(library.inFolder(sibling, 'path:de_nuke/Top1', true), false);
+  assert.equal(library.inFolder(shared, 'root', true), false);
+  assert.equal(library.inFolder(cached, 'unavailable', true), true);
+
+  const groups = library.groupByFolder(demos, 'folders', 'path:de_nuke/Top1', true);
+  assert.deepEqual(Object.fromEntries(groups.map(group => [group.key, group.demos.map(item => item.id)])), {
+    'path:de_nuke/Top1': ['direct'], 'path:de_nuke/Top1/周一': ['shared'], 'path:de_nuke/Top1/周二': ['shared'],
+  });
+});
+
 test('folder expansion defaults, individual exceptions and global defaults apply to future folders', () => {
   const state = library.createFolderExpansion();
   assert.equal(state.isExpanded('root'), true);
@@ -242,13 +271,15 @@ test('playback folding remains usable with malformed JSON and blocked local stor
 });
 
 test('playback folder controls filter and group the same catalog without parsing or changing the selected recording identity', async () => {
-  const same = demo('same', 'ready', { sources: [{ path: '训练/one.zip', member: 'maps/match.dem' }, { path: '比赛/one.dem' }] });
+  const same = demo('same', 'ready', { sources: [{ path: '训练/one.zip', member: 'maps/match.dem' }, { path: '比赛/周一/one.dem' }, { path: '比赛/周二/one.dem' }] });
   const p = page([same, demo('root', 'ready', { sources: [{ path: 'root.dem' }] })]);
   p.api.show(); await settle(); assert.equal(p.rows().length, 2); assert.equal(p.get('replay-library-folder-field').hidden, true);
   p.change('replay-library-mode', 'folders'); assert.equal(p.get('replay-library-folder-field').hidden, false);
-  assert.equal(p.groups().length, 3); assert.equal(p.rows().length, 3); assert.equal(p.get('replay-library-count').textContent, '2 / 2 场');
+  assert.equal(p.groups().length, 4); assert.equal(p.rows().length, 4); assert.equal(p.get('replay-library-count').textContent, '2 / 2 场');
+  assert.ok(p.get('replay-library-folder').children.some(option => option.value === 'path:比赛' && /1 场/.test(option.textContent)));
   p.change('replay-library-folder', 'path:比赛'); assert.equal(p.groups().length, 1); assert.equal(p.rows()[0].dataset.demoId, 'same');
-  assert.match(p.rows()[0].children[0].children[1].textContent, /比赛\/one.dem/, 'a group row displays its own physical source first');
+  assert.equal(p.rows().length, 1, 'copies in different subfolders represent one replay');
+  assert.match(p.rows()[0].children[0].children[1].textContent, /比赛\/周一\/one.dem/, 'a parent group displays a physical source inside its subtree');
   p.search('maps match'); assert.equal(p.rows().length, 1, 'member search still works without creating member folders');
   p.change('replay-library-mode', 'all'); p.search(''); assert.equal(p.rows().length, 2); assert.equal(p.groups().length, 0);
   p.change('replay-library-mode', 'folders'); assert.equal(p.get('replay-library-folder').value, 'path:比赛'); assert.equal(p.rows().length, 1);

@@ -55,7 +55,7 @@
   function sourceFolder(source) {
     if (!source || source.available === false || typeof source.path !== 'string') return null;
     const path = source.path.replace(/\\/g, '/');
-    // Catalog paths are relative to demo/. A missing/invalid physical path must
+    // Catalog paths are relative to the selected library root. A missing/invalid path must
     // not be classified using a ZIP member name or a cached display name.
     if (!path.trim() || path.startsWith('/') || /^[a-z]:/i.test(path) || path.endsWith('/')) return null;
     const parts = [];
@@ -78,31 +78,56 @@
     const rank = key => key === 'root' ? 0 : key === 'unavailable' ? 2 : 1;
     return rank(a) - rank(b) || folderLabel(a).localeCompare(folderLabel(b), 'zh-CN') || a.localeCompare(b);
   }
-  function folderKeys(demo) {
-    const keys = [...new Set((Array.isArray(demo?.sources) ? demo.sources : []).map(sourceFolder).filter(Boolean))];
-    return keys.length ? keys.sort(compareFolders) : ['unavailable'];
+  function folderKeys(demo, includeAncestors = false) {
+    const keys = new Set();
+    for (const source of Array.isArray(demo?.sources) ? demo.sources : []) {
+      const key = sourceFolder(source);
+      if (!key) continue;
+      keys.add(key);
+      if (includeAncestors) {
+        for (let slash = key.indexOf('/'); slash >= 0; slash = key.indexOf('/', slash + 1)) keys.add(key.slice(0, slash));
+      }
+    }
+    return keys.size ? [...keys].sort(compareFolders) : ['unavailable'];
   }
-  function inFolder(demo, key = 'all') { return key === 'all' || folderKeys(demo).includes(key); }
+  function matchesFolderKey(key, folder, includeDescendants) {
+    return key === folder || (includeDescendants && key.startsWith(folder + '/'));
+  }
+  function inFolder(demo, folder = 'all', includeDescendants = false) {
+    return folder === 'all' || folderKeys(demo).some(key => matchesFolderKey(key, folder, includeDescendants));
+  }
   function uniqueDemos(demos) {
     const unique = new Map();
     for (const demo of Array.isArray(demos) ? demos : []) if (demo && typeof demo.id === 'string' && demo.id) unique.set(demo.id, demo);
     return [...unique.values()];
   }
-  function folderGroups(demos) {
+  function folderGroups(demos, includeAncestors = false) {
     const groups = new Map();
     for (const demo of Array.isArray(demos) ? demos : []) {
       if (!demo || typeof demo.id !== 'string' || !demo.id) continue;
-      for (const key of folderKeys(demo)) {
+      for (const key of folderKeys(demo, includeAncestors)) {
         if (!groups.has(key)) groups.set(key, new Map());
         groups.get(key).set(demo.id, demo);
       }
     }
     return [...groups].sort(([a], [b]) => compareFolders(a, b)).map(([key, values]) => ({ key, label: folderLabel(key), demos: [...values.values()] }));
   }
-  function folderOptions(demos) { return folderGroups(demos).map(group => ({ key: group.key, label: group.label, count: group.demos.length })); }
-  function groupByFolder(demos, mode = 'all', folder = 'all') {
+  function folderOptions(demos, includeAncestors = false) {
+    return folderGroups(demos, includeAncestors).map(group => ({ key: group.key, label: group.label, count: group.demos.length }));
+  }
+  function groupByFolder(demos, mode = 'all', folder = 'all', includeDescendants = false) {
     if (mode !== 'folders') return [{ key: 'all', label: '', demos: uniqueDemos(demos) }];
-    return folderGroups(demos).filter(group => folder === 'all' || group.key === folder);
+    return folderGroups(demos).filter(group => folder === 'all' || matchesFolderKey(group.key, folder, includeDescendants));
+  }
+  function viewFolderGroups(demos, mode, folder) {
+    if (mode !== 'folders' || folder === 'all') return groupByFolder(demos, mode);
+    const members = uniqueDemos(demos).filter(demo => inFolder(demo, folder, true));
+    return members.length ? [{ key: folder, label: folderLabel(folder), demos: members }] : [];
+  }
+  function folderSourcePaths(demo, folder, includeDescendants = false) {
+    if (folder === 'all') return sourcePaths(demo);
+    const sources = Array.isArray(demo?.sources) ? demo.sources : [];
+    return sourcePaths({ sources: sources.filter(source => matchesFolderKey(sourceFolder(source) || 'unavailable', folder, includeDescendants)) });
   }
   function createFolderExpansion(saved) {
     const record = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
@@ -140,17 +165,17 @@
       $('replay-library-folder-field').hidden = mode !== 'folders';
       $('replay-library-folder-note').hidden = mode !== 'folders';
       $('replay-library-expansion-controls').hidden = mode !== 'folders';
-      const folders = $('replay-library-folder'), options = folderOptions(demos); folders.replaceChildren();
+      const folders = $('replay-library-folder'), options = folderOptions(demos, true); folders.replaceChildren();
       const addOption = (value, label) => { const option = make('option', label); option.value = value; folders.append(option); };
       addOption('all', '全部文件夹'); for (const option of options) addOption(option.key, `${option.label} · ${option.count} 场`);
       if (folder !== 'all' && !options.some(option => option.key === folder)) addOption(folder, `${folderLabel(folder)} · 暂无录像`);
       folders.value = folder;
-      const shown = demos.filter(demo => matches(demo, $('replay-library-search').value) && (mode !== 'folders' || inFolder(demo, folder)));
+      const shown = demos.filter(demo => matches(demo, $('replay-library-search').value) && (mode !== 'folders' || inFolder(demo, folder, true)));
       $('replay-library-count').textContent = `${uniqueDemos(shown).length} / ${uniqueDemos(demos).length} 场`;
       $('replay-library-refresh').disabled = loading || refreshing || scanning;
       list.replaceChildren();
       renderedGroups.clear();
-      for (const group of groupByFolder(shown, mode, folder)) {
+      for (const group of viewFolderGroups(shown, mode, folder)) {
         let container = list;
         if (mode === 'folders') {
           const section = make('section', null, 'replay-library-folder-group'), heading = make('h3', null, 'replay-library-folder-heading');
@@ -176,7 +201,7 @@
         const heading = make('div', null, 'replay-library-row-heading'), title = make('strong', demo.name || '未命名录像'); title.title = demo.name || '';
         const status = make('span', statusLabels[demo.status] || '等待确认', `replay-library-status status-${demo.status || 'unknown'}`);
         heading.append(title, status); details.append(heading);
-        const paths = sourcePaths(demo), groupedPaths = group.key === 'all' ? paths : sourcePaths({ sources: (Array.isArray(demo.sources) ? demo.sources : []).filter(source => folderKeys({ sources: [source] }).includes(group.key)) });
+        const paths = sourcePaths(demo), groupedPaths = folderSourcePaths(demo, group.key, folder === group.key);
         const path = make('p', groupedPaths[0] || paths[0] || '已保存的本机回放', 'replay-library-source'); path.title = paths.join('\n'); details.append(path);
         const sourceCount = Number(demo.sourceCount) || paths.length;
         details.append(make('small', `${demo.map || '解析后识别地图'}${sourceCount > 1 ? ` · ${sourceCount} 个来源，已去重` : ''}`));
@@ -248,5 +273,5 @@
     dialog.addEventListener('click', event => { if (event.target === dialog) close(); });
     return { show, close, refresh, reload, isOpen: () => open };
   }
-  return { create, loadReplay, matches, sourcePaths, folderKeys, folderLabel, folderOptions, inFolder, groupByFolder, createFolderExpansion, viewStorageKey };
+  return { create, loadReplay, matches, sourcePaths, folderSourcePaths, folderKeys, folderLabel, folderOptions, inFolder, groupByFolder, viewFolderGroups, createFolderExpansion, viewStorageKey };
 });

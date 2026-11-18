@@ -294,6 +294,23 @@ function folderBulkFixtures() {
   return { datasets: data, catalog };
 }
 
+test('selecting a parent folder gives one row per match and batch actions include every descendant even when search hides all', async () => {
+  const catalog = multiFolderCatalog();
+  catalog[0].sources.push({ path: '赛事/小组赛/a.dem' });
+  catalog[1].sources = [{ path: '赛事/b.dem' }];
+  const ui = await page({ catalog, saved: { libraryView: 'folders', demoIds: ['c'] } });
+  const parent = 'path:赛事';
+  assert.ok(ui.get('multi-library-folder').children.some(option => option.value === parent && /2 场/.test(option.textContent)));
+  await ui.change('multi-library-folder', parent);
+  assert.deepEqual(visibleMultiIds(ui), ['a', 'b']);
+  await ui.search('multi-library-search', 'absent');
+  assert.deepEqual(visibleMultiIds(ui), []);
+  assert.match(folderAction(ui, parent, 'all').title, /全部 2 场.*隐藏的 2 场/);
+  await useFolderAction(ui, parent, 'all'); assert.deepEqual(ui.saved().demoIds.sort(), ['a', 'b', 'c']);
+  await useFolderAction(ui, parent, 'invert'); assert.deepEqual(ui.saved().demoIds, ['c']);
+  assert.equal(ui.parsed.length, 0); assert.equal(reportRequests(ui).length, 0);
+});
+
 test('folder actions include search and map hidden members while preserving selected and unselected IDs unique to other folders', async () => {
   const ui = await page({ ...folderBulkFixtures(), saved: { demoIds: ['d'], map: 'de_anubis', libraryView: 'folders', libraryQuery: 'a.dem', playerIds: [p1], side: '3' } });
   const key = 'path:赛事/决赛', requests = ui.requests.length;

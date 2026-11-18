@@ -156,16 +156,16 @@
     }
     function renderLibrary() {
       const query = $('stats-library-search').value;
-      const folders = win.ReplayLibrary.folderOptions(state.catalog), folder = $('stats-library-folder'); folder.replaceChildren(); option(folder, 'all', '全部文件夹');
+      const folders = win.ReplayLibrary.folderOptions(state.catalog, true), folder = $('stats-library-folder'); folder.replaceChildren(); option(folder, 'all', '全部文件夹');
       for (const item of folders) option(folder, item.key, `${item.label} · ${item.count} 场`);
       if (state.libraryFolder !== 'all' && !folders.some(item => item.key === state.libraryFolder)) option(folder, state.libraryFolder, `${win.ReplayLibrary.folderLabel(state.libraryFolder)} · 当前无录像`);
       folder.value = state.libraryFolder; $('stats-library-view').value = state.libraryView; $('stats-library-folder-field').hidden = state.libraryView !== 'folders'; $('stats-library-folder-note').hidden = state.libraryView !== 'folders';
       $('stats-library-fold-controls').hidden = state.libraryView !== 'folders';
-      const shown = state.catalog.filter(demo => win.ReplayLibrary.matches(demo, query) && (state.libraryView !== 'folders' || win.ReplayLibrary.inFolder(demo, state.libraryFolder)));
+      const shown = state.catalog.filter(demo => win.ReplayLibrary.matches(demo, query) && (state.libraryView !== 'folders' || win.ReplayLibrary.inFolder(demo, state.libraryFolder, true)));
       $('stats-library-count').textContent = `${shown.length} / ${state.catalog.length} 场`;
       $('stats-refresh-library').disabled = state.refreshing || state.scanning;
       const list = $('stats-library-list'); list.replaceChildren(); folderBodies.clear();
-      for (const group of win.ReplayLibrary.groupByFolder(shown, state.libraryView, state.libraryView === 'folders' ? state.libraryFolder : 'all')) {
+      for (const group of win.ReplayLibrary.viewFolderGroups(shown, state.libraryView, state.libraryFolder)) {
         let target = list;
         if (state.libraryView === 'folders') {
           const section = make('section', null, 'statistics-folder-group'); section.dataset.folderKey = group.key;
@@ -178,7 +178,7 @@
         for (const demo of group.demos) {
           const row = make('article', null, `library-item${state.selected === demo.id || state.loading === demo.id ? ' is-selected' : ''}`); row.dataset.demoId = demo.id;
           row.append(make('strong', demo.name || demo.id));
-          const paths = win.ReplayLibrary.sourcePaths(demo), groupPaths = group.key === 'all' ? paths : win.ReplayLibrary.sourcePaths({ sources: (demo.sources || []).filter(source => win.ReplayLibrary.folderKeys({ sources: [source] }).includes(group.key)) });
+          const paths = win.ReplayLibrary.sourcePaths(demo), groupPaths = win.ReplayLibrary.folderSourcePaths(demo, group.key, state.libraryFolder === group.key);
           const detail = make('small', `${demo.map || '地图待解析'}${demo.sourceCount > 1 ? ` · ${demo.sourceCount} 个来源已去重` : ''}\n${groupPaths[0] || paths[0] || '本机缓存'}`); detail.title = paths.join('\n'); row.append(detail);
           if (demo.reparse?.status) {
             const job = demo.reparse, text = job.status === 'error' ? `重新解析失败，旧缓存保留 · ${job.error || job.message || '请恢复源文件后重试'}` : job.status === 'ready' ? '已完成重新解析' : `${job.status === 'queued' ? '等待重新解析' : '正在重新解析'}${isNumber(job.progress) ? ` · ${Math.round(job.progress * 100)}%` : ''} · 仍可查看旧统计`;
