@@ -32,14 +32,23 @@
       <details id="connection">
         <summary>模型连接</summary>
         <div class="config-fields">
-          <p id="server-config" class="hint" role="status">正在读取服务配置…</p>
-          <label for="base-url">API 基础地址</label>
-          <input type="url" id="base-url" placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false">
-          <label for="model-name">模型名称</label>
-          <input id="model-name" placeholder="服务商提供的模型 ID" autocomplete="off" spellcheck="false">
-          <label for="api-key">API 密钥</label>
-          <input type="password" id="api-key" autocomplete="off" spellcheck="false" placeholder="本机免密模型可留空">
-          <p class="hint">使用兼容 Chat Completions 的服务。密钥仅用于本页请求，刷新后需重新填写。</p>
+          <label for="provider">模型厂商</label>
+          <select id="provider" autocomplete="off">
+            <option value="glm">智谱 GLM</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="custom">自定义（其他厂商）</option>
+            <option id="server-option" value="server" disabled hidden>系统默认</option>
+          </select>
+          <p id="server-config" class="hint" role="status" hidden></p>
+          <div id="provider-fields">
+            <label for="base-url">API 基础地址</label>
+            <input type="url" id="base-url" placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false">
+            <label for="model-name">模型名称</label>
+            <input id="model-name" placeholder="服务商提供的模型 ID" autocomplete="off" spellcheck="false">
+            <label for="api-key">API 密钥</label>
+            <input type="password" id="api-key" autocomplete="off" spellcheck="false">
+            <p class="hint">切换厂商或刷新页面后，需重新填写密钥。</p>
+          </div>
         </div>
       </details>
       <details id="mcp-connection">

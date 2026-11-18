@@ -38,7 +38,10 @@ select { margin-top: 10px; }
 .demo-choice { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; line-height: 1.7; padding: 7px 0; overflow-wrap: anywhere; cursor: pointer; }
 #demo-list { max-height: 35vh; overflow: auto; margin-bottom: 8px; }
 summary { cursor: pointer; font-size: 13px; padding: 4px 0; color: #c4d4dc; }
-.config-fields { display: grid; gap: 6px; margin-top: 8px; }
+.config-fields, #provider-fields { display: grid; gap: 6px; min-width: 0; }
+.config-fields { margin-top: 8px; }
+.config-fields select { margin-top: 0; }
+.config-fields input[readonly] { background: #1b2229; color: var(--muted); }
 .config-fields label { font-size: 12px; margin-top: 5px; }
 #mcp-connection { margin-top: 18px; }
 #mcp-config { overflow-wrap: anywhere; white-space: pre-wrap; font: 11px/1.6 Consolas, monospace; }

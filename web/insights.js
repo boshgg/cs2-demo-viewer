@@ -11,9 +11,15 @@
   let mcpConfig = '';
   const focus = el('subject');
   const question = el('question');
+  const provider = el('provider');
   const baseUrl = el('base-url');
   const model = el('model-name');
   const apiKey = el('api-key');
+  const presets = {
+    glm: { url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4.7-flash', name: '智谱 GLM' },
+    deepseek: { url: 'https://api.deepseek.com', model: 'deepseek-flash', name: 'DeepSeek' }
+  };
+  let connectionEdited = false;
 
   async function api(path, payload, signal) {
     const options = { cache: 'no-store', signal };
@@ -49,14 +55,33 @@
     return body;
   }
 
+  function selectProvider(value) {
+    provider.value = value;
+    const preset = presets[value];
+    const system = value === 'server';
+    apiKey.value = '';
+    apiKey.required = Boolean(preset);
+    apiKey.placeholder = preset ? `填写 ${preset.name} API 密钥` : '本机免密模型可留空';
+    baseUrl.value = preset?.url || '';
+    baseUrl.readOnly = Boolean(preset);
+    model.value = preset?.model || '';
+    el('provider-fields').hidden = system;
+    el('server-config').hidden = !system && value !== 'custom';
+    if (system) message('server-config', `使用查看器启动时配置的 ${config.model} @ ${config.endpoint}。`);
+    if (value === 'custom') message('server-config', '填写兼容 Chat Completions 的服务地址和模型 ID。');
+    cancelAnswer();
+  }
+
   function providerOptions() {
-    const url = baseUrl.value.trim();
-    const name = model.value.trim();
-    const key = apiKey.value.trim();
-    if (!url && !name && !key && config.configured) {
+    if (provider.value === 'server' && config.configured) {
       return { label: `${config.model} @ ${config.endpoint}`, fields: {} };
     }
+    const preset = presets[provider.value];
+    const url = preset?.url || baseUrl.value.trim();
+    const name = model.value.trim();
+    const key = apiKey.value.trim();
     if (!url || !name) return { error: '请在「模型连接」填写 API 基础地址和模型名称。' };
+    if (preset && !key) return { error: `请在「模型连接」填写 ${preset.name} 的 API 密钥。` };
     let endpoint;
     try { endpoint = new URL(url); } catch { return { error: '请输入完整的 API 地址。' }; }
     const local = ['localhost', '[::1]'].includes(endpoint.hostname) || /^127\.\d+\.\d+\.\d+$/.test(endpoint.hostname);
@@ -262,10 +287,14 @@
   async function loadConfig() {
     try {
       config = await api('/api/insights/config');
-      message('server-config', config.configured ? `系统默认使用 ${config.model} @ ${config.endpoint}。填写下方字段可切换服务。` :
-        '填写服务地址和模型名称即可连接。');
+      if (config.configured) {
+        el('server-option').disabled = false;
+        el('server-option').hidden = false;
+        if (!connectionEdited) selectProvider('server');
+      }
     } catch (error) {
-      message('server-config', `读取系统配置失败：${error.message}。也可手动填写。`, true);
+      el('server-config').hidden = false;
+      message('server-config', `读取系统默认配置失败：${error.message}。仍可选择模型厂商。`, true);
     }
     if (!config.configured) el('connection').open = true;
     syncActions();
@@ -310,14 +339,23 @@
   focus.addEventListener('change', () => updateScope());
   el('retry-evidence').addEventListener('click', () => updateScope());
   question.addEventListener('input', syncActions);
+  provider.addEventListener('change', () => {
+    connectionEdited = true;
+    selectProvider(provider.value);
+  });
   baseUrl.addEventListener('input', () => {
+    connectionEdited = true;
     apiKey.value = '';
     cancelAnswer();
   });
-  [model, apiKey].forEach(input => input.addEventListener('input', cancelAnswer));
+  [model, apiKey].forEach(input => input.addEventListener('input', () => {
+    connectionEdited = true;
+    cancelAnswer();
+  }));
   window.addEventListener('pagehide', () => {
     apiKey.value = '';
     if (answerRequest) cancelAnswer();
+    else syncActions();
   });
   el('analysis-form').addEventListener('submit', submit);
   el('cancel-analysis').addEventListener('click', () => { cancelAnswer(); message('analysis-status', '已取消。'); });
@@ -335,6 +373,7 @@
     try { await navigator.clipboard.writeText(mcpConfig); message('mcp-status', '已复制。'); }
     catch { message('mcp-status', '浏览器无法访问剪贴板，请手动选中并复制上方配置。', true); }
   });
+  selectProvider('glm');
   void loadConfig();
   void loadLibrary(true);
 })();
