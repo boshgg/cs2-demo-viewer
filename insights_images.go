@@ -55,25 +55,33 @@ func (p insightsPart) image() insightsImage {
 	return img
 }
 
-func normalizedInlineImage(declared, encoded string) string {
+func inspectInlineImage(declared, encoded string) (string, int) {
 	if len(encoded) == 0 || len(encoded) > base64.StdEncoding.EncodedLen(maxInsightsImageBytes) {
-		return ""
+		return "", 0
 	}
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil || len(data) > maxInsightsImageBytes {
-		return ""
+		return "", 0
 	}
 	config, format, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil || config.Width < 1 || config.Height < 1 || config.Width > 8192 || config.Height > 8192 || int64(config.Width)*int64(config.Height) > 16<<20 {
-		return ""
+		return "", 0
 	}
 	mime := "image/" + format
 	if (format != "png" && format != "jpeg" && format != "gif") || (declared != "" && declared != mime) {
-		return ""
+		return "", 0
 	}
 	// Decode only after checking the dimensions. A valid header alone does
 	// not guarantee that a truncated response contains a displayable bitmap.
 	if _, _, err := image.Decode(bytes.NewReader(data)); err != nil {
+		return "", 0
+	}
+	return mime, len(data)
+}
+
+func normalizedInlineImage(declared, encoded string) string {
+	mime, _ := inspectInlineImage(declared, encoded)
+	if mime == "" {
 		return ""
 	}
 	return "data:" + mime + ";base64," + encoded

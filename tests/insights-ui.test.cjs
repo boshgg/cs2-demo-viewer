@@ -15,6 +15,7 @@ function element(tagName = 'div') {
     append(...children) { this.children.push(...children); },
     replaceChildren(...children) { this.children = children; },
     setAttribute(name, value) { this[name] = value; },
+    focus() { this.focused = true; },
     contains(child) { return this.children.includes(child); },
     showModal() { this.open = true; },
     close() { this.open = false; this.fire('close'); },
@@ -22,16 +23,19 @@ function element(tagName = 'div') {
     get selectedOptions() { return this.children.slice(0, 1); },
     set innerHTML(value) { assert.fail('Untrusted API content must render as text'); },
     addEventListener(type, handler) { handlers.set(type, handler); },
-    fire(type) { return handlers.get(type)({ preventDefault() {} }); }
+    fire(type, event = {}) { return handlers.get(type)({ preventDefault() {}, target: this, ...event }); }
   };
 }
 
 const systemConfig = { configured: true, model: 'system', endpoint: 'https://system.example' };
 
-async function startPage(config = systemConfig) {
+async function startPage(config = systemConfig, device = {}) {
   const inputs = Object.fromEntries([...html.matchAll(/\sid="([^"]+)"/g)].map(match => [match[1], element()]));
   const get = id => inputs[id];
   const window = element();
+  const preferences = device.preferences || new Map();
+  const credentials = device.credentials || new Map();
+  window.localStorage = { getItem: key => preferences.get(key), setItem: (key, value) => preferences.set(key, value) };
   const copied = [];
   const chartScopes = [];
   window.InsightsCharts = { render(container, report, scope) {
@@ -46,6 +50,13 @@ async function startPage(config = systemConfig) {
     if (url === '/api/library/demos') return ok({ demos: [] });
     if (url === '/api/insights/config') return ok(await config);
     const data = JSON.parse(options.body);
+    if (url === '/api/insights/credential') {
+      if (device.credentialRequest) return ok(await device.credentialRequest(data));
+      const scope = data.provider + '|' + data.baseUrl;
+      if (data.action === 'save') credentials.set(scope, data.apiKey);
+      if (data.action === 'delete') credentials.delete(scope);
+      return ok({ saved: credentials.has(scope) });
+    }
     payloads.push({ url, data, signal: options.signal });
     if (url === '/api/insights/evidence') return ok(sample);
     if (url === '/api/insights/ask') {
@@ -56,6 +67,19 @@ async function startPage(config = systemConfig) {
   };
   vm.runInNewContext(script, { document: { getElementById: get, createElement: element, createDocumentFragment: element },
     window, URL, URLSearchParams, AbortController, location: { search: '?demo=sample' },
+    FileReader: class {
+      readAsDataURL(file) {
+        Promise.resolve(file.data).then(value => { this.result = value; this.onload(); }, () => this.onerror());
+      }
+    },
+    Image: class {
+      set src(value) {
+        if (value === 'invalid') return this.onerror();
+        this.naturalWidth = value === 'too-wide' ? 8193 : 12;
+        this.naturalHeight = 8;
+        this.onload();
+      }
+    },
     navigator: { clipboard: { writeText: async value => copied.push(value) } }, fetch: api });
   await settle();
   get('question').value = 'Which rounds should we review?';
@@ -76,10 +100,12 @@ test('custom connection keys are cleared when switching destination and on page 
   set('model-name', 'match-analysis');
   assert.equal(get('ask').disabled, true);
   set('base-url', 'http://127.0.0.1:11434/v1');
+  await settle();
   assert.equal(get('ask').disabled, false);
   set('base-url', 'https://first.example/v1');
   set('api-key', 'test-only');
   set('base-url', 'https://second.example/v1');
+  await settle();
   assert.equal(get('api-key').value, '');
   assert.match(get('destination').textContent, /second\.example/);
   const done = get('analysis-form').fire('submit');
@@ -247,6 +273,7 @@ test('switching away from a custom image model aborts the request and ignores it
   set('provider', 'custom');
   set('base-url', 'https://vendor.example/v1');
   set('model-name', 'image-capable');
+  await settle();
   get('image-output').checked = true;
   const pending = get('analysis-form').fire('submit');
   assert.equal(payloads.at(-1).data.imageOutput, true);
@@ -258,4 +285,125 @@ test('switching away from a custom image model aborts the request and ignores it
   await pending;
   assert.equal(get('image-gallery').children.length, 0);
   assert.equal(get('result').hidden, true);
+});
+
+test('saved keys survive page reload, remain private to the endpoint, and can be removed', async () => {
+  const device = { preferences: new Map(), credentials: new Map() };
+  const setup = await startPage({ configured: false }, device);
+  setup.set('provider', 'custom');
+  setup.set('base-url', 'https://team.example/groups/a');
+  setup.set('model-name', 'vision-match');
+  setup.set('api-key', 'fixture-credential');
+  await setup.get('save-key').fire('click');
+  assert.equal(setup.get('api-key').value, '');
+  assert.equal(setup.get('forget-key').hidden, false);
+  assert.doesNotMatch([...device.preferences.values()].join(''), /fixture-credential/);
+  const page = await startPage(systemConfig, device);
+  assert.equal(page.get('provider').value, 'custom');
+  assert.equal(page.get('model-name').value, 'vision-match');
+  assert.equal(page.get('api-key').value, '');
+  assert.equal(page.get('forget-key').hidden, false);
+  const ask = page.get('analysis-form').fire('submit');
+  const { data } = page.payloads.at(-1);
+  assert.equal(data.useSavedKey, true);
+  assert.equal(data.apiKey, undefined);
+  assert.equal(data.provider, 'custom');
+  page.reply('reviewed'); await ask;
+  page.set('base-url', 'https://team.example/groups/b'); await settle();
+  assert.equal(page.get('forget-key').hidden, true);
+  page.set('base-url', data.baseUrl); await settle();
+  await page.get('forget-key').fire('click');
+  assert.equal(page.get('forget-key').hidden, true);
+  assert.equal(device.credentials.size, 0);
+});
+
+test('a typed key is remembered after a successful review; stale lookups never re-enable another destination', async () => {
+  const device = { credentials: new Map() };
+  const page = await startPage({ configured: false }, device);
+  page.set('provider', 'deepseek');
+  page.set('api-key', 'fixture-success');
+  const done = page.get('analysis-form').fire('submit');
+  page.reply('ok'); await done;
+  assert.equal(device.credentials.get('deepseek|https://api.deepseek.com'), 'fixture-success');
+  assert.equal(page.get('api-key').value, '');
+  let resolveFirst;
+  const delayed = await startPage({ configured: false }, { credentialRequest: data =>
+    data.baseUrl.includes('first.example') ? new Promise(resolve => { resolveFirst = resolve; }) : { saved: false } });
+  delayed.set('provider', 'custom');
+  delayed.set('base-url', 'https://first.example');
+  delayed.set('base-url', 'https://second.example');
+  await settle(); resolveFirst({ saved: true }); await settle();
+  assert.equal(delayed.get('forget-key').hidden, true);
+});
+
+test('selecting and pasting images previews them locally and sends only remaining images with the question', async () => {
+  const { get, payloads, reply } = await startPage();
+  const file = (name, suffix) => ({ name, type: 'image/png', size: 12, data: thumbnail + suffix });
+  get('question').value = '';
+  get('question').fire('input');
+  assert.equal(get('ask').disabled, true);
+  const calls = payloads.length;
+  await get('input-image-files').fire('change', { target: { files: [file('位置.png', 'one'), file('道具.png', 'two')] } });
+  let intercepted = false;
+  await get('question').fire('paste', { clipboardData: { files: [] }, preventDefault() { intercepted = true; } });
+  assert.equal(intercepted, false);
+  await get('question').fire('paste', { clipboardData: { files: [file('截图.png', 'three')] }, preventDefault() { intercepted = true; } });
+  assert.equal(intercepted, true);
+  assert.equal(get('input-image-list').children.length, 3);
+  const second = get('input-image-list').children[1];
+  assert.equal(second.children[0].children[0].src, thumbnail + 'two');
+  second.children[0].fire('click');
+  assert.equal(get('image-viewer').open, true);
+  get('image-viewer').close();
+  second.children[2].fire('click');
+  assert.equal(get('input-image-list').children.length, 2);
+  assert.equal(get('ask').disabled, false);
+  assert.equal(get('question').required, false);
+  assert.match(get('destination').textContent, /2 张图片/);
+  assert.equal(payloads.length, calls);
+  const pending = get('analysis-form').fire('submit');
+  assert.deepEqual(payloads.at(-1).data.inputImages, [thumbnail + 'one', thumbnail + 'three']);
+  assert.match(payloads.at(-1).data.question, /图片/);
+  assert.equal(payloads.at(-1).data.imageOutput, undefined);
+  assert.equal(get('input-image-list').children[0].children[2].disabled, true);
+  reply('看图完成');
+  await pending;
+  assert.match(get('result-context').textContent, /附图 2 张/);
+});
+
+test('image validation enforces file, batch and dimension limits without dropping accepted attachments', async () => {
+  const { get } = await startPage();
+  const mib = 1024 * 1024;
+  const file = (name, size, data = thumbnail, type = 'image/png') => ({ name, type, size, data });
+  const add = (...files) => get('input-image-files').fire('change', { target: { files } });
+  await add(file('bad.svg', 1, 'x', 'image/svg+xml'), file('large.png', 6*mib+1), file('zero.png', 0), file('corrupt.png', 1, 'invalid'), file('wide.png', 1, 'too-wide'));
+  const status = get('input-image-status').textContent;
+  for (const name of ['bad.svg', 'large.png', 'zero.png', 'corrupt.png', 'wide.png']) assert.ok(status.includes(name));
+  assert.equal(get('input-image-list').children.length, 0);
+  await add(file('a.png',6*mib), file('b.png',6*mib), file('c.png', 1));
+  assert.match(get('input-image-status').textContent, /合计/);
+  get('input-image-list').children[0].children[2].fire('click');
+  await add(file('c.png',1), file('d.png',1), file('e.png',1), file('f.png',1));
+  assert.equal(get('input-image-list').children.length, 4);
+  assert.match(get('input-image-status').textContent, /4 张/);
+});
+
+test('an unfinished file read blocks sending and cannot resurrect an attachment removed from the draft', async () => {
+  const { get, payloads, reply } = await startPage();
+  let finish;
+  const file = { type: 'image/png', size: 1, name: 'pending.png', data: new Promise(resolve => { finish = resolve; }) };
+  const reading = get('input-image-files').fire('change', { target: { files: [file] } });
+  assert.equal(get('ask').disabled, true);
+  const calls = payloads.length;
+  await get('analysis-form').fire('submit');
+  assert.equal(payloads.length, calls);
+  get('input-image-list').children[0].children[2].fire('click');
+  finish(thumbnail);
+  await reading;
+  assert.equal(get('ask').disabled, false);
+  assert.equal(get('input-image-list').children.length, 0);
+  const done = get('analysis-form').fire('submit');
+  assert.equal(payloads.at(-1).data.inputImages, undefined);
+  reply('文字回复');
+  await done;
 });

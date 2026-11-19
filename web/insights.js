@@ -11,6 +11,10 @@
   let mcpConfig = '';
   const focus = el('subject');
   const question = el('question');
+  const attachments = [];
+  const attachmentTypes = ['image/png', 'image/jpeg', 'image/gif'];
+  const mib = 1024 * 1024;
+  const imageQuestion = '结合所选比赛证据，分析我附上的图片。';
   const provider = el('provider');
   const baseUrl = el('base-url');
   const model = el('model-name');
@@ -20,6 +24,88 @@
     deepseek: { url: 'https://api.deepseek.com', model: 'deepseek-flash', name: 'DeepSeek' }
   };
   let connectionEdited = false;
+  const preferenceKey = 'cs2-insights-model-connection';
+  let preferences = {};
+  try {
+    const saved = JSON.parse(window.localStorage?.getItem(preferenceKey) || '{}');
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) preferences = saved;
+  } catch { /* Browser storage can be unavailable. */ }
+  let keyVersion = 0, keySaved = false, keyBusy = false;
+
+  function destinationURL(value) {
+    try {
+      const url = new URL(value);
+      const local = ['localhost', '[::1]'].includes(url.hostname) || /^127\.\d+\.\d+\.\d+$/.test(url.hostname);
+      if (!url.username && !url.password && !url.search && !url.hash &&
+          (url.protocol === 'https:' || (local && url.protocol === 'http:'))) return url;
+    } catch { /* Incomplete address while editing. */ }
+    return null;
+  }
+
+  function rememberConnection() {
+    const value = provider.value;
+    preferences.provider = value;
+    if (value !== 'server') {
+      const url = presets[value]?.url || baseUrl.value.trim();
+      if (destinationURL(url)) preferences[value] = { url, model: model.value.trim() };
+    }
+    try { window.localStorage?.setItem(preferenceKey, JSON.stringify(preferences)); } catch { /* Optional display preferences. */ }
+  }
+
+  function keyTarget() {
+    const value = provider.value, url = presets[value]?.url || baseUrl.value.trim();
+    return value !== 'server' && destinationURL(url) ? { provider: value, baseUrl: url } : null;
+  }
+
+  function renderKeyActions() {
+    el('save-key').disabled = keyBusy || !apiKey.value.trim() || !keyTarget();
+    el('forget-key').hidden = !keySaved;
+    el('forget-key').disabled = keyBusy;
+    apiKey.required = Boolean(presets[provider.value]) && !keySaved;
+    apiKey.placeholder = keySaved ? '已保存 · 输入新密钥可替换' : presets[provider.value] ? '填写 ' + presets[provider.value].name + ' API 密钥' : '本机免密模型可留空';
+  }
+
+  async function lookupKey() {
+    const version = ++keyVersion, target = keyTarget();
+    keySaved = false;
+    keyBusy = Boolean(target);
+    renderKeyActions();
+    message('key-status', target ? '正在检查本机保存的密钥…' : '');
+    syncActions();
+    if (!target) return;
+    try {
+      const data = await api('/api/insights/credential', { action: 'status', ...target });
+      if (version !== keyVersion) return;
+      keySaved = data.saved === true;
+      message('key-status', keySaved ? '已保存在本机，可直接使用。' : '可立即保存，也可在分析成功后自动保存。');
+    } catch (error) {
+      if (version === keyVersion) message('key-status', '无法读取已保存的密钥：' + error.message, true);
+    } finally {
+      if (version === keyVersion) { keyBusy = false; renderKeyActions(); syncActions(); }
+    }
+  }
+
+  async function updateKey(action, key = '') {
+    const target = keyTarget();
+    if (!target || (action === 'save' && !key)) return;
+    const version = ++keyVersion;
+    keyBusy = true; renderKeyActions(); syncActions();
+    message('key-status', action === 'save' ? '正在保存密钥…' : '正在移除密钥…');
+    try {
+      const payload = { ...target, action };
+      if (action === 'save') payload.apiKey = key;
+      const data = await api('/api/insights/credential', payload);
+      if (version !== keyVersion) return;
+      keySaved = data.saved === true;
+      if (action === 'save' && keySaved && apiKey.value.trim() === key) apiKey.value = '';
+      message('key-status', keySaved ? '已保存在本机，刷新或更新后可继续使用。' : '已移除此地址的密钥。');
+      rememberConnection();
+    } catch (error) {
+      if (version === keyVersion) message('key-status', '密钥操作失败：' + error.message, true);
+    } finally {
+      if (version === keyVersion) { keyBusy = false; renderKeyActions(); syncActions(); }
+    }
+  }
 
   async function api(path, payload, signal) {
     const options = { cache: 'no-store', signal };
@@ -60,18 +146,22 @@
     const preset = presets[value];
     const system = value === 'server';
     apiKey.value = '';
-    apiKey.required = Boolean(preset);
-    apiKey.placeholder = preset ? `填写 ${preset.name} API 密钥` : '本机免密模型可留空';
-    baseUrl.value = preset?.url || '';
+    const stored = preferences[value];
+    baseUrl.value = preset?.url || (value === 'custom' && destinationURL(stored?.url) ? stored.url : '');
     baseUrl.readOnly = Boolean(preset);
-    model.value = preset?.model || '';
+    model.value = typeof stored?.model === 'string' ? stored.model : preset?.model || '';
+    el('model-choices').replaceChildren(...(value === 'glm' ? [preset.model, 'glm-4.6v-flash'] : preset ? [preset.model] : []).map(id => {
+      const option = node('option'); option.value = id; return option;
+    }));
     el('provider-fields').hidden = system;
     el('image-output-option').hidden = Boolean(preset);
     el('image-output').checked = false;
     el('server-config').hidden = false;
-    if (preset) message('server-config', '预设模型用于文字复盘。选好比赛后即可查看本地复盘图。');
+    if (value === 'glm') message('server-config', '看图复盘可在模型名称中选择 glm-4.6v-flash。');
+    if (value === 'deepseek') message('server-config', 'deepseek-flash 支持将截图与比赛数据一起分析。');
     if (system) message('server-config', `使用查看器启动时配置的 ${config.model} @ ${config.endpoint}。`);
     if (value === 'custom') message('server-config', '填写兼容 Chat Completions 的服务地址和模型 ID。');
+    void lookupKey();
     cancelAnswer();
   }
 
@@ -84,23 +174,104 @@
     const name = model.value.trim();
     const key = apiKey.value.trim();
     if (!url || !name) return { error: '请在「模型连接」填写 API 基础地址和模型名称。' };
-    if (preset && !key) return { error: `请在「模型连接」填写 ${preset.name} 的 API 密钥。` };
-    let endpoint;
-    try { endpoint = new URL(url); } catch { return { error: '请输入完整的 API 地址。' }; }
-    const local = ['localhost', '[::1]'].includes(endpoint.hostname) || /^127\.\d+\.\d+\.\d+$/.test(endpoint.hostname);
-    if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash ||
-        !(endpoint.protocol === 'https:' || (local && endpoint.protocol === 'http:'))) {
+    if (!key && keyBusy) return { error: '正在读取或更新此地址的本机密钥…' };
+    if (preset && !key && !keySaved) return { error: `请在「模型连接」填写 ${preset.name} 的 API 密钥。` };
+    const endpoint = destinationURL(url);
+    if (!endpoint) {
       return { error: '请使用 HTTPS 基础地址或本机 HTTP 地址，移除地址中的凭据、查询参数和片段。' };
     }
-    return { label: `${name} @ ${endpoint.origin}`, fields: { baseUrl: url, model: name, apiKey: key } };
+    const auth = !key && keySaved ? { provider: provider.value, useSavedKey: true } : { apiKey: key };
+    return { label: `${name} @ ${endpoint.origin}`, fields: { baseUrl: url, model: name, ...auth } };
   }
 
   function syncActions() {
     const connection = providerOptions();
+    const reading = attachments.some(item => !item.url);
+    const imageInfo = attachments.length ? `、${attachments.length} 张图片` : '';
     el('destination').textContent = connection.error ||
-      `点击发送后，问题及所选比赛的统计证据（含玩家标识）将发送至 ${connection.label}。`;
-    el('ask').disabled = !evidence || !question.value.trim() || !!answerRequest || !!connection.error;
+      `点击发送后，问题${imageInfo}及所选比赛的统计证据（含玩家标识）将发送至 ${connection.label}。`;
+    question.required = !attachments.length;
+    el('ask').disabled = !evidence || (!question.value.trim() && !attachments.length) || reading || !!answerRequest || !!connection.error;
+    el('add-input-images').disabled = !!answerRequest || attachments.length >= 4;
+    for (const item of attachments) item.removeButton.disabled = !!answerRequest;
     el('cancel-analysis').hidden = !answerRequest;
+  }
+
+  function removeAttachment(item) {
+    const index = attachments.indexOf(item);
+    if (index === -1) return;
+    attachments.splice(index, 1);
+    el('input-image-list').replaceChildren(...attachments.map(entry => entry.row));
+    syncActions();
+  }
+
+  function readAttachment(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('无法读取文件。'));
+      reader.onload = () => {
+        const img = new Image();
+        img.onerror = () => reject(new Error('无法识别图片内容。'));
+        img.onload = () => {
+          if (img.naturalWidth > 8192 || img.naturalHeight > 8192 || img.naturalWidth * img.naturalHeight > 16 * 1024 * 1024) {
+            reject(new Error('请将宽高缩小到 8192 像素以内，且总像素不超过 16777216。'));
+          } else resolve(reader.result);
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function addAttachments(files) {
+    if (answerRequest || !files.length) return;
+    const errors = [];
+    const reads = [];
+    for (const file of files) {
+      const name = file.name || '粘贴的截图';
+      if (attachments.length >= 4) { errors.push('每次最多发送 4 张图片。'); break; }
+      const mime = file.type || ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif' })[name.split('.').pop().toLowerCase()];
+      if (!attachmentTypes.includes(mime)) { errors.push(`${name}：请选择 PNG、JPEG 或 GIF。`); continue; }
+      if (!file.size || file.size > 6 * mib) { errors.push(`${name}：文件为空或超过 6 MiB。`); continue; }
+      if (attachments.reduce((n, item) => n + item.size, file.size) > 12 * mib) { errors.push(`${name}：图片合计超过 12 MiB。`); continue; }
+
+      const row = node('li', undefined, 'input-image-item');
+      const preview = node('button', '读取中', 'input-image-preview');
+      preview.type = 'button';
+      preview.disabled = true;
+      preview.setAttribute('aria-label', `查看大图：${name}`);
+      const removeButton = node('button', '移除', 'text-button');
+      removeButton.type = 'button';
+      removeButton.setAttribute('aria-label', `移除图片：${name}`);
+      const item = { size: file.size, row, removeButton, url: '' };
+      removeButton.addEventListener('click', () => {
+        removeAttachment(item);
+        message('input-image-status', '');
+        el('add-input-images').focus();
+      });
+      row.append(preview, node('span', name), removeButton);
+      attachments.push(item);
+      el('input-image-list').append(row);
+      reads.push(readAttachment(file.type ? file : file.slice(0, file.size, mime)).then(url => {
+        if (!attachments.includes(item)) return;
+        item.url = url;
+        const img = node('img');
+        img.alt = '';
+        img.src = url;
+        preview.replaceChildren(img);
+        preview.disabled = false;
+        preview.addEventListener('click', () => showLargeImage({ url }, name));
+      }).catch(error => {
+        if (!attachments.includes(item)) return;
+        removeAttachment(item);
+        errors.push(`${name}：${error.message}`);
+      }));
+    }
+    syncActions();
+    message('input-image-status', errors.join(' '), !!errors.length);
+    await Promise.all(reads);
+    if (errors.length) message('input-image-status', errors.join(' '), true);
+    syncActions();
   }
 
   function cancelAnswer() {
@@ -302,7 +473,7 @@
       if (config.configured) {
         el('server-option').disabled = false;
         el('server-option').hidden = false;
-        if (!connectionEdited) selectProvider('server');
+        if (!connectionEdited && (!Object.hasOwn(presets, preferences.provider) && preferences.provider !== 'custom')) selectProvider('server');
       }
     } catch (error) {
       el('server-config').hidden = false;
@@ -419,10 +590,10 @@
   async function submit(event) {
     event.preventDefault();
     const connection = providerOptions();
-    const prompt = question.value.trim();
-    if (!evidence || !prompt || connection.error || answerRequest) return;
+    const prompt = question.value.trim() || (attachments.length ? imageQuestion : '');
+    if (!evidence || !prompt || attachments.some(item => !item.url) || connection.error || answerRequest) return;
     const currentScope = scope();
-    const description = `${el('scope-summary').textContent} ${focus.selectedOptions[0]?.textContent || ''} · ${connection.label}`;
+    const description = `${el('scope-summary').textContent} ${focus.selectedOptions[0]?.textContent || ''}${attachments.length ? ` · 附图 ${attachments.length} 张` : ''} · ${connection.label}`;
     cancelAnswer();
     const request = new AbortController();
     answerRequest = request;
@@ -430,6 +601,7 @@
     message('analysis-status', '模型正在分析所选比赛…');
     try {
       const payload = { ...currentScope, ...connection.fields, question: prompt };
+      if (attachments.length) payload.inputImages = attachments.map(item => item.url);
       const chartContext = window.InsightsCharts.describe?.(el('local-charts'));
       if (chartContext) payload.chartContext = chartContext;
       if (el('image-output').checked && !el('image-output-option').hidden) payload.imageOutput = true;
@@ -438,6 +610,10 @@
       const answer = typeof result.answer === 'string' ? result.answer.trim() : '';
       const imageCount = renderModelImages(result.images);
       if (!answer && !imageCount) throw new Error('模型未返回可显示的文字或图片。');
+      if (connection.fields.apiKey && apiKey.value.trim() === connection.fields.apiKey) {
+        await updateKey('save', connection.fields.apiKey);
+        if (answerRequest !== request) return;
+      }
       if (result.evidence) { evidence = result.evidence; renderEvidence(result.evidence); }
       el('result-context').textContent = description;
       el('result-question').textContent = prompt;
@@ -464,9 +640,27 @@
   focus.addEventListener('change', () => updateScope());
   el('retry-evidence').addEventListener('click', () => updateScope());
   question.addEventListener('input', syncActions);
+  el('add-input-images').addEventListener('click', () => el('input-image-files').click());
+  el('input-image-files').addEventListener('change', event => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    return addAttachments(files);
+  });
+  question.addEventListener('paste', event => {
+    const clipboard = event.clipboardData;
+    let files = Array.from(clipboard?.files || []).filter(file => file.type.startsWith('image/'));
+    if (!files.length) {
+      files = Array.from(clipboard?.items || []).filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+        .map(item => item.getAsFile()).filter(Boolean);
+    }
+    if (!files.length) return;
+    event.preventDefault();
+    return addAttachments(files);
+  });
   provider.addEventListener('change', () => {
     connectionEdited = true;
     selectProvider(provider.value);
+    rememberConnection();
   });
   el('image-output').addEventListener('change', cancelAnswer);
   el('close-image').addEventListener('click', () => el('image-viewer').close());
@@ -476,10 +670,20 @@
   baseUrl.addEventListener('input', () => {
     connectionEdited = true;
     apiKey.value = '';
+    void lookupKey();
     cancelAnswer();
+  });
+  baseUrl.addEventListener('change', rememberConnection);
+  model.addEventListener('change', rememberConnection);
+  el('save-key').addEventListener('click', () => updateKey('save', apiKey.value.trim()));
+  el('forget-key').addEventListener('click', () => {
+    apiKey.value = '';
+    cancelAnswer();
+    return updateKey('delete');
   });
   [model, apiKey].forEach(input => input.addEventListener('input', () => {
     connectionEdited = true;
+    renderKeyActions();
     cancelAnswer();
   }));
   window.addEventListener('pagehide', () => {
@@ -503,7 +707,7 @@
     try { await navigator.clipboard.writeText(mcpConfig); message('mcp-status', '已复制。'); }
     catch { message('mcp-status', '浏览器无法访问剪贴板，请手动选中并复制上方配置。', true); }
   });
-  selectProvider('glm');
+  selectProvider(Object.hasOwn(presets, preferences.provider) || preferences.provider === 'custom' ? preferences.provider : 'glm');
   void loadConfig();
   void loadLibrary(true);
 })();

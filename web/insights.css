@@ -40,6 +40,7 @@ select { margin-top: 10px; }
 summary { cursor: pointer; font-size: 13px; padding: 4px 0; color: #c4d4dc; }
 .config-fields, #provider-fields { display: grid; gap: 6px; min-width: 0; }
 .config-fields { margin-top: 8px; }
+.key-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .config-fields select { margin-top: 0; }
 .config-fields input[readonly] { background: #1b2229; color: var(--muted); }
 .config-fields label { font-size: 12px; margin-top: 5px; }
@@ -60,6 +61,15 @@ summary { cursor: pointer; font-size: 13px; padding: 4px 0; color: #c4d4dc; }
 #metrics td:first-child { overflow-wrap: anywhere; }
 #evidence-json { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 Consolas, monospace; }
 #analysis-form { margin: 24px 0; }
+.input-image-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; }
+.input-image-toolbar .hint { flex: 1 1 220px; }
+#input-image-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 0; padding: 0; list-style: none; }
+#input-image-list:empty, #input-image-status:empty { display: none; }
+.input-image-item { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; align-items: center; gap: 8px; width: min(100%, 260px); border: 1px solid var(--line); border-radius: 5px; padding: 5px 8px 5px 5px; }
+.input-image-item span { min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+.input-image-preview { height: 42px; padding: 0; overflow: hidden; background: #141b21; }
+.input-image-preview img { display: block; width: 100%; height: 100%; object-fit: contain; }
+#input-image-status { margin-top: 6px; }
 .field-title { display: block; margin-bottom: 10px; }
 .submit-row { margin-top: 10px; justify-content: flex-end; flex-wrap: wrap; }
 .submit-row .hint { flex: 1 1 200px; }

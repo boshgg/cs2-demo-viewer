@@ -140,6 +140,7 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("GET /api/demos/{id}/statistics", a.statisticsResult)
 	mux.HandleFunc("GET /api/analyses", a.analyses)
 	mux.HandleFunc("GET /api/insights/config", insightsConfig)
+	mux.HandleFunc("POST /api/insights/credential", insightsCredential)
 	mux.HandleFunc("GET /api/insights/mcp-config", insightsMCPConfig)
 	mux.HandleFunc("POST /api/insights/evidence", a.insightsEvidence)
 	mux.HandleFunc("POST /api/insights/ask", a.insightsAsk)

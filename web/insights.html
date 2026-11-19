@@ -46,10 +46,12 @@
             <label for="base-url">API 基础地址</label>
             <input type="url" id="base-url" placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false">
             <label for="model-name">模型名称</label>
-            <input id="model-name" placeholder="服务商提供的模型 ID" autocomplete="off" spellcheck="false">
+            <input id="model-name" list="model-choices" placeholder="服务商提供的模型 ID" autocomplete="off" spellcheck="false">
+            <datalist id="model-choices"></datalist>
             <label for="api-key">API 密钥</label>
             <input type="password" id="api-key" autocomplete="off" spellcheck="false">
-            <p class="hint">切换厂商或刷新页面后，需重新填写密钥。</p>
+            <div class="key-actions"><button id="save-key" type="button" disabled>保存密钥</button><button id="forget-key" class="text-button" type="button" hidden>移除已保存的密钥</button></div>
+            <p id="key-status" class="hint" role="status"></p>
           </div>
           <div id="image-output-option" hidden>
             <label><input type="checkbox" id="image-output"> 请求模型出图</label>
@@ -85,6 +87,13 @@
       <form id="analysis-form" autocomplete="off">
         <label for="question" class="field-title">复盘问题</label>
         <textarea id="question" rows="3" maxlength="4000" required placeholder="例如：哪些回合最能解释这支队伍的失利？下一场应优先练什么？"></textarea>
+        <div class="input-image-toolbar">
+          <button type="button" id="add-input-images">添加图片</button>
+          <input type="file" id="input-image-files" hidden multiple accept="image/png,image/jpeg,image/gif">
+          <span class="hint">也可在问题框粘贴截图。支持 PNG、JPEG、GIF，最多 4 张，单张 6 MiB，合计 12 MiB。</span>
+        </div>
+        <ul id="input-image-list" aria-label="随问题发送的图片"></ul>
+        <p id="input-image-status" class="hint" role="status"></p>
         <div class="submit-row">
           <p class="hint" id="destination" aria-live="polite"></p>
           <button type="submit" id="ask" class="primary" disabled>发送并分析</button>
