@@ -2,10 +2,27 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"reflect"
 	"testing"
 )
+
+func TestPlantTimeDecimalSecondEdges(t *testing.T) {
+	for _, v := range []struct {
+		at, plant float64
+		want      int
+	}{
+		{1.14, .14, 1}, {math.Nextafter(1.14, 0), .14, 0},
+		{.14, 1.14, -1}, {math.Nextafter(.14, 0), 1.14, -2},
+		{42.37, 42.37, 0}, {math.Nextafter(42.37, 0), 42.37, -1},
+	} {
+		sec, next := analysisPlantTimeBin(v.at, v.plant)
+		if sec != v.want || next <= v.at {
+			t.Fatalf("at %v plant %v: got bin %d ending at %v, want %d", v.at, v.plant, sec, next, v.want)
+		}
+	}
+}
 
 func TestPlantTimeIntersectsBothClocksForMovementAndEvents(t *testing.T) {
 	d := eventTimingFixture()

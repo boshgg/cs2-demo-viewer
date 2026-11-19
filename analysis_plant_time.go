@@ -32,12 +32,24 @@ func (bins analysisPlantTimeBins) add(pos Position, grid analysisGridKey, plantS
 // absolute timestamp handles floating-point cancellation at second boundaries.
 func analysisPlantTimeBin(t, origin float64) (int, float64) {
 	second := int(math.Floor(t - origin))
-	if t >= origin+float64(second+1) {
+	// Replay timestamps are decimal seconds. For example, adding a binary
+	// float second to 0.14 points *past* the recorded timestamp 1.14.
+	// Use exact integer microseconds when the origin roundtrips without loss.
+	const scale = 1_000_000
+	originMicros := math.Round(origin * scale)
+	decimalClock := math.Abs(origin) < 1<<32 && math.Abs(t) < 1<<32 && originMicros/scale == origin
+	boundary := func(n int) float64 {
+		if decimalClock {
+			return float64(int64(originMicros)+int64(n)*scale) / scale
+		}
+		return origin + float64(n)
+	}
+	if t >= boundary(second+1) {
 		second++
-	} else if t < origin+float64(second) {
+	} else if t < boundary(second) {
 		second--
 	}
-	return second, origin + float64(second+1)
+	return second, boundary(second + 1)
 }
 
 func analysisRoundTimeBin(t float64, anchor *float64) (int, float64) {
@@ -47,10 +59,11 @@ func analysisRoundTimeBin(t float64, anchor *float64) (int, float64) {
 	if t < *anchor {
 		return -1, *anchor
 	}
-	if t >= *anchor+115 {
+	second, next := analysisPlantTimeBin(t, *anchor)
+	if second >= 115 {
 		return 115, math.Inf(1)
 	}
-	return analysisPlantTimeBin(t, *anchor)
+	return second, next
 }
 
 func (bins analysisPlantTimeBins) movement(pos Position, start, end, plant float64, anchor *float64) {
