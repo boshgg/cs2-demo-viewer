@@ -75,12 +75,36 @@
     return alias ? `alias:${alias.normalize('NFKC').toLocaleLowerCase()}` : String(teamId || `${demoId}:unknown`);
   }
   function floorOf(z, lowerMaxZ) { return valid(lowerMaxZ) ? (z < lowerMaxZ ? 'lower' : 'upper') : 'all'; }
+  const isRound = n => Number.isSafeInteger(n) && n > 0;
+  // References are local to one demo. Expand each matching group only once
+  // per metric, even when many players, seconds or map cells share that group.
+  function addDemoRoundCounts(counts, demo, references, utilityRounds) {
+    const heatRounds = new Set(), groups = demo.roundEvidenceVersion === 1 && demo.roundSets;
+    for (let i = 0; i < heatMetrics.length; i++) {
+      const rounds = new Set(), name = heatMetrics[i];
+      for (const ref of references[i]) {
+        const group = isRound(ref) && groups?.[ref];
+        if (!Array.isArray(group) || !group.length || !group.every(isRound)) {
+          counts[name] = counts.heatmap = null;
+          break;
+        }
+        for (const round of group) rounds.add(round);
+      }
+      if (counts[name] !== null) counts[name] += rounds.size;
+      if (counts.heatmap !== null) for (const round of rounds) heatRounds.add(round);
+    }
+    if (counts.heatmap !== null) counts.heatmap += heatRounds.size;
+    if (utilityRounds.has(null)) counts.utilities = null;
+    else if (counts.utilities !== null) counts.utilities += utilityRounds.size;
+  }
   // Both clocks were recorded for the same observation. Apply the plant window
   // first so round-clock coverage describes only the chosen plant-relative span.
-  function addPlantTimeline(rows, window, movementTime, includeFloor, cells, totals, coverage, observed) {
+  function addPlantTimeline(source, window, movementTime, includeFloor, cells, totals, coverage, observed, references) {
+    const rows = source.plantTimeline;
     let populated = false;
     if (!Array.isArray(rows)) return false;
-    for (const row of rows) {
+    for (let index = 0; index < rows.length; index++) {
+      const row = rows[index];
       if (!Array.isArray(row) || row.length !== 7) continue;
       const [x, y, z, plantSecond, roundSecond, metric, value] = row;
       if (!Number.isSafeInteger(plantSecond) || plantSecond < window.start || plantSecond >= window.end ||
@@ -95,6 +119,7 @@
       c['total' + unit] += value;
       c[period + unit] += value;
       if (movementTime && (roundSecond < movementTime.start || roundSecond >= movementTime.end)) continue;
+      references[metric - 3].add(source.plantRoundRefs?.[index]);
       const key = `${x},${y},${z}`;
       if (!cells.has(key)) cells.set(key, [x, y, z, 0, 0, 0, 0]);
       cells.get(key)[metric] += value;
@@ -120,10 +145,14 @@
     const utilityTimeCounts = Object.fromEntries(utilityTimeBuckets.map(bucket => [bucket.key, 0]));
     const selectedTime = utilityTimeBuckets.some(bucket => bucket.key === filter.utilityTime) ? filter.utilityTime : 'all';
     const totals = { movementSeconds: 0, engagements: 0, deaths: 0, shots: 0, utilities: 0, players: 0, teams: 0, demos: 0, rounds: 0 };
+    const roundCounts = { selected: 0, heatmap: 0, movement: 0, engagements: 0, deaths: 0, shots: 0, utilities: 0 };
     const selectedFloor = filter.floor || 'all';
     const includeFloor = z => selectedFloor === 'all' || floorOf(z, filter.lowerMaxZ) === selectedFloor;
     for (const d of demos) {
       if (d.map !== map || !chosen(ids, d.id)) continue;
+      if (!Number.isSafeInteger(d.roundCount) || d.roundCount < 0) roundCounts.selected = null;
+      else if (roundCounts.selected !== null) roundCounts.selected += d.roundCount;
+      const roundRefs = heatMetrics.map(() => new Set()), utilityRounds = new Set();
       let contributed = false;
       const observedMetrics = [false, false, false, false];
       const phaseFiltered = plantPhase !== 'all';
@@ -136,8 +165,11 @@
       for (const source of d.series || []) {
         const playerId = String(source.playerId), teamId = teamKey(d.id, source.teamId, filter.teamAliases);
         if (!chosen(players, playerId) || !chosen(teams, teamId) || !chosen(sides, Number(source.side))) continue;
+        if ((plantTime && d.plantTimeVersion !== 1) || (!plantTime && phaseFiltered && !phaseAvailable)) {
+          for (const refs of roundRefs) refs.add(null);
+        }
         if (plantTime) {
-          if (d.plantTimeVersion === 1 && addPlantTimeline(source.plantTimeline, plantWindow, movementTime, includeFloor, cells, totals, heatmapCoverage, observedMetrics)) {
+          if (d.plantTimeVersion === 1 && addPlantTimeline(source, plantWindow, movementTime, includeFloor, cells, totals, heatmapCoverage, observedMetrics, roundRefs)) {
             includedPlayers.add(playerId); includedTeams.add(teamId); contributed = true;
           }
           continue;
@@ -147,7 +179,9 @@
         let populated = false;
         let fullSeconds = 0, fullCellCount = 0;
         const fullEvents = [0, 0, 0];
-        for (const row of series.cells || []) {
+        const fullRows = series.cells || [];
+        for (let index = 0; index < fullRows.length; index++) {
+          const row = fullRows[index];
           if (!Array.isArray(row) || row.length < 6 || !row.slice(0, 3).every(valid) || !includeFloor(row[2])) continue;
           const values = [3, 4, 5, 6].map(i => valid(row[i]) && row[i] > 0 ? row[i] : 0);
           if (!values.some(v => v > 0)) continue;
@@ -163,18 +197,24 @@
           const key = `${row[0]},${row[1]},${row[2]}`;
           if (!cells.has(key)) cells.set(key, [row[0], row[1], row[2], 0, 0, 0, 0]);
           const target = cells.get(key);
-          values.forEach((v, i) => { target[i + 3] += v; });
+          values.forEach((v, i) => {
+            target[i + 3] += v;
+            if (v > 0) roundRefs[i].add(series.roundRefs?.cells?.[index * 4 + i]);
+          });
           totals.movementSeconds += values[0]; totals.engagements += values[1]; totals.deaths += values[2]; totals.shots += values[3];
         }
         if (movementTime) {
           let timedSeconds = 0;
-          if (timingAvailable) for (const row of series.movementTimeline || []) {
+          const movementRows = series.movementTimeline || [];
+          if (timingAvailable) for (let index = 0; index < movementRows.length; index++) {
+            const row = movementRows[index];
             if (!Array.isArray(row) || row.length < 5 || !valid(row[0]) || !valid(row[1]) || !valid(row[2]) || !includeFloor(row[2]) || !Number.isInteger(row[3]) || row[3] < 0 || row[3] >= movementDuration || !valid(row[4]) || row[4] <= 0) continue;
             timedSeconds += row[4];
             populated = true;
             // Bins represent [second, second + 1), so an end of 115
             // includes bin 114, never the post-countdown observations.
             if (row[3] < movementTime.start || row[3] >= movementTime.end) continue;
+            roundRefs[0].add(series.roundRefs?.movementTimeline?.[index]);
             const key = `${row[0]},${row[1]},${row[2]}`;
             if (!cells.has(key)) cells.set(key, [row[0], row[1], row[2], 0, 0, 0, 0]);
             cells.get(key)[3] += row[4];
@@ -197,6 +237,7 @@
             const deficit = fullSeconds - timedSeconds - unknownSeconds - beyondSeconds;
             if (deficit > fullCellCount * .00005 + 1e-6) unknownSeconds += deficit;
           }
+          if (!timingAvailable && unknownSeconds > 0) roundRefs[0].add(null);
           const observedSeconds = timedSeconds + unknownSeconds + beyondSeconds;
           movementCoverage.totalSeconds += observedSeconds;
           movementCoverage.timedSeconds += timedSeconds;
@@ -205,7 +246,9 @@
           if (observedSeconds > 0) observedMetrics[0] = true;
 
           const timed = [0, 0, 0], unknown = [0, 0, 0], beyond = [0, 0, 0];
-          if (eventsAvailable) for (const row of series.eventTimeline || []) {
+          const eventRows = series.eventTimeline || [];
+          if (eventsAvailable) for (let index = 0; index < eventRows.length; index++) {
+            const row = eventRows[index];
             if (!Array.isArray(row) || row.length < 7 || !valid(row[0]) || !valid(row[1]) || !valid(row[2]) || !includeFloor(row[2]) || !Number.isInteger(row[3]) || row[3] < 0 || row[3] >= movementDuration) continue;
             const inRange = row[3] >= movementTime.start && row[3] < movementTime.end;
             let target;
@@ -214,6 +257,7 @@
               if (!valid(value) || value <= 0) continue;
               timed[i] += value; populated = true;
               if (!inRange) continue;
+              roundRefs[i + 1].add(series.roundRefs?.eventTimeline?.[index]);
               if (!target) {
                 const key = `${row[0]},${row[1]},${row[2]}`;
                 if (!cells.has(key)) cells.set(key, [row[0], row[1], row[2], 0, 0, 0, 0]);
@@ -234,6 +278,7 @@
             // As with movement, each metric has independent Z evidence.
             // Integer event counts need no per-cell rounding allowance.
             else if (selectedFloor === 'all') unknown[i] += Math.max(0, fullEvents[i] - timed[i] - unknown[i] - beyond[i]);
+            if (!eventsAvailable && unknown[i] > 0) roundRefs[i + 1].add(null);
             const observed = timed[i] + unknown[i] + beyond[i], coverage = heatmapCoverage[eventMetrics[i]];
             coverage.totalCount += observed; coverage.timedCount += timed[i]; coverage.unknownCount += unknown[i]; coverage.beyondCount += beyond[i];
             if (observed > 0) { observedMetrics[i + 1] = true; populated = true; }
@@ -270,8 +315,10 @@
         if (playerId) includedPlayers.add(playerId);
         includedTeams.add(teamId); contributed = true;
         if (!timeMatches || !phaseMatches) continue;
+        utilityRounds.add(isRound(u.round) ? u.round : null);
         utilities.push({ ...u, plantPhase: phase, start: u.throwObserved && position(u.start) ? u.start : null, demoId: d.id, demoName: d.name, map: d.map, playerId, teamId, key, timeBucket });
       }
+      addDemoRoundCounts(roundCounts, d, roundRefs, utilityRounds);
       if (contributed) { includedDemos.add(d.id); totals.rounds += Number(d.roundCount) || 0; }
     }
     totals.utilities = utilities.length; totals.players = includedPlayers.size; totals.teams = includedTeams.size; totals.demos = includedDemos.size;
@@ -290,7 +337,7 @@
         }
       }
     }
-    return { map, cells: [...cells.values()], utilities, utilityTimeCounts, utilityPlantPhase, utilityPlantPhaseCounts, totals, movementTime, movementCoverage, heatmapCoverage, plantPhase, plantTime, missingPlantTimeDemos, missingPlantPhaseDemos, unknownPlantRounds };
+    return { map, cells: [...cells.values()], utilities, utilityTimeCounts, utilityPlantPhase, utilityPlantPhaseCounts, totals, roundCounts, movementTime, movementCoverage, heatmapCoverage, plantPhase, plantTime, missingPlantTimeDemos, missingPlantPhaseDemos, unknownPlantRounds };
   }
   function clusterUtilities(input, options = {}) {
     const landing = Math.max(1, Math.min(1024, Number(options.landing) || 128));

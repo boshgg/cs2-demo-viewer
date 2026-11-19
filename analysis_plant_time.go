@@ -17,13 +17,14 @@ type analysisPlantTimeKey struct {
 
 type analysisPlantTimeBins map[analysisPlantTimeKey]*analysisEventValue
 
-func (bins analysisPlantTimeBins) add(pos Position, grid analysisGridKey, plantSecond, roundSecond, metric int, amount float64) {
+func (bins analysisPlantTimeBins) add(pos Position, grid analysisGridKey, plantSecond, roundSecond, metric int, amount float64, round int) {
 	key := analysisPlantTimeKey{grid, plantSecond, roundSecond, metric}
 	v := bins[key]
 	if v == nil {
 		v = &analysisEventValue{}
 		bins[key] = v
 	}
+	v.contributors.add(round)
 	v.count += amount
 	v.zSum += amount * pos.Z
 }
@@ -66,7 +67,7 @@ func analysisRoundTimeBin(t float64, anchor *float64) (int, float64) {
 	return second, next
 }
 
-func (bins analysisPlantTimeBins) movement(pos Position, start, end, plant float64, anchor *float64) {
+func (bins analysisPlantTimeBins) movement(pos Position, start, end, plant float64, anchor *float64, round int) {
 	grid := analysisGrid(pos)
 	// One observed interval can cross either or both independent clocks.
 	for start < end {
@@ -76,7 +77,7 @@ func (bins analysisPlantTimeBins) movement(pos Position, start, end, plant float
 		if stop <= start { // Malformed clocks can exceed float64 second resolution.
 			return
 		}
-		bins.add(pos, grid, plantSecond, roundSecond, 3, stop-start)
+		bins.add(pos, grid, plantSecond, roundSecond, 3, stop-start, round)
 		start = stop
 	}
 }

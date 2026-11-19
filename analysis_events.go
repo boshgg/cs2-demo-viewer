@@ -14,12 +14,15 @@ type analysisEventKey struct {
 	grid           analysisGridKey
 	second, metric int // second -1 is unknown; 115 is beyond the countdown
 }
-type analysisEventValue struct{ count, zSum float64 }
+type analysisEventValue struct {
+	count, zSum  float64
+	contributors analysisRoundSet
+}
 type analysisEventAccumulator struct {
 	bins map[analysisEventKey]*analysisEventValue
 }
 
-func (a *analysisEventAccumulator) add(pos Position, metric int, when float64, anchor *float64) {
+func (a *analysisEventAccumulator) add(pos Position, metric int, when float64, anchor *float64, round int) {
 	if !analysisPosition(&pos) || metric < 4 || metric > 6 || !analysisFinite(when) {
 		return
 	}
@@ -43,6 +46,7 @@ func (a *analysisEventAccumulator) add(pos Position, metric int, when float64, a
 		v = &analysisEventValue{}
 		a.bins[key] = v
 	}
+	v.contributors.add(round)
 	v.count++
 	v.zSum += pos.Z
 }

@@ -101,7 +101,7 @@ func (p *analysisPlantPhases) movement(key analysisSeriesKey, round int, pos Pos
 	}
 	split := p.boundary[round]
 	if p.timeline != nil && analysisFinite(split) {
-		p.bins(key).movement(pos, start, end, split, anchor)
+		p.bins(key).movement(pos, start, end, split, anchor, round)
 	}
 	if p.series == nil {
 		return
@@ -111,8 +111,8 @@ func (p *analysisPlantPhases) movement(key analysisSeriesKey, round int, pos Pos
 			return
 		}
 		s := p.part(key, phase, round)
-		s.addCell(pos, 3, end-start)
-		s.movement.add(pos, start, end, anchor)
+		s.addCell(pos, 3, end-start, round)
+		s.movement.add(pos, start, end, anchor, round)
 	}
 	add("pre", start, math.Min(end, split))
 	add("post", math.Max(start, split), end)
@@ -144,14 +144,14 @@ func (p *analysisPlantPhases) event(key analysisSeriesKey, round int, pos Positi
 	if plant := p.boundary[round]; p.timeline != nil && analysisFinite(plant) {
 		plantSecond, _ := analysisPlantTimeBin(when, plant)
 		roundSecond, _ := analysisRoundTimeBin(when, anchor)
-		p.bins(key).add(pos, analysisGrid(pos), plantSecond, roundSecond, metric, 1)
+		p.bins(key).add(pos, analysisGrid(pos), plantSecond, roundSecond, metric, 1, round)
 	}
 	if p.series == nil {
 		return
 	}
 	s := p.part(key, phase, round)
-	s.addCell(pos, metric, 1)
-	s.events.add(pos, metric, when, anchor)
+	s.addCell(pos, metric, 1, round)
+	s.events.add(pos, metric, when, anchor, round)
 }
 func (p *analysisPlantPhases) bins(key analysisSeriesKey) analysisPlantTimeBins {
 	bins := p.timeline[key]
@@ -174,14 +174,16 @@ func (p *analysisPlantPhases) heatmaps(key analysisSeriesKey) map[string]Analysi
 
 // The first frame pass resolves team identity and verifies plant coverage.
 // The second retains only adjacent frames and streams each type of event.
-func upgradeAnalysisPlantPhases(ctx context.Context, path string, replay *analysisTimingReplay, summary map[string]json.RawMessage, needPhase, needTime bool) error {
+func upgradeAnalysisPlantPhases(ctx context.Context, path string, replay *analysisTimingReplay, summary map[string]json.RawMessage, needPhase, needTime, needRounds bool) error {
 	if !replay.FramesPresent {
 		return fmt.Errorf("replay has no frame array")
 	}
 	windows := analysisWindows(replay.Rounds)
 	p := newAnalysisPlantPhases(replay.Rounds, replay.Events, windows)
 	if !needPhase {
-		p.series = nil
+		if !needRounds {
+			p.series = nil
+		}
 		// Keep coverage restrictions from the phase summary being extended.
 		var unknown []int
 		if raw := summary["plantPhaseUnknownRounds"]; len(raw) > 0 {
@@ -193,7 +195,7 @@ func upgradeAnalysisPlantPhases(ctx context.Context, path string, replay *analys
 			p.unknown[round] = true
 		}
 	}
-	if !needTime {
+	if !needTime && !needRounds {
 		p.timeline = nil
 	}
 	rosters := map[int]map[int]*analysisRoster{}
@@ -218,8 +220,20 @@ func upgradeAnalysisPlantPhases(ctx context.Context, path string, replay *analys
 	}
 	anchors := analysisMovementAnchors(replay.Rounds)
 	deaths := analysisDeathTimes(replay.Events, windows)
+	fullSeries := map[analysisSeriesKey]*analysisSeriesValue{}
+	fullFor := func(k analysisSeriesKey) *analysisSeriesValue {
+		if fullSeries[k] == nil {
+			fullSeries[k] = &analysisSeriesValue{cells: map[analysisGridKey]*analysisCellValue{}}
+		}
+		return fullSeries[k]
+	}
 	observer := analysisEventObserver{windows: windows, seen: map[analysisEngagementKey]bool{}, key: keyFor, add: func(k analysisSeriesKey, pos Position, metric, round int, when float64) {
 		p.event(k, round, pos, metric, when, anchors[round])
+		if needRounds {
+			s := fullFor(k)
+			s.addCell(pos, metric, 1, round)
+			s.events.add(pos, metric, when, anchors[round], round)
+		}
 	}}
 	var previous Frame
 	havePrevious := false
@@ -227,7 +241,13 @@ func upgradeAnalysisPlantPhases(ctx context.Context, path string, replay *analys
 		if havePrevious {
 			round := previous.Round
 			analysisObserveMovement(previous, next, windows, deaths, func(player PlayerFrame, pos Position, start, end float64) {
-				p.movement(keyFor(player.ID, "", round, player.Team), round, pos, start, end, anchors[round])
+				key := keyFor(player.ID, "", round, player.Team)
+				p.movement(key, round, pos, start, end, anchors[round])
+				if needRounds {
+					s := fullFor(key)
+					s.addCell(pos, 3, end-start, round)
+					s.movement.add(pos, start, end, anchors[round], round)
+				}
 			})
 		}
 		previous = next
@@ -242,6 +262,7 @@ func upgradeAnalysisPlantPhases(ctx context.Context, path string, replay *analys
 			return err
 		}
 	}
+	dictionary := newAnalysisRoundDictionary()
 	for _, raw := range series {
 		if raw == nil {
 			continue
@@ -272,6 +293,15 @@ func upgradeAnalysisPlantPhases(ctx context.Context, path string, replay *analys
 				delete(raw, "plantTimeline")
 			}
 		}
+		if needRounds {
+			if err := dictionary.patch(raw, fullSeries[key], p, key); err != nil {
+				return err
+			}
+		}
+	}
+	if needRounds {
+		summary["roundSets"], _ = json.Marshal(dictionary.sets)
+		summary["roundEvidenceVersion"], _ = json.Marshal(analysisRoundEvidenceVersion)
 	}
 	if _, found := summary["series"]; found {
 		rows, err := json.Marshal(series)

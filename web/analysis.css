@@ -110,3 +110,5 @@ html[data-filter-resizing] body{user-select:none}html[data-filter-resizing=width
 .utility-phase-buttons button { flex-direction: column; align-items: flex-start; gap: 3px; }
 .utility-phase-buttons button[aria-pressed="true"] { background: #26433f; border-color: #6bcfc6; color: #c0f6ef; }
 #utility-phase-coverage { color: #d9bd86; }
+.analysis-heading #round-summary { margin-top: 4px; min-height: 1.5em; color: #c4d6df; font-size: 12px; }
+.stat-grid .round-count { min-height: 1.5em; color: #c2cfd8; font-size: 11px; line-height: 1.5; margin-bottom: 2px; white-space: normal; }

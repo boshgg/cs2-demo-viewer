@@ -22,11 +22,11 @@ func TestMovementSecondsSplitAtExactBinAndCountdownEnd(t *testing.T) {
 	a := analysisMovementAccumulator{}
 	anchor := 10.0
 	p := Position{130, 70, 12}
-	a.add(p, 10, 10.5, &anchor)
-	a.add(p, 10.9, 11.15, &anchor)
-	a.add(p, 124.9, 125.15, &anchor)
-	a.add(p, 126, 126.25, &anchor)
-	a.add(Position{130, 70, 200}, 140, 140.25, nil)
+	a.add(p, 10, 10.5, &anchor, 1)
+	a.add(p, 10.9, 11.15, &anchor, 1)
+	a.add(p, 124.9, 125.15, &anchor, 1)
+	a.add(p, 126, 126.25, &anchor, 1)
+	a.add(Position{130, 70, 200}, 140, 140.25, nil, 1)
 	var s AnalysisSeries
 	a.fill(&s)
 	bins := map[int]float64{}

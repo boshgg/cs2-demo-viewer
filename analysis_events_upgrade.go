@@ -42,7 +42,7 @@ func upgradeAnalysisEvents(ctx context.Context, path string, replay *analysisTim
 				v = &analysisEventAccumulator{}
 				result[key] = v
 			}
-			v.add(pos, metric, when, anchors[round])
+			v.add(pos, metric, when, anchors[round], round)
 		},
 	}
 	err := streamAnalysisReplayWithVisitor(ctx, path, nil, analysisReplayVisitor{damage: observer.damage, death: observer.death, shot: observer.shot})

@@ -284,14 +284,14 @@ test('scale switching recolors the raster and keeps page and PNG legends consist
   await ui.get('export-image').click();
   assert.equal(ui.downloads.length, 1); assert.equal(ui.downloads[0].filename, 'de_mirage-analysis.png');
   const output = ui.canvases.at(-1), context = output.context;
-  assert.equal(output.width, 1600); assert.equal(output.height, 1604);
+  assert.equal(output.width, 1600); assert.equal(output.height, 1706);
   assert.equal(context.draws[0][0], ui.main);
   assert.deepEqual(context.draws[0].slice(1), [0, 80, 800, 600]);
   assert.match(context.texts.map(item => item[0]).join('\n'), /移动 · 线性 · 相对当前筛选峰值/);
   assert.deepEqual(context.gradients[0].stops, heatmap.stops.map(([at, rgb]) => [at, `rgb(${rgb.join(',')})`]));
   const forty = context.texts.find(([text]) => text === '40%');
   assert.equal(forty[1], 232);
-  assert.ok(context.texts.every(([, , y]) => y < 802), 'export labels fit in the output');
+  assert.ok(context.texts.every(([, , y]) => y < output.height / 2), 'export labels fit in the output');
 });
 
 test('hover density is cleared when zoom, reset, resize or the selected layer changes', async () => {
@@ -1446,6 +1446,40 @@ function movementDemo(id = 'movement') {
   return demo;
 }
 function heatMetrics(ui) { return ['movement', 'engagements', 'deaths', 'shots'].map(key => ui.get(`metric-${key}`).textContent); }
+
+test('map and metric cards distinguish event counts, contributing rounds and all selected rounds', async () => {
+  const demo = utilityDemo('rounds');
+  demo.roundCount = 3;
+  demo.roundEvidenceVersion = 1;
+  demo.roundSets = [[], [1], [2], [1, 2]];
+  demo.series[0].cells = [[256, 768, 0, 100, 5, 2, 10], [384, 768, 0, 1, 0, 0, 0]];
+  demo.series[0].roundRefs = { cells: [3, 1, 2, 1, 2, 0, 0, 0] };
+  demo.utilities[0].round = 3;
+  const ui = await page([demo], { worker: true });
+  assert.equal(ui.get('round-summary').textContent, '热力图覆盖 2 个回合 · 所选比赛共 3 个回合');
+  assert.equal(ui.get('metric-deaths').textContent, '2');
+  for (const [key, count] of Object.entries({ movement: 2, engagements: 1, deaths: 1, shots: 1, utilities: 2 })) {
+    assert.equal(ui.get(`rounds-${key}`).textContent, `来自 ${count} 个回合`);
+  }
+  await ui.change('analysis-utility-time', '5-20');
+  assert.equal(ui.get('rounds-utilities').textContent, '来自 1 个回合');
+  assert.equal(ui.get('rounds-movement').textContent, '来自 2 个回合');
+  await ui.get('export-image').click();
+  const exported = ui.canvases.at(-1).context.texts.map(entry => entry[0]).join('\n');
+  assert.match(exported, /热力图覆盖 2 个回合 · 所选比赛共 3 个回合/);
+  assert.match(exported, /死亡 1 个回合/);
+  assert.match(exported, /道具投掷 .*来自 1 个回合/);
+  ui.setWorkerDeferred(true);
+  await ui.get('players-none').click();
+  assert.equal(ui.get('round-summary').textContent, '');
+  assert.equal(ui.get('rounds-deaths').textContent, '');
+  await ui.replyWorker();
+  assert.equal(ui.get('round-summary').textContent, '热力图覆盖 0 个回合 · 所选比赛共 3 个回合');
+  assert.equal(ui.get('rounds-deaths').textContent, '来自 0 个回合');
+  const legacy = await page([{ ...dataset('legacy'), roundCount: 3 }]);
+  assert.equal(legacy.get('rounds-deaths').textContent, '回合数未知');
+  assert.equal(legacy.get('round-summary').textContent, '热力图回合数未知 · 所选比赛共 3 个回合');
+});
 
 test('plant phase intersects the current window for every layer, persists, and is included in PNG exports', async () => {
   const demo = movementDemo();

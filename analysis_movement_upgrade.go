@@ -183,7 +183,7 @@ func upgradeAnalysisMovement(ctx context.Context, path string, replay *analysisT
 					value = &analysisMovementAccumulator{}
 					result[key] = value
 				}
-				value.add(pos, start, end, anchors[f.Round])
+				value.add(pos, start, end, anchors[f.Round], f.Round)
 			})
 		}
 		previous = &next

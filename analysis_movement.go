@@ -15,6 +15,7 @@ type analysisMovementKey struct {
 	second int
 }
 type analysisMovementValue struct {
+	contributors                   analysisRoundSet
 	seconds, unknown, beyond, zSum float64
 }
 type analysisMovementAccumulator struct {
@@ -142,7 +143,7 @@ func analysisMovementAnchors(rounds []Round) map[int]*float64 {
 	return result
 }
 
-func (a *analysisMovementAccumulator) add(p Position, start, end float64, anchor *float64) {
+func (a *analysisMovementAccumulator) add(p Position, start, end float64, anchor *float64, round int) {
 	if !analysisPosition(&p) || !analysisFinite(start) || !analysisFinite(end) || end <= start {
 		return
 	}
@@ -190,6 +191,7 @@ func (a *analysisMovementAccumulator) add(p Position, start, end float64, anchor
 			v = &analysisMovementValue{}
 			a.timed[key] = v
 		}
+		v.contributors.add(round)
 		v.seconds += seconds
 		v.zSum += p.Z * seconds
 		start = stop

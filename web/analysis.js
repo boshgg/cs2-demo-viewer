@@ -210,6 +210,7 @@
   function invalidateHeatmapTime() {
     ++state.request; movementPending = true; analysisPending = true; $('computing').hidden = false; $('export-image').disabled = true;
     for (const metric of metrics) $(`metric-${metric}`).textContent = '计算中…';
+    renderRoundCounts(null, true);
     renderMovementCoverage(); rebuildHeat();
   }
   function setMovementEdge(edge, flush = false) {
@@ -236,6 +237,7 @@
       ++state.request; state.result = null; state.selectedGroup = state.selectedThrow = null; clearHeat(); renderLegend();
       $('computing').hidden = true; $('analysis-empty').hidden = false; $('selection-empty').hidden = true;
       $('selection-summary').textContent = '选择比赛、队伍或玩家，开始分析。';
+      renderRoundCounts(null);
       for (const id of ['metric-movement', 'metric-engagements', 'metric-deaths', 'metric-shots', 'metric-utilities']) $(id).textContent = '—';
       $('export-image').disabled = $('export-csv').disabled = true; renderMovementCoverage(); renderUtilityGroups(); draw(); save(); renderPlayback(); return;
     }
@@ -249,6 +251,7 @@
     analysisPending = true;
     if (options.autoplay) playbackPending = { id, range: { ...options.range } };
     $('computing').hidden = false;
+    if (!options.autoplay) renderRoundCounts(null, options.movementOnly);
     $('export-image').disabled = $('export-csv').disabled = true;
     if (!options.movementOnly) {
       const wasShowingMarkers = !!state.selectedGroup;
@@ -267,6 +270,18 @@
     save(); renderPlayback();
   }
   function analysisFailed(error) { analysisPending = false; pausePlayback('计算失败，播放已暂停。可调整筛选后重试。', true); message(`分析失败：${error}`); $('computing').hidden = true; }
+  function roundCountLabel(count, prefix = '') {
+    if (!Number.isSafeInteger(count) || count < 0) return '回合数未知';
+    return `${prefix}${number(count)} 个回合`;
+  }
+  function renderRoundCounts(counts, heatOnly = false) {
+    const inHeatmap = roundCountLabel(counts?.heatmap, '覆盖 ');
+    const inMatches = roundCountLabel(counts?.selected, '共 ');
+    $('round-summary').textContent = counts ? `热力图${inHeatmap} · 所选比赛${inMatches}` : '';
+    for (const key of heatOnly ? metrics : [...metrics, 'utilities']) {
+      $(`rounds-${key}`).textContent = counts ? roundCountLabel(counts[key], '来自 ') : '';
+    }
+  }
   function applyAnalysis(id, result) {
     if (id !== state.request) return;
     if (playbackPending?.id === id) { state.movementTime = playbackPending.range; playbackPending = null; renderMovementTime(); save(); }
@@ -282,6 +297,7 @@
       $(`metric-${metric}`).textContent = missingPlantTime ? '缺少下包时间记录' : missingPhase ? '缺少阶段记录' : missingTime(metric) ? '缺少时间记录' : value;
     }
     $('metric-utilities').textContent = number(total.utilities);
+    renderRoundCounts(result.roundCounts);
     $('selection-summary').textContent = `${available.length} 场已选比赛 · ${total.players} 名有记录玩家 · ${total.teams} 支队伍 · ${$('analysis-side').selectedOptions[0].textContent}${available.some(d => d.synthetic) ? ' · 含合成示例' : ''}`;
     $('analysis-empty').hidden = !!state.demos.size;
     $('selection-empty').hidden = !state.demos.size || result.cells.length > 0 || result.utilities.length > 0;
@@ -1313,9 +1329,9 @@
   $('export-image').addEventListener('click', () => {
     const output = document.createElement('canvas'), ratio = canvas.width / canvas.getBoundingClientRect().width, width = canvas.width / ratio, height = canvas.height / ratio;
     const coverageLines = heatmapCoverageLines();
-    if (state.result?.totals.utilities || state.utilityPlantPhase !== 'all' || $('analysis-utility-time').value !== 'all') {
-      coverageLines.push(`道具投掷 · ${core.utilityPlantPhaseLabel(state.utilityPlantPhase)} · ${core.utilityTimeLabel($('analysis-utility-time').value)} · ${number(state.result?.totals.utilities || 0)} 次`);
-    }
+    const counts = state.result.roundCounts;
+    coverageLines.unshift($('round-summary').textContent, '有记录的回合 · ' + metrics.map(key => `${metricNames[key]} ${roundCountLabel(counts[key])}`).join(' / '));
+    coverageLines.push(`道具投掷 · ${core.utilityPlantPhaseLabel(state.utilityPlantPhase)} · ${core.utilityTimeLabel($('analysis-utility-time').value)} · ${number(state.result.totals.utilities)} 次 · ${$('rounds-utilities').textContent}`);
     const extraHeight = 202 + coverageLines.length * 17;
     output.width = canvas.width; output.height = Math.round((height + extraHeight) * ratio);
     const c = output.getContext('2d'); c.scale(ratio, ratio); c.fillStyle = '#141b23'; c.fillRect(0, 0, width, height + extraHeight); c.drawImage(canvas, 0, 80, width, height);

@@ -130,6 +130,9 @@ func TestPlantUpgradePreservesOldResultsAndMatchesFresh(t *testing.T) {
 	j, d, old := eventUpgradeFixture(t, app)
 	d.Events = append(d.Events, Event{Type: "bomb_planted", T: 10.999, Round: 1})
 	writeFixtureGzip(t, j.result, d)
+	// Model a summary made before either phase or round-contributor evidence existed.
+	delete(old, "roundEvidenceVersion")
+	delete(old, "roundSets")
 	delete(old, "plantPhaseVersion")
 	old["eventTimingVersion"] = json.RawMessage("1")
 	var rows []map[string]json.RawMessage
@@ -138,6 +141,8 @@ func TestPlantUpgradePreservesOldResultsAndMatchesFresh(t *testing.T) {
 	}
 	for _, r := range rows {
 		delete(r, "plantPhases")
+		delete(r, "roundRefs")
+		delete(r, "plantRoundRefs")
 	}
 	old["series"], _ = json.Marshal(rows)
 	writeFixtureGzip(t, j.analysisResult, old)

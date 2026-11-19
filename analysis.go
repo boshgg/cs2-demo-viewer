@@ -40,6 +40,7 @@ type AnalysisTeam struct {
 }
 
 type AnalysisSeries struct {
+	PlantRoundRefs []int `json:"plantRoundRefs,omitempty"`
 	AnalysisHeatmap
 	PlayerID      string                     `json:"playerId"`
 	TeamID        string                     `json:"teamId"`
@@ -49,6 +50,7 @@ type AnalysisSeries struct {
 }
 
 type AnalysisHeatmap struct {
+	RoundRefs              *AnalysisRoundRefs            `json:"roundRefs,omitempty"`
 	Cells                  []AnalysisCell                `json:"cells"`
 	Rounds                 int                           `json:"rounds"`
 	MovementTimeline       []AnalysisMovementCell        `json:"movementTimeline"`
@@ -86,6 +88,8 @@ type AnalysisBounds struct {
 }
 
 type AnalysisDemo struct {
+	RoundEvidenceVersion     int               `json:"roundEvidenceVersion"`
+	RoundSets                [][]int           `json:"roundSets,omitempty"`
 	PlantTimeVersion         int               `json:"plantTimeVersion"`
 	UtilityPlantPhaseVersion int               `json:"utilityPlantPhaseVersion"`
 	PlantPhaseVersion        int               `json:"plantPhaseVersion"`
@@ -132,9 +136,10 @@ type analysisSeriesKey struct {
 type analysisGridKey struct{ x, y, z int }
 
 type analysisCellValue struct {
-	cell    AnalysisCell
-	zSum    float64
-	zWeight float64
+	contributors [4]analysisRoundSet
+	cell         AnalysisCell
+	zSum         float64
+	zWeight      float64
 }
 
 type analysisSeriesValue struct {
@@ -151,7 +156,7 @@ type analysisEngagementKey struct {
 	second int64
 }
 
-func (s *analysisSeriesValue) addCell(p Position, metric int, weight float64) {
+func (s *analysisSeriesValue) addCell(p Position, metric int, weight float64, round int) {
 	if !analysisPosition(&p) || !analysisFinite(weight) || weight <= 0 {
 		return
 	}
@@ -161,6 +166,7 @@ func (s *analysisSeriesValue) addCell(p Position, metric int, weight float64) {
 		c = &analysisCellValue{cell: AnalysisCell{(float64(g.x) + .5) * analysisCellSize, (float64(g.y) + .5) * analysisCellSize}}
 		s.cells[g] = c
 	}
+	c.contributors[metric-3].add(round)
 	c.cell[metric] += weight
 	c.zSum += p.Z * weight
 	c.zWeight += weight
@@ -191,7 +197,7 @@ func (s *analysisSeriesValue) heatmap() AnalysisHeatmap {
 // Gunfights require observed opponent firearm damage; empty damage data is not
 // silently substituted with missed shots or speculative lines of sight.
 func BuildAnalysis(d *DemoData) *AnalysisDemo {
-	a := &AnalysisDemo{PlantTimeVersion: analysisPlantTimeVersion, UtilityPlantPhaseVersion: analysisUtilityPlantPhaseVersion, PlantPhaseVersion: analysisPlantPhaseVersion, UtilityTimingVersion: analysisUtilityTimingVersion, MovementTimingVersion: analysisMovementTimingVersion, EventTimingVersion: analysisEventTimingVersion, CellSize: analysisCellSize, Players: []AnalysisPlayer{}, Teams: []AnalysisTeam{}, Series: []AnalysisSeries{}, Utilities: []AnalysisUtility{}, Warnings: []string{}}
+	a := &AnalysisDemo{RoundEvidenceVersion: analysisRoundEvidenceVersion, RoundSets: [][]int{{}}, PlantTimeVersion: analysisPlantTimeVersion, UtilityPlantPhaseVersion: analysisUtilityPlantPhaseVersion, PlantPhaseVersion: analysisPlantPhaseVersion, UtilityTimingVersion: analysisUtilityTimingVersion, MovementTimingVersion: analysisMovementTimingVersion, EventTimingVersion: analysisEventTimingVersion, CellSize: analysisCellSize, Players: []AnalysisPlayer{}, Teams: []AnalysisTeam{}, Series: []AnalysisSeries{}, Utilities: []AnalysisUtility{}, Warnings: []string{}}
 	if d == nil {
 		return a
 	}
@@ -286,9 +292,9 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 		analysisObserveMovement(f, d.Frames[i+1], windows, deathTimes, func(p PlayerFrame, pos Position, start, end float64) {
 			key, s := seriesFor(normalisePlayer(p.ID, ""), f.Round, p.Team)
 			includeBounds(pos)
-			s.addCell(pos, 3, end-start)
+			s.addCell(pos, 3, end-start, f.Round)
 			plants.movement(key, f.Round, pos, start, end, anchors[f.Round])
-			s.movement.add(pos, start, end, anchors[f.Round])
+			s.movement.add(pos, start, end, anchors[f.Round], f.Round)
 		})
 	}
 	observer := analysisEventObserver{
@@ -300,9 +306,9 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 		add: func(key analysisSeriesKey, pos Position, metric, round int, when float64) {
 			s := series[key]
 			includeBounds(pos)
-			s.addCell(pos, metric, 1)
+			s.addCell(pos, metric, 1, round)
 			plants.event(key, round, pos, metric, when, anchors[round])
-			s.events.add(pos, metric, when, anchors[round])
+			s.events.add(pos, metric, when, anchors[round], round)
 		},
 	}
 	for _, event := range d.Damage {
@@ -380,6 +386,13 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 		}
 		return x.Side < y.Side
 	})
+	dictionary := newAnalysisRoundDictionary()
+	for i := range a.Series {
+		s := &a.Series[i]
+		key := analysisSeriesKey{s.PlayerID, s.TeamID, s.Side}
+		dictionary.fillSeries(s, series[key], plants, key)
+	}
+	a.RoundSets = dictionary.sets
 	sort.SliceStable(a.Utilities, func(i, j int) bool {
 		if a.Utilities[i].Time != a.Utilities[j].Time {
 			return a.Utilities[i].Time < a.Utilities[j].Time

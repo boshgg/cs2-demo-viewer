@@ -246,12 +246,15 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 	needUtilityPlant := utilityPlantVersion < analysisUtilityPlantPhaseVersion
 	_ = json.Unmarshal(summary["plantPhaseVersion"], &plantVersion)
 	needPlant := plantVersion < analysisPlantPhaseVersion
+	var roundVersion int
+	_ = json.Unmarshal(summary["roundEvidenceVersion"], &roundVersion)
+	needRounds := roundVersion < analysisRoundEvidenceVersion || needPlant
 	_ = json.Unmarshal(summary["utilityTimingVersion"], &version)
 	_ = json.Unmarshal(summary["movementTimingVersion"], &movementVersion)
 	_ = json.Unmarshal(summary["eventTimingVersion"], &eventVersion)
 	needUtility, needMovement := version < analysisUtilityTimingVersion, movementVersion < analysisMovementTimingVersion
 	needEvents := eventVersion < analysisEventTimingVersion
-	if !needUtility && !needMovement && !needEvents && !needPlant && !needUtilityPlant && !needPlantTime {
+	if !needUtility && !needMovement && !needEvents && !needPlant && !needUtilityPlant && !needPlantTime && !needRounds {
 		return nil, nil
 	}
 	var id string
@@ -292,8 +295,8 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 				upgradeErr = patchAnalysisEventTiming(summary, events)
 			}
 		}
-		if upgradeErr == nil && (needPlant || needPlantTime) {
-			upgradeErr = upgradeAnalysisPlantPhases(ctx, snapshot.replay, &replay, summary, needPlant, needPlantTime)
+		if upgradeErr == nil && (needPlant || needPlantTime || needRounds) {
+			upgradeErr = upgradeAnalysisPlantPhases(ctx, snapshot.replay, &replay, summary, needPlant, needPlantTime, needRounds)
 		}
 		if upgradeErr == nil && (needUtility || needUtilityPlant) {
 			upgradeErr = patchAnalysisUtilities(summary, &replay, needUtility, needUtilityPlant)
@@ -358,6 +361,13 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 		var warnings []string
 		_ = json.Unmarshal(summary["warnings"], &warnings)
 		warnings = append(warnings, "无法从回放缓存核实下包阶段，按下包前后筛选时将跳过这场比赛。")
+		summary["warnings"], _ = json.Marshal(warnings)
+	}
+	if needRounds {
+		delete(summary, "roundEvidenceVersion")
+		var warnings []string
+		_ = json.Unmarshal(summary["warnings"], &warnings)
+		warnings = append(warnings, "当前回放缓存无法核实各项热力统计的来源回合数。")
 		summary["warnings"], _ = json.Marshal(warnings)
 	}
 	if needPlantTime {

@@ -532,3 +532,70 @@ test('relative heatmap requires verified timing while unbounded pre retains roun
   }
   assert.deepEqual(A.normalizePlantTime({start:100,end:200}), {start:100,end:200});
 });
+
+function roundEvidenceDemo(id) {
+  const full = {
+    cells: [[0, 0, -20, 3, 2, 1, 0], [10, 10, 10, 1, 0, 0, 3]],
+    roundRefs: { cells: [3, 3, 2, 0, 2, 0, 0, 4], movementTimeline: [1, 2], eventTimeline: [1, 2, 4] },
+    movementTimeline: [[0, 0, -20, 7, 1], [10, 10, 10, 7, 1]],
+    eventTimeline: [[0, 0, -20, 7, 2, 0, 0], [10, 10, 10, 9, 0, 1, 0], [10, 10, 10, 8, 0, 0, 3]],
+  };
+  return demo(id, {
+    roundCount: 5, roundEvidenceVersion: 1, roundSets: [[], [1], [2], [1, 2], [3]],
+    movementTimingVersion: 1, eventTimingVersion: 1, plantPhaseVersion: 1, plantTimeVersion: 1,
+    series: [{ playerId: 'p', teamId: 'a', side: 3, ...full,
+      plantPhases: { pre: { ...full, roundRefs: { ...full.roundRefs, cells: [1, 1, 1, 0, 1, 0, 0, 1], eventTimeline: [2, 1, 1] } } },
+      plantTimeline: [[0, 0, 1, -5, 7, 5, 1], [0, 0, 1, -1, 9, 5, 1], [0, 0, 1, -1, 7, 6, 4], [0, 0, 1, 0, 7, 4, 2]],
+      plantRoundRefs: [1, 2, 4, 4],
+    }],
+    utilities: [
+      { ...utility('u1', pos(0, 0, -20)), playerId: 'p', teamId: 'a', round: 4 },
+      { ...utility('u2', pos(0, 0, 10)), playerId: 'p', teamId: 'a', round: 4 },
+      { ...utility('u3', pos(0, 0, 10)), playerId: 'p', teamId: 'a', round: 5, type: 'flash' }
+    ]
+  });
+}
+
+test('round counts deduplicate each metric and their union within a match and preserve separate matches and the full selection', () => {
+  const a = roundEvidenceDemo('a'), b = roundEvidenceDemo('b'), other = roundEvidenceDemo('other');
+  a.series.push({ ...a.series[0], playerId: 'teammate' });
+  b.series[0].side = 2;
+  other.map = 'de_nuke';
+  const run = query => A.aggregate([a, a, b, other], { map: a.map, ...query }).roundCounts;
+  assert.deepEqual(run({}), { selected: 10, heatmap: 6, movement: 4, engagements: 4, deaths: 2, shots: 2, utilities: 4 });
+  assert.deepEqual(run({ sides: [3], playerIds: ['p'], teamAliases: { a: 'Team' }, teamIds: ['alias:team'], demoIds: ['a'], utilityType: 'smoke', floor: 'lower', lowerMaxZ: 0 }),
+    { selected: 5, heatmap: 2, movement: 2, engagements: 2, deaths: 1, shots: 0, utilities: 1 });
+  assert.deepEqual(run({ playerIds: [] }), { selected: 10, heatmap: 0, movement: 0, engagements: 0, deaths: 0, shots: 0, utilities: 0 });
+});
+
+test('counts use the references on precisely the metric rows that pass both time windows and the current floor', () => {
+  const d = roundEvidenceDemo('a');
+  const run = query => A.aggregate([d], query).roundCounts;
+  assert.deepEqual(run({ movementTime: { start: 7, end: 8 } }),
+    { selected: 5, heatmap: 2, movement: 2, engagements: 1, deaths: 0, shots: 0, utilities: 2 });
+  assert.deepEqual(run({ movementTime: { start: 7, end: 8 }, floor: 'lower', lowerMaxZ: 0 }),
+    { selected: 5, heatmap: 1, movement: 1, engagements: 1, deaths: 0, shots: 0, utilities: 1 });
+  assert.deepEqual(run({ plantPhase: 'pre' }),
+    { selected: 5, heatmap: 1, movement: 1, engagements: 1, deaths: 1, shots: 1, utilities: 2 });
+  assert.deepEqual(run({ plantPhase: 'pre', movementTime: { start: 7, end: 8 }, floor: 'lower', lowerMaxZ: 0 }),
+    { selected: 5, heatmap: 2, movement: 1, engagements: 1, deaths: 0, shots: 0, utilities: 1 });
+  assert.deepEqual(run({ plantPhase: 'pre', plantTime: { start: 0, end: 5 } }),
+    { selected: 5, heatmap: 3, movement: 0, engagements: 0, deaths: 2, shots: 1, utilities: 2 });
+  assert.deepEqual(run({ plantPhase: 'pre', plantTime: { start: 0, end: 5 }, movementTime: { start: 7, end: 8 } }),
+    { selected: 5, heatmap: 2, movement: 0, engagements: 0, deaths: 1, shots: 1, utilities: 2 });
+  assert.deepEqual(run({ plantPhase: 'post', plantTime: { start: 0, end: 1 }, floor: 'lower', lowerMaxZ: 0 }),
+    { selected: 5, heatmap: 0, movement: 0, engagements: 0, deaths: 0, shots: 0, utilities: 1 });
+});
+
+test('positive observations without round identities make only their metric and its union unknown', () => {
+  const d = roundEvidenceDemo('a'), good = roundEvidenceDemo('b');
+  d.series[0].roundRefs.cells[2] = -1;
+  delete d.utilities[0].round;
+  const counts = A.aggregate([good, d]).roundCounts;
+  assert.deepEqual(counts, { selected: 10, heatmap: null, movement: 4, engagements: 4, deaths: null, shots: 2, utilities: null });
+  delete d.roundEvidenceVersion;
+  assert.deepEqual(A.aggregate([d]).roundCounts, { selected: 5, heatmap: null, movement: null, engagements: null, deaths: null, shots: null, utilities: null });
+  delete d.roundCount;
+  const none = A.aggregate([d], { playerIds: [] }).roundCounts;
+  assert.equal(none.selected, null); assert.equal(none.heatmap, 0); assert.equal(none.utilities, 0);
+});
