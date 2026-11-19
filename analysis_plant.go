@@ -16,10 +16,11 @@ type analysisPlantPhases struct {
 	boundary map[int]float64
 	unknown  map[int]bool
 	series   map[analysisSeriesKey]map[string]*analysisSeriesValue
+	timeline map[analysisSeriesKey]analysisPlantTimeBins
 }
 
 func newAnalysisPlantPhases(rounds []Round, events []Event, windows map[int]analysisRoundWindow) *analysisPlantPhases {
-	p := &analysisPlantPhases{windows: windows, boundary: map[int]float64{}, unknown: map[int]bool{}, series: map[analysisSeriesKey]map[string]*analysisSeriesValue{}}
+	p := &analysisPlantPhases{windows: windows, boundary: map[int]float64{}, unknown: map[int]bool{}, series: map[analysisSeriesKey]map[string]*analysisSeriesValue{}, timeline: map[analysisSeriesKey]analysisPlantTimeBins{}}
 	unique := analysisTimingRounds(rounds)
 	for number := range windows {
 		p.boundary[number] = math.Inf(1)
@@ -99,6 +100,12 @@ func (p *analysisPlantPhases) movement(key analysisSeriesKey, round int, pos Pos
 		return
 	}
 	split := p.boundary[round]
+	if p.timeline != nil && analysisFinite(split) {
+		p.bins(key).movement(pos, start, end, split, anchor)
+	}
+	if p.series == nil {
+		return
+	}
 	add := func(phase string, start, end float64) {
 		if end <= start {
 			return
@@ -134,9 +141,25 @@ func (p *analysisPlantPhases) event(key analysisSeriesKey, round int, pos Positi
 	if phase == "unknown" {
 		return
 	}
+	if plant := p.boundary[round]; p.timeline != nil && analysisFinite(plant) {
+		plantSecond, _ := analysisPlantTimeBin(when, plant)
+		roundSecond, _ := analysisRoundTimeBin(when, anchor)
+		p.bins(key).add(pos, analysisGrid(pos), plantSecond, roundSecond, metric, 1)
+	}
+	if p.series == nil {
+		return
+	}
 	s := p.part(key, phase, round)
 	s.addCell(pos, metric, 1)
 	s.events.add(pos, metric, when, anchor)
+}
+func (p *analysisPlantPhases) bins(key analysisSeriesKey) analysisPlantTimeBins {
+	bins := p.timeline[key]
+	if bins == nil {
+		bins = analysisPlantTimeBins{}
+		p.timeline[key] = bins
+	}
+	return bins
 }
 func (p *analysisPlantPhases) heatmaps(key analysisSeriesKey) map[string]AnalysisHeatmap {
 	if len(p.series[key]) == 0 {
@@ -151,12 +174,28 @@ func (p *analysisPlantPhases) heatmaps(key analysisSeriesKey) map[string]Analysi
 
 // The first frame pass resolves team identity and verifies plant coverage.
 // The second retains only adjacent frames and streams each type of event.
-func upgradeAnalysisPlantPhases(ctx context.Context, path string, replay *analysisTimingReplay, summary map[string]json.RawMessage) error {
+func upgradeAnalysisPlantPhases(ctx context.Context, path string, replay *analysisTimingReplay, summary map[string]json.RawMessage, needPhase, needTime bool) error {
 	if !replay.FramesPresent {
 		return fmt.Errorf("replay has no frame array")
 	}
 	windows := analysisWindows(replay.Rounds)
 	p := newAnalysisPlantPhases(replay.Rounds, replay.Events, windows)
+	if !needPhase {
+		p.series = nil
+		// Keep coverage restrictions from the phase summary being extended.
+		var unknown []int
+		if raw := summary["plantPhaseUnknownRounds"]; len(raw) > 0 {
+			if err := json.Unmarshal(raw, &unknown); err != nil {
+				return err
+			}
+		}
+		for _, round := range unknown {
+			p.unknown[round] = true
+		}
+	}
+	if !needTime {
+		p.timeline = nil
+	}
 	rosters := map[int]map[int]*analysisRoster{}
 	normalise := func(raw, name string) string {
 		if raw == "" {
@@ -211,14 +250,27 @@ func upgradeAnalysisPlantPhases(ctx context.Context, path string, replay *analys
 		_ = json.Unmarshal(raw["playerId"], &key.player)
 		_ = json.Unmarshal(raw["teamId"], &key.team)
 		_ = json.Unmarshal(raw["side"], &key.side)
-		if blocks := p.heatmaps(key); len(blocks) > 0 {
-			rows, err := json.Marshal(blocks)
-			if err != nil {
-				return err
+		if needPhase {
+			if blocks := p.heatmaps(key); len(blocks) > 0 {
+				rows, err := json.Marshal(blocks)
+				if err != nil {
+					return err
+				}
+				raw["plantPhases"] = rows
+			} else {
+				delete(raw, "plantPhases")
 			}
-			raw["plantPhases"] = rows
-		} else {
-			delete(raw, "plantPhases")
+		}
+		if needTime {
+			if bins := p.timeline[key].rows(); len(bins) > 0 {
+				rows, err := json.Marshal(bins)
+				if err != nil {
+					return err
+				}
+				raw["plantTimeline"] = rows
+			} else {
+				delete(raw, "plantTimeline")
+			}
 		}
 	}
 	if _, found := summary["series"]; found {
@@ -228,9 +280,14 @@ func upgradeAnalysisPlantPhases(ctx context.Context, path string, replay *analys
 		}
 		summary["series"] = rows
 	}
-	if unknown := p.unknownRounds(); len(unknown) > 0 {
-		summary["plantPhaseUnknownRounds"], _ = json.Marshal(unknown)
+	if needPhase {
+		if unknown := p.unknownRounds(); len(unknown) > 0 {
+			summary["plantPhaseUnknownRounds"], _ = json.Marshal(unknown)
+		}
+		summary["plantPhaseVersion"], _ = json.Marshal(analysisPlantPhaseVersion)
 	}
-	summary["plantPhaseVersion"], _ = json.Marshal(analysisPlantPhaseVersion)
+	if needTime {
+		summary["plantTimeVersion"], _ = json.Marshal(analysisPlantTimeVersion)
+	}
 	return nil
 }

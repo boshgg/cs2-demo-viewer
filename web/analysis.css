@@ -100,6 +100,11 @@ html[data-filter-resizing] body{user-select:none}html[data-filter-resizing=width
 .heatmap-plant-filter>div{display:flex;gap:3px}
 .heatmap-plant-filter .button{min-height:34px;padding:5px 11px;font-size:12px}
 .heatmap-plant-filter .button[aria-pressed="true"]{background:#284649;border-color:#64d7cd;color:#b4fff7}
+.heatmap-plant-filter label,.heatmap-plant-filter form{display:inline-flex;align-items:center;gap:6px}
+.heatmap-plant-filter form{flex-wrap:wrap}
+.heatmap-plant-filter select,.heatmap-plant-filter input{width:auto;min-height:34px;padding:5px 8px;font:inherit}
+.heatmap-plant-filter input{width:6ch;box-sizing:content-box}
+#plant-window-error{color:#f4b88b}
 .utility-phase-filter { margin-bottom: 14px; }
 .utility-phase-buttons { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 5px; }
 .utility-phase-buttons button { flex-direction: column; align-items: flex-start; gap: 3px; }

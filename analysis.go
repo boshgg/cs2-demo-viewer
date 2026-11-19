@@ -17,6 +17,7 @@ const analysisUtilityTimingVersion = 1
 const analysisMovementTimingVersion = 1
 const analysisEventTimingVersion = 1
 const analysisPlantPhaseVersion = 1
+const analysisPlantTimeVersion = 1
 const analysisUtilityPlantPhaseVersion = 1
 
 // AnalysisCell holds a world-space grid centre followed by independent metrics:
@@ -40,10 +41,11 @@ type AnalysisTeam struct {
 
 type AnalysisSeries struct {
 	AnalysisHeatmap
-	PlayerID    string                     `json:"playerId"`
-	TeamID      string                     `json:"teamId"`
-	Side        int                        `json:"side"`
-	PlantPhases map[string]AnalysisHeatmap `json:"plantPhases,omitempty"`
+	PlayerID      string                     `json:"playerId"`
+	TeamID        string                     `json:"teamId"`
+	Side          int                        `json:"side"`
+	PlantPhases   map[string]AnalysisHeatmap `json:"plantPhases,omitempty"`
+	PlantTimeline []AnalysisPlantTimeCell    `json:"plantTimeline,omitempty"`
 }
 
 type AnalysisHeatmap struct {
@@ -84,6 +86,7 @@ type AnalysisBounds struct {
 }
 
 type AnalysisDemo struct {
+	PlantTimeVersion         int               `json:"plantTimeVersion"`
 	UtilityPlantPhaseVersion int               `json:"utilityPlantPhaseVersion"`
 	PlantPhaseVersion        int               `json:"plantPhaseVersion"`
 	PlantPhaseUnknownRounds  []int             `json:"plantPhaseUnknownRounds,omitempty"`
@@ -188,7 +191,7 @@ func (s *analysisSeriesValue) heatmap() AnalysisHeatmap {
 // Gunfights require observed opponent firearm damage; empty damage data is not
 // silently substituted with missed shots or speculative lines of sight.
 func BuildAnalysis(d *DemoData) *AnalysisDemo {
-	a := &AnalysisDemo{UtilityPlantPhaseVersion: analysisUtilityPlantPhaseVersion, PlantPhaseVersion: analysisPlantPhaseVersion, UtilityTimingVersion: analysisUtilityTimingVersion, MovementTimingVersion: analysisMovementTimingVersion, EventTimingVersion: analysisEventTimingVersion, CellSize: analysisCellSize, Players: []AnalysisPlayer{}, Teams: []AnalysisTeam{}, Series: []AnalysisSeries{}, Utilities: []AnalysisUtility{}, Warnings: []string{}}
+	a := &AnalysisDemo{PlantTimeVersion: analysisPlantTimeVersion, UtilityPlantPhaseVersion: analysisUtilityPlantPhaseVersion, PlantPhaseVersion: analysisPlantPhaseVersion, UtilityTimingVersion: analysisUtilityTimingVersion, MovementTimingVersion: analysisMovementTimingVersion, EventTimingVersion: analysisEventTimingVersion, CellSize: analysisCellSize, Players: []AnalysisPlayer{}, Teams: []AnalysisTeam{}, Series: []AnalysisSeries{}, Utilities: []AnalysisUtility{}, Warnings: []string{}}
 	if d == nil {
 		return a
 	}
@@ -364,7 +367,7 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 	}
 	sort.Slice(a.Teams, func(i, j int) bool { return a.Teams[i].ID < a.Teams[j].ID })
 	for key, s := range series {
-		out := AnalysisSeries{PlayerID: key.player, TeamID: key.team, Side: key.side, AnalysisHeatmap: s.heatmap(), PlantPhases: plants.heatmaps(key)}
+		out := AnalysisSeries{PlayerID: key.player, TeamID: key.team, Side: key.side, AnalysisHeatmap: s.heatmap(), PlantPhases: plants.heatmaps(key), PlantTimeline: plants.timeline[key].rows()}
 		a.Series = append(a.Series, out)
 	}
 	sort.Slice(a.Series, func(i, j int) bool {

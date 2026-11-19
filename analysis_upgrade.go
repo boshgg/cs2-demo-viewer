@@ -239,7 +239,9 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	var version, movementVersion, eventVersion, plantVersion, utilityPlantVersion int
+	var version, movementVersion, eventVersion, plantVersion, utilityPlantVersion, plantTimeVersion int
+	_ = json.Unmarshal(summary["plantTimeVersion"], &plantTimeVersion)
+	needPlantTime := plantTimeVersion < analysisPlantTimeVersion
 	_ = json.Unmarshal(summary["utilityPlantPhaseVersion"], &utilityPlantVersion)
 	needUtilityPlant := utilityPlantVersion < analysisUtilityPlantPhaseVersion
 	_ = json.Unmarshal(summary["plantPhaseVersion"], &plantVersion)
@@ -249,7 +251,7 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 	_ = json.Unmarshal(summary["eventTimingVersion"], &eventVersion)
 	needUtility, needMovement := version < analysisUtilityTimingVersion, movementVersion < analysisMovementTimingVersion
 	needEvents := eventVersion < analysisEventTimingVersion
-	if !needUtility && !needMovement && !needEvents && !needPlant && !needUtilityPlant {
+	if !needUtility && !needMovement && !needEvents && !needPlant && !needUtilityPlant && !needPlantTime {
 		return nil, nil
 	}
 	var id string
@@ -290,8 +292,8 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 				upgradeErr = patchAnalysisEventTiming(summary, events)
 			}
 		}
-		if upgradeErr == nil && needPlant {
-			upgradeErr = upgradeAnalysisPlantPhases(ctx, snapshot.replay, &replay, summary)
+		if upgradeErr == nil && (needPlant || needPlantTime) {
+			upgradeErr = upgradeAnalysisPlantPhases(ctx, snapshot.replay, &replay, summary, needPlant, needPlantTime)
 		}
 		if upgradeErr == nil && (needUtility || needUtilityPlant) {
 			upgradeErr = patchAnalysisUtilities(summary, &replay, needUtility, needUtilityPlant)
@@ -356,6 +358,13 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 		var warnings []string
 		_ = json.Unmarshal(summary["warnings"], &warnings)
 		warnings = append(warnings, "无法从回放缓存核实下包阶段，按下包前后筛选时将跳过这场比赛。")
+		summary["warnings"], _ = json.Marshal(warnings)
+	}
+	if needPlantTime {
+		delete(summary, "plantTimeVersion")
+		var warnings []string
+		_ = json.Unmarshal(summary["warnings"], &warnings)
+		warnings = append(warnings, "回放缓存缺少可核实的下包相对时间，按距下包秒数筛选时将跳过这场比赛。")
 		summary["warnings"], _ = json.Marshal(warnings)
 	}
 	return json.Marshal(summary)

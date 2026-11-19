@@ -9,6 +9,7 @@
   let playbackLength = playback.defaultWindowLength, playbackSpeed = 1, playbackMessage = '已暂停。固定窗口逐秒前进，计算完成后再更新下一帧。';
   state.movementTime = null;
   state.plantPhase = 'all';
+  state.plantTimes = { pre: null, post: null };
   state.utilityPlantPhase = 'all';
   const plantPhaseNames = { all: '全部阶段', pre: '下包前', post: '下包后' };
   let initializing = true, migratedSessionId = '', libraryEnabled = false, libraryRefreshing = false, libraryScanning = false, syncPromise = null, libraryTimer, restoredView = null;
@@ -42,6 +43,7 @@
     settings.sourceView = { ...sourceView, folderExpansion: sourceExpansion.snapshot() }; settings.libraryView = { ...libraryView, folderExpansion: libraryExpansion.snapshot() };
     settings.movementTime = state.movementTime;
     settings.plantPhase = state.plantPhase;
+    settings.plantTimes = state.plantTimes;
     settings.utilityPlantPhase = state.utilityPlantPhase;
     settings.heatmapPlayback = { windowLength: playbackLength, speed: playbackSpeed };
     if (restoredView) { settings.map = restoredView.map; settings.floor = restoredView.floor; }
@@ -71,6 +73,8 @@
     migratedSessionId = typeof saved.migratedSessionId === 'string' ? saved.migratedSessionId : '';
     state.movementTime = sanitizeMovementTime(saved.movementTime);
     state.plantPhase = ['pre', 'post'].includes(saved.plantPhase) ? saved.plantPhase : 'all';
+    for (const phase of ['pre', 'post']) state.plantTimes[phase] = core.normalizePlantTime(saved.plantTimes?.[phase]);
+    renderPlantWindow();
     state.utilityPlantPhase = ['pre', 'post'].includes(saved.utilityPlantPhase) ? saved.utilityPlantPhase : 'all';
     playbackLength = state.movementTime ? state.movementTime.end - state.movementTime.start : playback.normalizeWindowLength(saved.heatmapPlayback?.windowLength);
     playbackSpeed = playback.normalizeSpeed(saved.heatmapPlayback?.speed); renderMovementTime(); renderPlayback();
@@ -82,6 +86,30 @@
   }
   function countdown(elapsed) { const remaining = movementDuration - elapsed; return `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`; }
   function movementRangeLabel() { return state.movementTime ? `${countdown(state.movementTime.start)} → ${countdown(state.movementTime.end)}` : '全部时段（含倒计时结束后）'; }
+  function plantRangeLabel() {
+    const phase = plantPhaseNames[state.plantPhase], range = state.plantTimes[state.plantPhase];
+    if (!range) return phase;
+    if (!range.start) return `${phase}${state.plantPhase === 'pre' ? '最后' : '最初'} ${range.end} 秒`;
+    return `${phase} ${range.start}–${range.end} 秒`;
+  }
+  function renderPlantWindow() {
+    const phase = state.plantPhase, range = state.plantTimes[phase], preset = $('plant-window-preset');
+    $('plant-window-controls').hidden = phase === 'all';
+    $('plant-window-error').hidden = true;
+    for (const option of preset.children) {
+      if (Number(option.value)) option.textContent = `${phase === 'pre' ? '最后' : '最初'} ${option.value} 秒`;
+    }
+    const isPreset = range && !range.start && Array.from(preset.children).some(option => option.value === String(range.end));
+    preset.value = range ? (isPreset ? String(range.end) : 'custom') : 'all';
+    $('plant-window-custom').hidden = phase === 'all' || preset.value !== 'custom';
+    $('plant-window-direction').textContent = plantPhaseNames[phase];
+    $('plant-window-start').value = String(range?.start ?? 0);
+    $('plant-window-end').value = String(range?.end ?? 10);
+  }
+  function applyPlantWindow(range) {
+    state.plantTimes[state.plantPhase] = range;
+    renderPlantWindow(); renderMovementTime(); invalidateHeatmapTime(); requestAnalysis({ movementOnly: true });
+  }
   const playbackNow = () => typeof performance === 'object' ? performance.now() : Date.now();
   function hasPlaybackEvidence() {
     if (!state.result || !state.map || state.result.map !== state.map || !currentDemos().length || !(state.result.totals?.players > 0)) return false;
@@ -144,7 +172,8 @@
     $('movement-time-label').textContent = movementRangeLabel(); $('movement-time-all').setAttribute('aria-pressed', String(!state.movementTime));
     for (const phase of Object.keys(plantPhaseNames)) $('plant-phase-' + phase).setAttribute('aria-pressed', String(phase === state.plantPhase));
     $('movement-time-help').textContent = state.movementTime ? `开局后 ${range.start}–${range.end} 秒，含开始、不含结束；冻结结束为 0 秒。移动、交火、死亡、开火同步筛选，道具投掷时段独立。可用方向键每次调整 1 秒。` : '拖动两个手柄选择任意时段；冻结结束为开局 0 秒。当前显示移动、交火、死亡、开火的全部时段（也含倒计时结束后）；道具投掷时段独立设置。';
-    if (state.plantPhase !== 'all') $('movement-time-help').textContent += state.plantPhase === 'pre'
+    if (state.plantTimes[state.plantPhase]) $('movement-time-help').textContent += ` 当前取${plantRangeLabel()}与回合时段的交集，仅统计已成功下包的回合。`;
+    else if (state.plantPhase !== 'all') $('movement-time-help').textContent += state.plantPhase === 'pre'
       ? ' 下包前含未下包回合，下包完成起的记录会被排除。' : ' 下包后从每回合 T 方完成下包的时刻开始；未下包回合没有该阶段。';
     if (state.movementTime) playbackLength = range.end - range.start;
     renderPlayback();
@@ -171,7 +200,9 @@
   function heatmapCoverageLines() {
     const lines = state.movementTime ? timeCoverageLines() : [];
     const missing = state.result?.missingPlantPhaseDemos?.length;
-    if (state.plantPhase !== 'all' && missing) lines.unshift(`${missing} 场录像缺少下包阶段记录，已从四个热力图层排除。可在比赛来源中重新解析补齐。`);
+    const missingTimeDemos = state.result?.missingPlantTimeDemos?.length;
+    if (state.plantTimes[state.plantPhase] && missingTimeDemos) lines.unshift(`${missingTimeDemos} 场录像缺少相对下包时间记录，已从当前热力图排除。可在比赛来源中重新解析补齐。`);
+    else if (state.plantPhase !== 'all' && missing) lines.unshift(`${missing} 场录像缺少下包阶段记录，已从四个热力图层排除。可在比赛来源中重新解析补齐。`);
     const unknownRounds = state.result?.unknownPlantRounds;
     if (state.plantPhase !== 'all' && unknownRounds) lines.unshift(`所选比赛中有 ${unknownRounds} 个回合缺少可靠的下包记录，已从当前阶段排除。`);
     return lines;
@@ -212,6 +243,7 @@
     const cluster = { landing: Number($('landing-distance').value) || 128, throwing: Number($('throw-distance').value) || 64, lowerMaxZ: state.mapInfo?.lowerMaxZ };
     filter.movementTime = options.autoplay ? options.range : state.movementTime;
     filter.plantPhase = state.plantPhase;
+    filter.plantTime = state.plantTimes[state.plantPhase] || null;
     filter.utilityPlantPhase = state.utilityPlantPhase;
     const id = ++state.request;
     analysisPending = true;
@@ -244,9 +276,10 @@
     const total = result.totals;
     const available = currentDemos();
     const missingPhase = available.length > 0 && result.missingPlantPhaseDemos?.length === available.length;
+    const missingPlantTime = available.length > 0 && result.missingPlantTimeDemos?.length === available.length;
     for (const metric of metrics) {
       const value = metric === 'movement' ? seconds(total.movementSeconds) : number(total[metric]);
-      $(`metric-${metric}`).textContent = missingPhase ? '缺少阶段记录' : missingTime(metric) ? '缺少时间记录' : value;
+      $(`metric-${metric}`).textContent = missingPlantTime ? '缺少下包时间记录' : missingPhase ? '缺少阶段记录' : missingTime(metric) ? '缺少时间记录' : value;
     }
     $('metric-utilities').textContent = number(total.utilities);
     $('selection-summary').textContent = `${available.length} 场已选比赛 · ${total.players} 名有记录玩家 · ${total.teams} 支队伍 · ${$('analysis-side').selectedOptions[0].textContent}${available.some(d => d.synthetic) ? ' · 含合成示例' : ''}`;
@@ -1165,7 +1198,27 @@
     if (state.plantPhase === phase) return;
     pausePlayback('已暂停：下包阶段已更改。');
     state.plantPhase = phase;
+    renderPlantWindow();
     renderMovementTime(); invalidateHeatmapTime(); requestAnalysis({ movementOnly: true });
+  });
+  $('plant-window-preset').addEventListener('change', event => {
+    if (event.target.value === 'custom') {
+      pausePlayback('已暂停：正在调整下包时间范围。');
+      $('plant-window-custom').hidden = false;
+      return;
+    }
+    applyPlantWindow(event.target.value === 'all' ? null : { start: 0, end: Number(event.target.value) });
+  });
+  $('plant-window-custom').addEventListener('submit', event => {
+    event.preventDefault();
+    const start = $('plant-window-start').value.trim(), end = $('plant-window-end').value.trim();
+    const range = start && end && core.normalizePlantTime({ start: Number(start), end: Number(end) });
+    if (!range) {
+      $('plant-window-error').textContent = '请输入非负整秒，右侧秒数须大于左侧。';
+      $('plant-window-error').hidden = false;
+      return;
+    }
+    applyPlantWindow(range);
   });
   $('heatmap-time-play').addEventListener('click', () => startPlayback());
   $('heatmap-time-restart').addEventListener('click', () => startPlayback(true));
@@ -1194,7 +1247,7 @@
   $('players-invert').addEventListener('click', () => { state.selectedPlayers = new Set(availablePlayers().map(p => p.id).filter(id => state.selectedPlayers && !state.selectedPlayers.has(id))); renderPlayers(); requestAnalysis(); });
   $('player-search').addEventListener('input', () => { renderPlayers(); save(); });
   $('apply-aliases').addEventListener('click', () => { $('team-aliases').querySelectorAll('input').forEach(input => { const value = input.value.trim(); if (value) state.aliases[input.dataset.teamId] = value; else delete state.aliases[input.dataset.teamId]; }); state.selectedTeams = null; renderFilters(); requestAnalysis(); });
-  $('clear-selection').addEventListener('click', () => { state.selectedDemos = state.selectedTeams = state.selectedPlayers = null; state.movementTime = null; state.plantPhase = 'all'; state.utilityPlantPhase = 'all'; renderMovementTime(); $('analysis-side').value = 'all'; $('analysis-floor').value = 'all'; $('analysis-utility-type').value = 'all'; $('analysis-utility-time').value = 'all'; $('player-search').value = ''; renderJobs(); renderFilters(); void loadMapImage(); requestAnalysis(); });
+  $('clear-selection').addEventListener('click', () => { state.selectedDemos = state.selectedTeams = state.selectedPlayers = null; state.movementTime = null; state.plantPhase = 'all'; state.plantTimes = { pre: null, post: null }; state.utilityPlantPhase = 'all'; renderPlantWindow(); renderMovementTime(); $('analysis-side').value = 'all'; $('analysis-floor').value = 'all'; $('analysis-utility-type').value = 'all'; $('analysis-utility-time').value = 'all'; $('player-search').value = ''; renderJobs(); renderFilters(); void loadMapImage(); requestAnalysis(); });
   $('clear-utility').addEventListener('click', () => { state.selectedGroup = state.selectedThrow = null; renderUtilityGroups(); draw(); });
   for (const name of metrics) $(`layer-${name}`).addEventListener('change', () => { rebuildHeat(); save(); });
   let radiusTimer;
@@ -1268,7 +1321,7 @@
     const c = output.getContext('2d'); c.scale(ratio, ratio); c.fillStyle = '#141b23'; c.fillRect(0, 0, width, height + extraHeight); c.drawImage(canvas, 0, 80, width, height);
     c.fillStyle = '#e5eef4'; c.font = '18px sans-serif'; c.fillText(`CS2 Replay · ${state.map} · ${$('analysis-side').selectedOptions[0].textContent}`, 18, 28, width - 36);
     c.fillStyle = '#91a9b8'; c.font = '12px sans-serif'; c.fillText($('selection-summary').textContent, 18, 49, width - 36);
-    c.fillText(`移动 ${$('metric-movement').textContent} / 交火 ${$('metric-engagements').textContent} / 死亡 ${$('metric-deaths').textContent} / 开火 ${$('metric-shots').textContent} · 热力图 ${movementRangeLabel()} · ${plantPhaseNames[state.plantPhase]}`, 18, 68, width - 36);
+    c.fillText(`移动 ${$('metric-movement').textContent} / 交火 ${$('metric-engagements').textContent} / 死亡 ${$('metric-deaths').textContent} / 开火 ${$('metric-shots').textContent} · 热力图 ${movementRangeLabel()} · ${plantRangeLabel()}`, 18, 68, width - 36);
     const y = height + 105, barWidth = Math.min(500, width - 64), gradient = c.createLinearGradient(32, 0, 32 + barWidth, 0);
     for (const [at, rgb] of heat.stops) gradient.addColorStop(at, `rgb(${rgb.join(',')})`);
     c.fillStyle = '#d8e5ed'; c.fillText(`${selectedLayers()} · ${$('heat-scale').selectedOptions[0].textContent} · 相对当前筛选峰值`, 18, y, width - 36);

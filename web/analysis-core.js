@@ -24,6 +24,11 @@
   const distance2 = (a, b) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
   const movementDuration = 115;
   const eventMetrics = ['engagements', 'deaths', 'shots'];
+  const heatMetrics = ['movement', ...eventMetrics];
+  function normalizePlantTime(value) {
+    if (!Number.isSafeInteger(value?.start) || !Number.isSafeInteger(value?.end) || value.start < 0 || value.start >= value.end) return null;
+    return { start: value.start, end: value.end };
+  }
   function normalizeMovementTime(value) {
     if (!value || typeof value !== 'object' || !valid(value.start) || !valid(value.end)) return null;
     let start = Math.max(0, Math.min(movementDuration, Math.round(value.start)));
@@ -70,16 +75,46 @@
     return alias ? `alias:${alias.normalize('NFKC').toLocaleLowerCase()}` : String(teamId || `${demoId}:unknown`);
   }
   function floorOf(z, lowerMaxZ) { return valid(lowerMaxZ) ? (z < lowerMaxZ ? 'lower' : 'upper') : 'all'; }
+  // Both clocks were recorded for the same observation. Apply the plant window
+  // first so round-clock coverage describes only the chosen plant-relative span.
+  function addPlantTimeline(rows, window, movementTime, includeFloor, cells, totals, coverage, observed) {
+    let populated = false;
+    if (!Array.isArray(rows)) return false;
+    for (const row of rows) {
+      if (!Array.isArray(row) || row.length !== 7) continue;
+      const [x, y, z, plantSecond, roundSecond, metric, value] = row;
+      if (!Number.isSafeInteger(plantSecond) || plantSecond < window.start || plantSecond >= window.end ||
+          !Number.isInteger(roundSecond) || roundSecond < -1 || roundSecond > movementDuration ||
+          !Number.isInteger(metric) || metric < 3 || metric > 6 || !valid(value) || value <= 0 ||
+          !valid(x) || !valid(y) || !valid(z) || !includeFloor(z)) continue;
+      const name = heatMetrics[metric - 3];
+      populated = true;
+      observed[metric - 3] = true;
+      const c = coverage[name], period = roundSecond < 0 ? 'unknown' : roundSecond === movementDuration ? 'beyond' : 'timed';
+      const unit = metric === 3 ? 'Seconds' : 'Count';
+      c['total' + unit] += value;
+      c[period + unit] += value;
+      if (movementTime && (roundSecond < movementTime.start || roundSecond >= movementTime.end)) continue;
+      const key = `${x},${y},${z}`;
+      if (!cells.has(key)) cells.set(key, [x, y, z, 0, 0, 0, 0]);
+      cells.get(key)[metric] += value;
+      totals[metric === 3 ? 'movementSeconds' : name] += value;
+    }
+    return populated;
+  }
   function aggregate(input, filter = {}) {
     const demos = uniqueDemos(input), map = filter.map || demos[0]?.map || '';
     const movementTime = normalizeMovementTime(filter.movementTime);
     const plantPhase = ['pre', 'post'].includes(filter.plantPhase) ? filter.plantPhase : 'all';
+    const plantTime = plantPhase === 'all' ? null : normalizePlantTime(filter.plantTime);
+    const plantWindow = plantTime && (plantPhase === 'pre' ? { start: -plantTime.end, end: -plantTime.start } : plantTime);
+    const missingPlantTimeDemos = [];
     const utilityPlantPhase = ['pre', 'post'].includes(filter.utilityPlantPhase) ? filter.utilityPlantPhase : 'all';
     const utilityPlantPhaseCounts = { all: 0, pre: 0, post: 0, unknown: 0 };
     const missingPlantPhaseDemos = [];
     let unknownPlantRounds = 0;
-    const movementCoverage = movementTime ? { status: 'empty', selectedDemos: 0, timedDemos: 0, missingDemos: 0, missingDemoIds: [], totalSeconds: 0, timedSeconds: 0, unknownSeconds: 0, beyondSeconds: 0, selectedSeconds: 0, coverage: null } : null;
-    const heatmapCoverage = movementTime ? { movement: movementCoverage, ...Object.fromEntries(eventMetrics.map(metric => [metric, { status: 'empty', selectedDemos: 0, timedDemos: 0, missingDemos: 0, missingDemoIds: [], totalCount: 0, timedCount: 0, unknownCount: 0, beyondCount: 0, selectedCount: 0, coverage: null }])) } : null;
+    const movementCoverage = movementTime || plantTime ? { status: 'empty', selectedDemos: 0, timedDemos: 0, missingDemos: 0, missingDemoIds: [], totalSeconds: 0, timedSeconds: 0, unknownSeconds: 0, beyondSeconds: 0, selectedSeconds: 0, coverage: null } : null;
+    const heatmapCoverage = movementCoverage ? { movement: movementCoverage, ...Object.fromEntries(eventMetrics.map(metric => [metric, { status: 'empty', selectedDemos: 0, timedDemos: 0, missingDemos: 0, missingDemoIds: [], totalCount: 0, timedCount: 0, unknownCount: 0, beyondCount: 0, selectedCount: 0, coverage: null }])) } : null;
     const ids = asSet(filter.demoIds), players = asSet(filter.playerIds), teams = asSet(filter.teamIds), sides = asSet(filter.sides?.map(Number));
     const cells = new Map(), utilities = [], seenUtilities = new Set(), includedPlayers = new Set(), includedTeams = new Set(), includedDemos = new Set();
     const utilityTimeCounts = Object.fromEntries(utilityTimeBuckets.map(bucket => [bucket.key, 0]));
@@ -90,16 +125,23 @@
     for (const d of demos) {
       if (d.map !== map || !chosen(ids, d.id)) continue;
       let contributed = false;
-      let movementObserved = false;
+      const observedMetrics = [false, false, false, false];
       const phaseFiltered = plantPhase !== 'all';
       const phaseAvailable = d.plantPhaseVersion === 1;
-      if (phaseFiltered && !phaseAvailable) missingPlantPhaseDemos.push(d.id);
+      if (plantTime && d.plantTimeVersion !== 1) missingPlantTimeDemos.push(d.id);
+      if (!plantTime && phaseFiltered && !phaseAvailable) missingPlantPhaseDemos.push(d.id);
       if (phaseFiltered && phaseAvailable && Array.isArray(d.plantPhaseUnknownRounds)) unknownPlantRounds += d.plantPhaseUnknownRounds.length;
       const timingAvailable = phaseFiltered ? phaseAvailable : d.movementTimingVersion === 1;
-      const eventsAvailable = phaseFiltered ? phaseAvailable : d.eventTimingVersion === 1, eventsObserved = [false, false, false];
+      const eventsAvailable = phaseFiltered ? phaseAvailable : d.eventTimingVersion === 1;
       for (const source of d.series || []) {
         const playerId = String(source.playerId), teamId = teamKey(d.id, source.teamId, filter.teamAliases);
         if (!chosen(players, playerId) || !chosen(teams, teamId) || !chosen(sides, Number(source.side))) continue;
+        if (plantTime) {
+          if (d.plantTimeVersion === 1 && addPlantTimeline(source.plantTimeline, plantWindow, movementTime, includeFloor, cells, totals, heatmapCoverage, observedMetrics)) {
+            includedPlayers.add(playerId); includedTeams.add(teamId); contributed = true;
+          }
+          continue;
+        }
         const series = phaseFiltered ? phaseAvailable && source.plantPhases?.[plantPhase] : source;
         if (!series) continue;
         let populated = false;
@@ -160,7 +202,7 @@
           movementCoverage.timedSeconds += timedSeconds;
           movementCoverage.beyondSeconds += beyondSeconds;
           movementCoverage.unknownSeconds += unknownSeconds;
-          if (observedSeconds > 0) movementObserved = true;
+          if (observedSeconds > 0) observedMetrics[0] = true;
 
           const timed = [0, 0, 0], unknown = [0, 0, 0], beyond = [0, 0, 0];
           if (eventsAvailable) for (const row of series.eventTimeline || []) {
@@ -194,20 +236,20 @@
             else if (selectedFloor === 'all') unknown[i] += Math.max(0, fullEvents[i] - timed[i] - unknown[i] - beyond[i]);
             const observed = timed[i] + unknown[i] + beyond[i], coverage = heatmapCoverage[eventMetrics[i]];
             coverage.totalCount += observed; coverage.timedCount += timed[i]; coverage.unknownCount += unknown[i]; coverage.beyondCount += beyond[i];
-            if (observed > 0) { eventsObserved[i] = true; populated = true; }
+            if (observed > 0) { observedMetrics[i + 1] = true; populated = true; }
           }
         }
         if (populated) { includedPlayers.add(playerId); includedTeams.add(teamId); contributed = true; }
       }
-      if (movementCoverage && movementObserved) {
+      if (movementCoverage && observedMetrics[0]) {
         movementCoverage.selectedDemos++;
-        if (timingAvailable) movementCoverage.timedDemos++;
+        if (plantTime || timingAvailable) movementCoverage.timedDemos++;
         else { movementCoverage.missingDemos++; movementCoverage.missingDemoIds.push(d.id); }
       }
-      if (heatmapCoverage) for (let i = 0; i < 3; i++) if (eventsObserved[i]) {
+      if (heatmapCoverage) for (let i = 0; i < 3; i++) if (observedMetrics[i + 1]) {
         const coverage = heatmapCoverage[eventMetrics[i]];
         coverage.selectedDemos++;
-        if (eventsAvailable) coverage.timedDemos++;
+        if (plantTime || eventsAvailable) coverage.timedDemos++;
         else { coverage.missingDemos++; coverage.missingDemoIds.push(d.id); }
       }
       for (const u of d.utilities || []) {
@@ -248,7 +290,7 @@
         }
       }
     }
-    return { map, cells: [...cells.values()], utilities, utilityTimeCounts, utilityPlantPhase, utilityPlantPhaseCounts, totals, movementTime, movementCoverage, heatmapCoverage, plantPhase, missingPlantPhaseDemos, unknownPlantRounds };
+    return { map, cells: [...cells.values()], utilities, utilityTimeCounts, utilityPlantPhase, utilityPlantPhaseCounts, totals, movementTime, movementCoverage, heatmapCoverage, plantPhase, plantTime, missingPlantTimeDemos, missingPlantPhaseDemos, unknownPlantRounds };
   }
   function clusterUtilities(input, options = {}) {
     const landing = Math.max(1, Math.min(1024, Number(options.landing) || 128));
@@ -307,5 +349,5 @@
       return `"${safe.replace(/"/g, '""')}"`;
     }).join(',')).join('\r\n');
   }
-  return { aggregate, clusterUtilities, uniqueDemos, teamKey, floorOf, csv, utilityTimeBucket, utilityTimeLabel, utilityTimeBuckets, utilityPlantPhaseLabel, normalizeMovementTime, movementDuration };
+  return { aggregate, clusterUtilities, uniqueDemos, teamKey, floorOf, csv, utilityTimeBucket, utilityTimeLabel, utilityTimeBuckets, utilityPlantPhaseLabel, normalizePlantTime, normalizeMovementTime, movementDuration };
 });

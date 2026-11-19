@@ -1494,6 +1494,51 @@ test('plant phase intersects the current window for every layer, persists, and i
   assert.deepEqual(heatMetrics(ui), ['12.0 秒', '5', '1', '10']);
 });
 
+test('plant presets and custom ranges intersect the round clock and retain a separate range for each phase', async () => {
+  const demo = movementDemo();
+  demo.plantPhaseVersion = demo.plantTimeVersion = 1;
+  const row = (plant, round, deaths) => [256, 768, 0, plant, round, 5, deaths];
+  demo.series[0].plantTimeline = [row(-11, 5, 20), row(-10, 5, 3), row(-1, 16, 1), row(0, 5, 4), row(5, 5, 2), row(15, 5, 9)];
+  const ui = await page([demo], {worker: true, saved: {movementTime: {start: 5, end: 6}}});
+  const choose = async value => { ui.get('plant-window-preset').value = value; await ui.get('plant-window-preset').dispatch('change'); await settle(); };
+  const apply = async (start, end) => {
+    ui.get('plant-window-start').value = start; ui.get('plant-window-end').value = end;
+    await ui.get('plant-window-custom').dispatch('submit'); await settle();
+  };
+  assert.equal(ui.get('plant-window-controls').hidden, true);
+  await clickAndSettle(ui, 'plant-phase-pre'); await choose('10');
+  assert.equal(deaths(ui), 3);
+  assert.match(ui.get('movement-time-help').textContent, /下包前最后 10 秒/);
+  await clickAndSettle(ui, 'plant-phase-post');
+  assert.equal(ui.get('plant-window-preset').value, 'all');
+  await choose('custom'); await apply('15', '5');
+  assert.equal(ui.get('plant-window-error').hidden, false);
+  assert.equal(ui.saved().plantTimes.post, null);
+  await apply('5', '15'); assert.equal(ui.get('plant-window-error').hidden, true);
+  assert.equal(deaths(ui), 2); assert.equal(ui.get('metric-utilities').textContent, '7');
+  await clickAndSettle(ui, 'export-image');
+  assert.match(ui.canvases.at(-1).context.texts.map(entry => entry[0]).join('\n'), /1:50 → 1:49 · 下包后 5–15 秒/);
+  const restored = await page([demo], {saved: ui.saved()});
+  assert.equal(deaths(restored), 2); assert.equal(restored.get('plant-window-custom').hidden, false);
+  assert.equal(restored.get('plant-window-start').value, '5');
+  await clickAndSettle(ui, 'plant-phase-all'); assert.equal(ui.get('plant-window-controls').hidden, true);
+  assert.equal(ui.workerMessages.at(-1).filter.plantTime, null);
+  await clickAndSettle(ui, 'plant-phase-pre'); assert.equal(ui.get('plant-window-preset').value, '10');
+  await clickAndSettle(ui, 'movement-time-all'); assert.equal(deaths(ui), 4);
+  await clickAndSettle(ui, 'clear-selection'); assert.deepEqual(ui.saved().plantTimes, {pre: null, post: null});
+});
+
+test('missing plant-relative coverage is distinct from an empty window', async () => {
+  const demo = movementDemo(); demo.plantPhaseVersion = 1;
+  const saved = {plantPhase: 'post', plantTimes: {pre: {start: 10, end: 1}, post: {start: 0, end: 10}}};
+  const legacy = await page([demo], {saved});
+  assert.deepEqual(heatMetrics(legacy), Array(4).fill('缺少下包时间记录'));
+  assert.match(legacy.get('movement-time-coverage').textContent, /1 场录像缺少相对下包时间记录/);
+  assert.equal(legacy.saved().plantTimes.pre, null);
+  const current = await page([{...demo, plantTimeVersion: 1}], {saved});
+  assert.deepEqual(heatMetrics(current), ['0.0 秒', '0', '0', '0']);
+});
+
 test('legacy phase evidence is excluded while utilities remain visible, and unplanted rounds have zero post-plant heat', async () => {
   const legacy = movementDemo('legacy');
   const ui = await page([legacy], {saved: {plantPhase: 'unsupported'}});

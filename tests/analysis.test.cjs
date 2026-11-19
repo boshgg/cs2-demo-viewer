@@ -463,3 +463,72 @@ test('worker and direct shared-range aggregation produce identical independent l
   assert.deepEqual(JSON.parse(JSON.stringify(messages[0].result)),JSON.parse(JSON.stringify(expected)));
   assert.deepEqual(eventTotals(expected),[4,1,3]);assert.equal(expected.heatmapCoverage.deaths.missingDemos,1);
 });
+
+function plantClockDemo() {
+  const d = demo('timed', { plantTimeVersion: 1, plantPhaseVersion: 1, utilities: [timedUtility('smoke', 51)] });
+  d.series[0].plantPhases = { pre: { cells: [[64, 0, 0, 20, 3, 9, 4]] } };
+  d.series[0].plantTimeline = [
+    [64, 0, -1, -11, 74, 5, 1],
+    [64, 0, -1, -10, 75, 5, 1],
+    [64, 0, -1, -5, 80, 3, .75],
+    [64, 0, -1, -5, 81, 3, .25],
+    [64, 0, -1, -1, 84, 4, 1],
+    [64, 0, 1, 0, 85, 5, 1],
+    [64, 0, 1, 5, 90, 6, 2],
+    [64, 0, 1, 6, -1, 6, 1],
+    [64, 0, 1, 14, 115, 6, 3],
+    [64, 0, 1, 15, 100, 6, 1],
+  ];
+  return d;
+}
+
+test('pre and post use signed half-open windows, independently of grenade filters', () => {
+  const d = plantClockDemo();
+  const query = (phase, start, end) => A.aggregate([d], { plantPhase: phase, plantTime: { start, end } });
+  const before = query('pre', 0, 10), after = query('post', 0, 10);
+  assert.deepEqual(before.cells, [[64, 0, -1, 1, 1, 1, 0]]);
+  assert.deepEqual(after.cells, [[64, 0, 1, 0, 0, 1, 3]]);
+  assert.deepEqual(before.utilities, after.utilities);
+  assert.deepEqual(query('post', 5, 15).cells, [[64, 0, 1, 0, 0, 0, 6]]);
+  assert.deepEqual(query('pre', 5, 10).cells, [[64, 0, -1, 0, 0, 1, 0]]);
+  assert.deepEqual(query('pre', 0, 5).cells, [[64, 0, -1, 1, 1, 0, 0]]);
+  const beyond = query('post', 14, 15);
+  assert.equal(beyond.heatmapCoverage.shots.beyondCount, 3);
+  assert.equal(beyond.heatmapCoverage.shots.timedCount, 0);
+  assert.equal(beyond.totals.shots, 3);
+  assert.equal(query('post', 41, 42).movementCoverage.totalSeconds, 0);
+});
+
+test('plant and round filters intersect on the same samples and report both missing and beyond-clock observations', () => {
+  const d = plantClockDemo(), plantTime = { start: 5, end: 15 };
+  const run = (phase, start, end) => A.aggregate([d, d], { plantTime, plantPhase: phase, movementTime: { start, end } });
+  const pre = A.aggregate([d], { plantTime: { start: 0, end: 10 }, plantPhase: 'pre', movementTime: { start: 81, end: 85 } });
+  assert.deepEqual(pre.cells, [[64, 0, -1, .25, 1, 0, 0]]);
+  assert.equal(pre.movementCoverage.timedSeconds, 1);
+  assert.equal(pre.movementCoverage.selectedSeconds, .25);
+  const post = run('post', 90, 91);
+  assert.deepEqual(post.cells, [[64, 0, 1, 0, 0, 0, 2]]);
+  const shots = post.heatmapCoverage.shots;
+  assert.deepEqual([shots.selectedDemos, shots.totalCount, shots.unknownCount, shots.beyondCount, shots.timedCount, shots.selectedCount], [1, 6, 1, 3, 2, 2]);
+  assert.equal(run('post', 91, 115).cells.length, 0);
+  for (const filter of [{ floor: 'lower', lowerMaxZ: 0 }, { playerIds: [] }, { sides: [2] }, { teamIds: [] }]) {
+    assert.deepEqual(A.aggregate([d], { plantPhase: 'post', plantTime, ...filter }).cells, []);
+  }
+});
+
+test('relative heatmap requires verified timing while unbounded pre retains rounds without a plant', () => {
+  const old = plantClockDemo(), modern = plantClockDemo();
+  old.id = 'old'; delete old.plantTimeVersion;
+  const noPlant = plantClockDemo(); noPlant.id = 'no-plant'; delete noPlant.series[0].plantTimeline;
+  const plantTime = { start: 0, end: 10 }, query = { plantTime, plantPhase: 'pre' };
+  const result = A.aggregate([old, modern, noPlant], query);
+  assert.deepEqual(result.cells, A.aggregate([modern], query).cells);
+  assert.deepEqual(result.missingPlantTimeDemos, ['old']);
+  assert.deepEqual(A.aggregate([noPlant], { plantPhase: 'pre' }).cells, noPlant.series[0].plantPhases.pre.cells);
+  assert.deepEqual(A.aggregate([modern], { plantPhase: 'all', plantTime }).cells, modern.series[0].cells);
+  assert.equal(A.aggregate([modern], { plantPhase: 'all', plantTime }).plantTime, null);
+  for (const invalid of [null, {start:'0',end:10}, {start:-1,end:10}, {start:1.5,end:3}, {start:5,end:5}, {start:5,end:1}, {start:5,end:Infinity}]) {
+    assert.equal(A.normalizePlantTime(invalid), null);
+  }
+  assert.deepEqual(A.normalizePlantTime({start:100,end:200}), {start:100,end:200});
+});
