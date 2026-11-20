@@ -44,7 +44,14 @@
 <p id="heatmap-playback-status" class="heatmap-playback-status" role="status" aria-live="polite">已暂停。固定窗口逐秒前进，计算完成后再更新下一帧。</p>
 <p id="movement-time-help" class="micro">拖动两个手柄选择任意时段；冻结结束为开局 0 秒。移动、交火、死亡和开火同步筛选，道具投掷时段独立设置。</p><p id="movement-time-coverage" class="movement-time-coverage" role="status" aria-live="polite" hidden></p>
 </section>
-<div id="heatmap-stage" class="heatmap-stage"><canvas id="analysis-canvas" aria-label="可缩放平移的筛选热力图，使用加减键缩放，0 复位" tabindex="0"></canvas><div id="heat-tooltip" class="heat-tooltip" role="status" hidden></div><div class="map-tag"><strong id="canvas-map-name">NO MAP</strong><span id="canvas-floor">等待数据</span></div><div id="analysis-empty" class="empty-state"><span class="empty-glyph">◎</span><h3>每个人的路线，每支队伍的倾向</h3><p>选择存放 .dem 或 .zip 的录像文件夹，系统会递归扫描；也可手动导入 .dem。按 Steam ID、队伍和 CT/T 叠加，不同地图分开分析。</p><button id="empty-open-analysis-library" class="button primary" type="button">从本地录像库选择</button></div><div id="selection-empty" class="selection-empty" hidden>当前筛选没有记录<br><span>调整比赛、队伍、玩家或阵营范围</span></div><div class="map-footer"><span id="map-status">滚轮缩放 · 拖拽平移</span><span id="zoom-value">100%</span></div></div>
+<div class="utility-box-toolbar" role="group" aria-label="地图道具框选">
+<button id="utility-box-toggle" class="button quiet" type="button" aria-pressed="false" disabled>框选道具</button>
+<div id="utility-box-options" hidden>
+<label id="utility-box-scope-field" hidden>范围<select id="utility-box-scope"><option value="focus">当前定位</option><option value="all">全部筛选结果</option></select></label>
+<label>点位<select id="utility-box-points"><option value="both">出手点和落点</option><option value="end">仅落点</option><option value="start">仅出手点</option></select></label>
+<span id="utility-box-status" role="status"></span>
+</div></div>
+<div id="heatmap-stage" class="heatmap-stage"><canvas id="analysis-canvas" aria-label="可缩放平移的筛选热力图，使用加减键缩放，0 复位" tabindex="0"></canvas><div id="utility-box-rect" aria-hidden="true" hidden></div><div id="heat-tooltip" class="heat-tooltip" role="status" hidden></div><div class="map-tag"><strong id="canvas-map-name">NO MAP</strong><span id="canvas-floor">等待数据</span></div><div id="analysis-empty" class="empty-state"><span class="empty-glyph">◎</span><h3>每个人的路线，每支队伍的倾向</h3><p>选择存放 .dem 或 .zip 的录像文件夹，系统会递归扫描；也可手动导入 .dem。按 Steam ID、队伍和 CT/T 叠加，不同地图分开分析。</p><button id="empty-open-analysis-library" class="button primary" type="button">从本地录像库选择</button></div><div id="selection-empty" class="selection-empty" hidden>当前筛选没有记录<br><span>调整比赛、队伍、玩家或阵营范围</span></div><div class="map-footer"><span id="map-status">滚轮缩放 · 拖拽平移</span><span id="zoom-value">100%</span></div></div>
 <div class="heat-controls"><label>扩散半径 <input id="heat-radius" type="range" min="64" max="384" step="16" value="144"><output id="radius-value">144 单位</output></label><label>叠加强度 <input id="heat-opacity" type="range" min="15" max="100" step="5" value="85"><output id="opacity-value">85%</output></label><label for="heat-scale">色阶 <select id="heat-scale"><option value="log">低频增强</option><option value="linear">线性</option></select></label></div>
 <div class="heat-legend" aria-label="频率色阶图例"><div class="heat-legend-heading"><strong>低频 <span>→</span> 高频</strong><span>无记录透明 · 悬停查看密度</span></div><div id="heat-gradient" class="heat-gradient"></div><div id="heat-ticks" class="heat-ticks"></div><p id="heat-legend-note"></p></div>
 <details class="method-note"><summary>统计口径与读图说明</summary><p>移动按存活、连接状态下的有效回合停留秒数累计，排除冻结、死亡后和回合结束后的记录；它表示路线使用与停留密度，不等同于移动距离。交火记录敌方枪械造成伤害时的双方位置，同一玩家同一空间格内 1 秒合并一次；开火图层统计所有观测到的枪械开火事件。死亡包括自杀和世界伤害。</p><p>蓝、青、绿、黄、红依次表示从低到高的密度，零记录处透明。默认「低频增强」用对数色阶拉开稀少记录的差异，可切换「线性」。图例与悬停百分比表示相对当前筛选峰值的扩散后密度，不是事件占比；上方数值保留实际数量。各图层独立归一化，叠加时取各位置的最高相对密度，避免不同单位相加或混色变白。比较具体事件时可单独勾选图层；不同筛选之间的颜色不可直接比较。空间格约 64 游戏单位，扩散仅用于显示。地图版本或多层结构可能影响读图，请使用楼层筛选。合成示例用于体验，不能当作真实比赛结论。</p></details>
@@ -57,7 +64,19 @@
 <p id="utility-phase-coverage" class="micro" role="status" hidden></p>
 </div>
 <label class="field-title" for="analysis-utility-time">投掷时段</label>
-<select id="analysis-utility-time" aria-describedby="utility-time-note"><option value="all">全部时段</option><option value="0-5">开局 0–5 秒（含 5 秒）</option><option value="5-20">5–20 秒（大于 5 秒）</option><option value="20-50">20–50 秒（大于 20 秒）</option><option value="50+">50 秒以后（大于 50 秒）</option><option value="unknown">时间未知</option></select>
+<select id="analysis-utility-time" aria-describedby="utility-time-note"><option value="all">全部时段</option><option value="custom">自定义时段</option><option value="0-5">开局 0–5 秒（含 5 秒）</option><option value="5-20">5–20 秒（大于 5 秒）</option><option value="20-50">20–50 秒（大于 20 秒）</option><option value="50+">50 秒以后（大于 50 秒）</option><option value="unknown">时间未知</option></select>
+<form id="utility-time-custom" aria-label="自定义投掷时段" hidden>
+<div class="utility-range-inputs">
+<label for="utility-range-start">开始（秒）<input id="utility-range-start" type="number" min="0" step="0.01" value="0" required></label>
+<label for="utility-range-end">结束（秒）<input id="utility-range-end" type="number" min="0.01" step="0.01" value="115" required></label>
+<button id="utility-range-apply" class="button quiet" type="submit">应用</button>
+</div>
+<div class="movement-time-track"><div class="movement-time-rail" aria-hidden="true"><span id="utility-range-fill"></span></div>
+<input id="utility-range-start-slider" type="range" min="0" max="115" step="0.01" value="0" aria-label="投掷开始时间，开打后秒数" aria-describedby="utility-range-note">
+<input id="utility-range-end-slider" type="range" min="0" max="115" step="0.01" value="115" aria-label="投掷结束时间，开打后秒数" aria-describedby="utility-range-note"></div>
+<p id="utility-range-note" class="micro">拖动手柄或输入开打后的秒数。包含开始时刻，结束时刻归入下一段。</p>
+<p id="utility-range-error" class="micro" role="alert" hidden>结束时间须大于开始时间。</p>
+</form>
 <p id="utility-time-note" class="micro">以冻结结束、回合正式开打为 0，按出手时刻分类。5 秒归开局，20 / 50 秒归前一段；缺少时间记录单列为未知。</p>
 <div id="utility-time-counts" class="utility-time-counts" role="group" aria-label="各投掷时段次数，点击筛选"></div>
 <p class="micro utility-time-scope">阶段次数随投掷时段变化，时段分布按选中的下包阶段统计。</p>
@@ -65,7 +84,7 @@
 </main>
 <dialog id="throw-replays" class="throw-replays" aria-labelledby="throw-replays-title">
 <header><h2 id="throw-replays-title">选择要回放的投掷</h2><form method="dialog"><button class="button quiet" autofocus>关闭</button></form></header>
-<ul id="throw-replay-list" aria-label="附近的道具投掷"></ul>
+<div id="throw-replay-list" role="group" aria-label="按战队和队员分组的投掷回放"></div>
 </dialog>
 <dialog id="analysis-library-dialog" class="analysis-library-dialog" aria-labelledby="analysis-library-title" hidden>
 <div class="analysis-library-heading"><div><span class="eyebrow">LOCAL DEMO LIBRARY</span><h2 id="analysis-library-title">选择要分析的录像</h2><p>刷新只扫描目录；加入分析时才解析所选比赛。已解析的录像直接复用缓存。</p></div><button id="analysis-library-close" class="button quiet" type="button" aria-label="关闭录像库">关闭</button></div>

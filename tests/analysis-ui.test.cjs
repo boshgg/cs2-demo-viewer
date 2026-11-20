@@ -1432,6 +1432,110 @@ test('map utility points open one throw or list nearby throws across demos after
   assert.equal(ui.get('throw-replays').open, false);
   assert.equal(ui.downloads.length, 1);
 });
+test('replay summary ranks teams and players by throws, respects identity across demos, and pages every replay', async () => {
+  const first = utilityDemo('first'), second = utilityDemo('second');
+  const throwItem = first.utilities[0], stable = throwItem.playerId;
+  first.teams[0].name = 'First team';
+  second.teams = [{ id: 'alias-team-a', name: 'First team, second demo', playerIds: [stable] }, { id: 'opponent', name: 'Opponent', playerIds: [stable] }];
+  first.utilities = Array.from({ length: 55 }, (_, i) => ({ ...throwItem, id: `u-${i}`, owner: 'Alpha', round: i + 1 }));
+  first.utilities.push({ ...throwItem, id: 'same-name', type: 'flash', owner: 'Alpha', playerId: 'different-id' });
+  second.utilities = [
+    { ...throwItem, id: 'alias', type: 'he', teamId: 'alias-team-a', owner: 'Renamed' },
+    { ...throwItem, id: 'transfer', teamId: 'opponent', owner: 'Alpha' },
+    { ...throwItem, id: 'anonymous', teamId: '', playerId: '', owner: '' },
+  ];
+  const ui = await page([first, second], { saved: { aliases: { 'team-a': 'United', 'alias-team-a': 'United' } } });
+  await ui.get('utility-box-toggle').click();
+  const point = { clientX: 111 + 300*578/1024, clientY: 11 + (1024-650)*578/1024, pointerId: 1, button: 0 };
+  const corner = offset => ({ ...point, clientX: point.clientX + offset, clientY: point.clientY + offset });
+  await ui.main.dispatch('pointerdown', corner(-8)); await ui.main.dispatch('pointermove', corner(8)); await ui.main.dispatch('pointerup', corner(8));
+  const list = ui.get('throw-replay-list'), united = list.children[0];
+  const other = list.children.find(group => textWithin(group.children[0]).includes('Opponent'));
+  const unknown = list.children.find(group => textWithin(group.children[0]).includes('队伍未知'));
+  assert.match(ui.get('throw-replays-title').textContent, /59 次 · 2 场比赛/);
+  assert.equal(list.children.length, 3);
+  assert.match(textWithin(united.children[0]), /United.*57 次 · 占所选 96\.6%.*烟雾弹 55.*闪光弹 1.*高爆手雷 1/);
+  assert.match(textWithin(other.children[0]), /Opponent.*1 次/);
+  assert.match(textWithin(unknown.children[0]), /队伍未知.*second\.dem.*1 次/);
+  assert.match(textWithin(unknown.children[1]), /未识别队员/);
+  const [, alpha, different] = united.children;
+  assert.match(textWithin(alpha.children[0]), /Alpha \/ Renamed.*56 次 · 占队内 98\.2%.*烟雾弹 55.*高爆手雷 1/);
+  assert.equal(alpha.children[0].title, stable);
+  assert.equal(different.children[0].title, 'different-id');
+  assert.equal(list.querySelectorAll('a').length, 0);
+  alpha.open = true; await alpha.dispatch('toggle');
+  assert.equal(alpha.querySelectorAll('a').length, 50);
+  const more = alpha.querySelectorAll('button')[0];
+  assert.match(more.textContent, /剩余 6 次/);
+  await more.click(); assert.equal(more.hidden, true);
+  for (const player of [alpha, different, other.children[1], unknown.children[1]]) {
+    player.open = true; await player.dispatch('toggle');
+  }
+  const links = list.querySelectorAll('a');
+  assert.equal(links.length, 59); assert.equal(new Set(links.map(link => link.href)).size, 59);
+  assert.ok(links.some(link => link.href === '/?demo=first&round=55&t=400&utility=u-54'));
+});
+test('map box selection uses filtered throws across groups, both endpoint directions, zoom and pan', async () => {
+  const demo = utilityDemo('box');
+  const inside = { x: 300, y: 650, z: 0 }, outside = { x: 880, y: 250, z: 0 };
+  demo.utilities = [
+    { ...demo.utilities[0], start: inside, end: inside },
+    { ...demo.utilities[1], start: inside, end: outside },
+    { ...demo.utilities[2], start: outside, end: inside },
+    { ...demo.utilities[3], start: outside, end: outside },
+  ];
+  const ui = await page([demo]);
+  const pointer = (clientX, clientY) => ({ clientX, clientY, pointerId: 1, button: 0 });
+  const drag = async (from, to) => {
+    await ui.main.dispatch('pointerdown', from); await ui.main.dispatch('pointermove', to);
+    await ui.main.dispatch('pointerup', to);
+  };
+  let x = 111 + 300 * 578 / 1024, y = 11 + (1024 - 650) * 578 / 1024;
+  await ui.main.dispatch('wheel', { ...pointer(x, y), deltaY: -100 });
+  await drag(pointer(x, y), pointer(x + 55, y + 40)); x += 55; y += 40;
+  const box = () => drag(pointer(x + 5, y + 5), pointer(x - 5, y - 5));
+  const ids = () => ui.get('throw-replay-list').querySelectorAll('a').map(a => new URL(a.href, 'http://localhost').searchParams.get('utility')).sort();
+  const assertSelection = async expected => {
+    await box();
+    assert.equal(ui.get('throw-replays').open, true);
+    assert.deepEqual(ids(), expected);
+    assert.equal(ui.get('utility-box-rect').hidden, true);
+    ui.get('throw-replays').close();
+  };
+  await ui.get('utility-box-toggle').click();
+  assert.equal(ui.get('utility-box-scope-field').hidden, true);
+  await assertSelection(['grenade-0', 'grenade-1', 'grenade-2']);
+  await ui.get('utility-groups').children[0].click();
+  assert.equal(ui.get('utility-box-scope-field').hidden, false);
+  const allCanvas = () => drag(pointer(0, 0), pointer(800, 600));
+  await allCanvas();
+  assert.equal(ids().length, 2, 'current landing cluster includes its two underlying throws');
+  ui.get('throw-replays').close();
+  ui.get('utility-box-scope').value = 'all'; await ui.get('utility-box-scope').dispatch('change');
+  await allCanvas();
+  assert.equal(ids().length, 4, 'all-filtered scope includes the other cluster while one is located');
+  ui.get('throw-replays').close();
+  for (const [endpoint, expected] of [['start', ['grenade-0', 'grenade-1']], ['end', ['grenade-0', 'grenade-2']]]) {
+    ui.get('utility-box-points').value = endpoint; await ui.get('utility-box-points').dispatch('change');
+    await assertSelection(expected);
+  }
+  ui.get('analysis-utility-time').value = '5-20'; await ui.get('analysis-utility-time').dispatch('change'); await settle();
+  await assertSelection(['grenade-2']);
+  assert.equal(ui.downloads.length, 0, 'a one-throw box still opens the chooser');
+  await drag(pointer(50, 50), pointer(30, 30));
+  assert.match(ui.get('utility-box-status').textContent, /没有/);
+  assert.equal(ui.get('throw-replays').open, false);
+  const anchor = pointer(x, y);
+  await ui.main.dispatch('pointerdown', anchor);
+  await ui.main.dispatch('pointermove', pointer(x + 20, y + 20));
+  assert.equal(ui.get('utility-box-rect').hidden, false);
+  await ui.main.dispatch('pointercancel', anchor);
+  await ui.main.dispatch('pointerup', pointer(x + 20, y + 20));
+  assert.equal(ui.get('utility-box-rect').hidden, true);
+  assert.equal(ui.get('throw-replays').open, false);
+  await ui.main.dispatch('keydown', { key: 'Escape' });
+  assert.equal(ui.get('utility-box-options').hidden, true);
+});
 function utilityCounts(ui) { return Object.fromEntries(ui.get('utility-time-counts').children.map(button => [button.dataset.timeBucket, Number(button.dataset.count)])); }
 function textWithin(element) { return [element.textContent, ...element.children.map(textWithin)].join(' '); }
 function csvRows(text) { return text.replace(/^\ufeff/, '').split('\r\n').map(row => row.slice(1, -1).split('","').map(cell => cell.replace(/""/g, '"'))); }
@@ -1769,7 +1873,7 @@ test('compute and worker errors stop autoplay without replacing the displayed fr
 
 test('utility time options and clickable distribution filter groups without altering movement, combat or death heatmaps', async () => {
   const ui = await page([utilityDemo()]);
-  assert.deepEqual(ui.get('analysis-utility-time').children.map(option => option.value), ['all', '0-5', '5-20', '20-50', '50+', 'unknown']);
+  assert.deepEqual(ui.get('analysis-utility-time').children.map(option => option.value), ['all', 'custom', '0-5', '5-20', '20-50', '50+', 'unknown']);
   const counts = { all: 7, '0-5': 2, '5-20': 1, '20-50': 1, '50+': 1, unknown: 2 };
   assert.deepEqual(utilityCounts(ui), counts);
   const pixels = ui.renderedHeat().imageData.data.slice(), metrics = ['movement', 'engagements', 'deaths'].map(key => ui.get(`metric-${key}`).textContent);
@@ -1791,6 +1895,43 @@ test('utility time options and clickable distribution filter groups without alte
     assert.deepEqual(['movement', 'engagements', 'deaths'].map(metric => ui.get(`metric-${metric}`).textContent), metrics);
     assert.equal(ui.get('selection-summary').textContent, selectionSummary);
   }
+});
+
+test('custom utility time restores precise inputs, covers late throws and updates groups, CSV and both slider handles', async () => {
+  const d = utilityDemo(); d.utilityPlantPhaseVersion = 1;
+  const extra = (id, elapsed, plantPhase) => ({ ...d.utilities[0], id, plantPhase, roundElapsed: elapsed, time: 400 + elapsed });
+  d.utilities.push(extra('in', 120.25, 'post'), extra('right', 125, 'post'), extra('pre', 121, 'pre'));
+  const ui = await page([d], { worker: true });
+  await ui.change('analysis-utility-time', 'custom');
+  assert.equal(ui.get('utility-time-custom').hidden, false);
+  assert.equal(ui.get('utility-range-end').value, '126');
+  assert.equal(ui.get('metric-utilities').textContent, '8');
+  ui.get('utility-range-start').value = '120.25'; ui.get('utility-range-end').value = '125';
+  await ui.get('utility-time-custom').dispatch('submit'); await settle();
+  await clickAndSettle(ui, 'utility-phase-post');
+  assert.match(textWithin(ui.get('utility-groups')), /120\.25–125 秒/);
+  assert.equal(ui.get('rounds-utilities').textContent, '来自 1 个回合');
+  await ui.get('export-csv').click(); const rows = csvRows(await ui.downloads.at(-1).blob.text());
+  assert.equal(rows.length, 2); assert.equal(rows[1][rows[0].indexOf('回合开打后秒数')], '120.25');
+  const restored = await page([d], { saved: ui.saved() });
+  assert.equal(restored.get('analysis-utility-time').value, 'custom');
+  assert.equal(restored.get('utility-time-custom').hidden, false);
+  assert.equal(restored.get('metric-utilities').textContent, '1');
+  restored.get('utility-range-end').value = '120';
+  await restored.get('utility-time-custom').dispatch('submit'); await settle();
+  assert.equal(restored.get('utility-range-error').hidden, false);
+  assert.deepEqual(restored.saved().utilityRange, { start: 120.25, end: 125 });
+  await restored.input('utility-range-end-slider', 126); await restored.change('utility-range-end-slider', '126');
+  assert.equal(restored.get('metric-utilities').textContent, '2');
+  await restored.change('utility-range-start-slider', '121');
+  assert.equal(restored.get('metric-utilities').textContent, '1');
+  assert.deepEqual(restored.saved().utilityRange, { start: 121, end: 126 });
+  await utilityCountButton(restored, 'all').click(); await settle();
+  assert.equal(restored.get('utility-time-custom').hidden, true);
+  await restored.change('analysis-utility-time', 'custom');
+  assert.equal(restored.get('utility-range-start').value, '121');
+  await clickAndSettle(restored, 'clear-selection');
+  assert.equal(restored.get('utility-time-custom').hidden, true); assert.equal(restored.saved().utilityRange, null);
 });
 
 test('utility distribution follows other filters while changing and restoring time preserves every saved selection', async () => {

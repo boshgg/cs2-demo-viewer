@@ -45,15 +45,20 @@
     { key: '20-50', label: '20–50 秒' }, { key: '50+', label: '50 秒以后' },
     { key: 'unknown', label: '时间未知' },
   ].map(Object.freeze));
+  // A small tolerance keeps subtraction of replay timestamps stable at interval boundaries.
+  const utilityTimeEpsilon = 1e-7;
+  function normalizeUtilityRange(range) {
+    if (!valid(range?.start) || !valid(range?.end) || range.start < 0 || range.end <= range.start || range.end > Number.MAX_SAFE_INTEGER) return null;
+    return { start: range.start, end: range.end };
+  }
   function utilityTimeBucket(utility) {
     const elapsed = utility?.roundElapsed;
     // Absolute replay time and a detonation time are not release-time evidence.
     // Legacy summaries remain unknown until timing evidence is added from replay data.
     if (utility?.throwObserved !== true || utility?.timeSource !== 'freeze_end' || !valid(elapsed) || elapsed < 0) return 'unknown';
-    const epsilon = 1e-7;
-    if (elapsed <= 5 + epsilon) return '0-5';
-    if (elapsed <= 20 + epsilon) return '5-20';
-    if (elapsed <= 50 + epsilon) return '20-50';
+    if (elapsed <= 5 + utilityTimeEpsilon) return '0-5';
+    if (elapsed <= 20 + utilityTimeEpsilon) return '5-20';
+    if (elapsed <= 50 + utilityTimeEpsilon) return '20-50';
     return '50+';
   }
   function utilityTimeLabel(key) { return key === 'all' ? '全部时间' : utilityTimeBuckets.find(bucket => bucket.key === key)?.label || '时间未知'; }
@@ -143,7 +148,9 @@
     const ids = asSet(filter.demoIds), players = asSet(filter.playerIds), teams = asSet(filter.teamIds), sides = asSet(filter.sides?.map(Number));
     const cells = new Map(), utilities = [], seenUtilities = new Set(), includedPlayers = new Set(), includedTeams = new Set(), includedDemos = new Set();
     const utilityTimeCounts = Object.fromEntries(utilityTimeBuckets.map(bucket => [bucket.key, 0]));
-    const selectedTime = utilityTimeBuckets.some(bucket => bucket.key === filter.utilityTime) ? filter.utilityTime : 'all';
+    const customTime = filter.utilityTime === 'custom' ? normalizeUtilityRange(filter.utilityRange) : null;
+    let utilityTimeMax = 0;
+    const selectedTime = filter.utilityTime === 'custom' || utilityTimeBuckets.some(bucket => bucket.key === filter.utilityTime) ? filter.utilityTime : 'all';
     const totals = { movementSeconds: 0, engagements: 0, deaths: 0, shots: 0, utilities: 0, players: 0, teams: 0, demos: 0, rounds: 0 };
     const roundCounts = { selected: 0, heatmap: 0, movement: 0, engagements: 0, deaths: 0, shots: 0, utilities: 0 };
     const selectedFloor = filter.floor || 'all';
@@ -305,9 +312,14 @@
         seenUtilities.add(key);
         const timeBucket = utilityTimeBucket(u);
         const phase = d.utilityPlantPhaseVersion === 1 && u.throwObserved === true && (u.plantPhase === 'pre' || u.plantPhase === 'post') ? u.plantPhase : 'unknown';
-        const timeMatches = selectedTime === 'all' || timeBucket === selectedTime;
+        const timeMatches = customTime
+          ? timeBucket !== 'unknown' && u.roundElapsed >= customTime.start - utilityTimeEpsilon && u.roundElapsed < customTime.end - utilityTimeEpsilon
+          : selectedTime === 'all' || timeBucket === selectedTime;
         const phaseMatches = utilityPlantPhase === 'all' || phase === utilityPlantPhase;
-        if (phaseMatches) utilityTimeCounts[timeBucket]++;
+        if (phaseMatches) {
+          utilityTimeCounts[timeBucket]++;
+          if (timeBucket !== 'unknown') utilityTimeMax = Math.max(utilityTimeMax, u.roundElapsed);
+        }
         if (timeMatches) {
           utilityPlantPhaseCounts.all++;
           utilityPlantPhaseCounts[phase]++;
@@ -337,7 +349,7 @@
         }
       }
     }
-    return { map, cells: [...cells.values()], utilities, utilityTimeCounts, utilityPlantPhase, utilityPlantPhaseCounts, totals, roundCounts, movementTime, movementCoverage, heatmapCoverage, plantPhase, plantTime, missingPlantTimeDemos, missingPlantPhaseDemos, unknownPlantRounds };
+    return { map, cells: [...cells.values()], utilities, utilityTimeCounts, utilityTimeMax, utilityPlantPhase, utilityPlantPhaseCounts, totals, roundCounts, movementTime, movementCoverage, heatmapCoverage, plantPhase, plantTime, missingPlantTimeDemos, missingPlantPhaseDemos, unknownPlantRounds };
   }
   function clusterUtilities(input, options = {}) {
     const landing = Math.max(1, Math.min(1024, Number(options.landing) || 128));
@@ -396,5 +408,5 @@
       return `"${safe.replace(/"/g, '""')}"`;
     }).join(',')).join('\r\n');
   }
-  return { aggregate, clusterUtilities, uniqueDemos, teamKey, floorOf, csv, utilityTimeBucket, utilityTimeLabel, utilityTimeBuckets, utilityPlantPhaseLabel, normalizePlantTime, normalizeMovementTime, movementDuration };
+  return { aggregate, clusterUtilities, uniqueDemos, teamKey, floorOf, csv, utilityTimeBucket, utilityTimeLabel, utilityTimeBuckets, utilityPlantPhaseLabel, normalizeUtilityRange, normalizePlantTime, normalizeMovementTime, movementDuration };
 });

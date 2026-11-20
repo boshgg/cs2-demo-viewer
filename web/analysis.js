@@ -11,6 +11,7 @@
   state.plantPhase = 'all';
   state.plantTimes = { pre: null, post: null };
   state.utilityPlantPhase = 'all';
+  state.utilityRange = null;
   const plantPhaseNames = { all: '全部阶段', pre: '下包前', post: '下包后' };
   let initializing = true, migratedSessionId = '', libraryEnabled = false, libraryRefreshing = false, libraryScanning = false, syncPromise = null, libraryTimer, restoredView = null;
   let libraryInfoRequest = 0;
@@ -27,6 +28,7 @@
   const metricNames = { movement: '移动', engagements: '交火', deaths: '死亡', shots: '开火' };
   const heatResolution = 384;
   let utilityMarkers = [];
+  let boxMode = false, utilityDataReady = false, dragging = null;
   const metrics = ['movement', 'engagements', 'deaths', 'shots'];
   const utilityNames = { smoke: '烟雾弹', flash: '闪光弹', he: '高爆手雷', molotov: '燃烧瓶', incendiary: '燃烧弹', decoy: '诱饵弹', unknown: '未知道具' };
   const utilityIcons = { smoke: 'smokegrenade', flash: 'flashbang', he: 'hegrenade', molotov: 'molotov', incendiary: 'incgrenade', decoy: 'decoy' };
@@ -45,6 +47,7 @@
     settings.plantPhase = state.plantPhase;
     settings.plantTimes = state.plantTimes;
     settings.utilityPlantPhase = state.utilityPlantPhase;
+    settings.utilityRange = state.utilityRange;
     settings.heatmapPlayback = { windowLength: playbackLength, speed: playbackSpeed };
     if (restoredView) { settings.map = restoredView.map; settings.floor = restoredView.floor; }
     try { localStorage.setItem(storageKey, JSON.stringify(settings)); } catch { /* Private browsing may not offer localStorage. */ }
@@ -76,6 +79,9 @@
     for (const phase of ['pre', 'post']) state.plantTimes[phase] = core.normalizePlantTime(saved.plantTimes?.[phase]);
     renderPlantWindow();
     state.utilityPlantPhase = ['pre', 'post'].includes(saved.utilityPlantPhase) ? saved.utilityPlantPhase : 'all';
+    state.utilityRange = core.normalizeUtilityRange(saved.utilityRange);
+    if (saved.utilityTime === 'custom' && state.utilityRange) $('analysis-utility-time').value = 'custom';
+    renderUtilityRange();
     playbackLength = state.movementTime ? state.movementTime.end - state.movementTime.start : playback.normalizeWindowLength(saved.heatmapPlayback?.windowLength);
     playbackSpeed = playback.normalizeSpeed(saved.heatmapPlayback?.speed); renderMovementTime(); renderPlayback();
   }
@@ -232,6 +238,12 @@
   function requestAnalysis(options = {}) {
     if (!options.autoplay) pausePlayback('已暂停：筛选已更新。');
     clearTimeout(movementTimer); movementTimer = null;
+    if (!options.movementOnly || !state.map) {
+      utilityDataReady = false;
+      resetBoxGesture();
+      if ($('throw-replays').open) $('throw-replays').close();
+      $('utility-box-status').textContent = '';
+    }
     if (!state.map) {
       movementPending = false; analysisPending = false; workerPending = null;
       ++state.request; state.result = null; state.selectedGroup = state.selectedThrow = null; clearHeat(); renderLegend();
@@ -247,6 +259,7 @@
     filter.plantPhase = state.plantPhase;
     filter.plantTime = state.plantTimes[state.plantPhase] || null;
     filter.utilityPlantPhase = state.utilityPlantPhase;
+    if (filter.utilityTime === 'custom') filter.utilityRange = state.utilityRange;
     const id = ++state.request;
     analysisPending = true;
     if (options.autoplay) playbackPending = { id, range: { ...options.range } };
@@ -257,7 +270,7 @@
       const wasShowingMarkers = !!state.selectedGroup;
       state.selectedGroup = state.selectedThrow = null;
       $('utility-groups').replaceChildren(); $('utility-detail').hidden = true; $('clear-utility').hidden = true;
-      if (wasShowingMarkers) draw();
+      if (wasShowingMarkers || boxMode) draw();
     }
     if (state.worker) { const job = { type: 'compute', id, filter, cluster }; if (workerBusy) workerPending = job; else sendWorkerRequest(job); }
     else {
@@ -286,7 +299,7 @@
     if (id !== state.request) return;
     if (playbackPending?.id === id) { state.movementTime = playbackPending.range; playbackPending = null; renderMovementTime(); save(); }
     analysisPending = false;
-    state.result = result; $('computing').hidden = true;
+    state.result = result; utilityDataReady = true; $('computing').hidden = true;
     movementPending = false; renderMovementCoverage();
     const total = result.totals;
     const available = currentDemos();
@@ -1008,7 +1021,9 @@
     $('heat-tooltip').hidden = true;
     utilityMarkers = [];
     canvas.style.cursor = '';
-    if (!state.selectedGroup && $('throw-replays').open) $('throw-replays').close();
+    const hasThrows = utilityDataReady && !!state.result?.utilities.length;
+    $('utility-box-toggle').disabled = !hasThrows && !boxMode;
+    $('utility-box-scope-field').hidden = !state.selectedGroup;
     const d = dimensions(), scale = Math.min(2, devicePixelRatio || 1);
     if (canvas.width !== Math.round(d.width * scale) || canvas.height !== Math.round(d.height * scale)) { canvas.width = Math.round(d.width * scale); canvas.height = Math.round(d.height * scale); }
     ctx.setTransform(scale, 0, 0, scale, 0, 0); ctx.clearRect(0, 0, d.width, d.height); ctx.fillStyle = '#13181e'; ctx.fillRect(0, 0, d.width, d.height);
@@ -1020,26 +1035,36 @@
     ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = Number($('heat-opacity').value) / 100;
     if (state.heatCanvas) ctx.drawImage(state.heatCanvas, d.x, d.y, d.size, d.size);
     ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
-    if (state.selectedGroup) drawUtility(d);
+    if (hasThrows && (state.selectedGroup || boxMode)) drawUtility(d);
+    else if (boxMode) $('map-status').textContent = utilityDataReady ? '当前筛选没有可框选的投掷' : '等待读取道具数据';
+    else $('map-status').textContent = '滚轮缩放 · 拖拽平移 · 点击右侧落点定位';
     $('zoom-value').textContent = `${Math.round(state.zoom * 100)}%`;
   }
   function drawUtility(d) {
-    const group = state.selectedGroup, selected = state.selectedThrow, items = selected ? selected.items : group.items;
+    const allFiltered = boxMode && (!state.selectedGroup || $('utility-box-scope').value === 'all');
+    const group = allFiltered ? null : state.selectedGroup;
+    const items = group ? (state.selectedThrow || group).items : state.result.utilities;
+    const points = boxMode ? $('utility-box-points').value : 'both';
     const toScreen = p => { const q = projection(p); return { x: d.x + q.x * d.size, y: d.y + q.y * d.size }; };
     for (const item of items) {
-      const end = toScreen(item.end); ctx.beginPath(); ctx.arc(end.x, end.y, 3.5, 0, Math.PI * 2); ctx.fillStyle = '#ffca76'; ctx.fill();
-      utilityMarkers.push({ ...end, item });
-      if (item.start) {
+      if (points !== 'start') {
+        const end = toScreen(item.end); ctx.beginPath(); ctx.arc(end.x, end.y, 3.5, 0, Math.PI * 2); ctx.fillStyle = '#ffca76'; ctx.fill();
+        utilityMarkers.push({ ...end, item });
+      }
+      if (points !== 'end' && item.start) {
         const start = toScreen(item.start); ctx.beginPath(); ctx.arc(start.x, start.y, 3.5, 0, Math.PI * 2); ctx.fillStyle = '#7fe8dc'; ctx.fill();
         utilityMarkers.push({ ...start, item });
       }
     }
+    if (boxMode) {
+      $('map-status').textContent = `${group ? '当前定位' : '全部筛选结果'} · 青色出手 · 金色落点 · 拖动框选`;
+      if (!group) return;
+    } else $('map-status').textContent = '青色出手 · 金色落点 · 点击圆点回放，密集处可选择录像';
     const representative = items.find(u => u.path?.length > 1) || items[0];
     if (representative?.path?.length > 1) {
       ctx.beginPath(); representative.path.forEach((point, index) => { const p = toScreen(point); if (!index) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); }); ctx.strokeStyle = '#e7f0d5'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]); ctx.stroke(); ctx.setLineDash([]);
     }
     const label = toScreen(group.end); ctx.font = '10px "Segoe UI",sans-serif'; ctx.fillStyle = '#ffdc9b'; ctx.fillText(`${utilityNames[group.type] || group.type} · ${items.length} 次`, label.x + 10, label.y - 9);
-    $('map-status').textContent = '青色出手 · 金色落点 · 点击圆点回放，密集处可选择录像';
   }
   function throwsAt(event) {
     if (!state.selectedGroup || !utilityMarkers.length) return [];
@@ -1064,22 +1089,95 @@
     link.target = '_blank'; link.rel = 'noopener';
     return link;
   }
-  function openMapThrows(items) {
-    if (!items.length) return;
-    if (items.length === 1) { throwReplayLink(items[0]).click(); return; }
-    const dialog = $('throw-replays'), list = $('throw-replay-list');
-    $('throw-replays-title').textContent = `选择要回放的投掷（${items.length} 次）`;
-    list.replaceChildren();
+  function groupThrowReplays(items) {
+    const teams = new Map(), teamInfo = new Map(availableTeams().map(team => [team.id, team]));
+    const playerNames = new Map(availablePlayers().map(player => [player.id, player.name]));
     for (const item of items) {
-      const link = throwReplayLink(item);
-      const paths = library.sourcePaths(catalog.get(item.demoId));
-      link.replaceChildren(node('strong', item.demoName || item.demoId),
-        node('span', `第 ${item.round} 回合 · ${item.owner || item.playerId || '未知选手'} · ${utilityNames[item.type] || item.type} · ${utilityTimeDescription(item)}`),
-        node('small', paths[0] || `比赛 ID ${item.demoId}`));
-      const li = document.createElement('li'); li.append(link); list.append(li);
+      let team = teams.get(item.teamId);
+      if (!team) {
+        const info = teamInfo.get(item.teamId);
+        let name = info?.name || '队伍未知';
+        if (!info || (!item.teamId.startsWith('alias:') && ['demo', 'ambiguous', 'unknown'].includes(info.source))) {
+          name += `（${item.demoName || item.demoId}）`;
+        }
+        team = { name, players: new Map(), types: new Map(), count: 0 };
+        teams.set(item.teamId, team);
+      }
+      let player = team.players.get(item.playerId);
+      if (!player) {
+        player = { names: new Set(), types: new Map(), items: [], id: item.playerId };
+        team.players.set(item.playerId, player);
+      }
+      player.names.add(item.playerId ? item.owner || playerNames.get(item.playerId) || item.playerId : '未识别队员');
+      player.items.push(item);
+      const type = item.type || 'unknown';
+      player.types.set(type, (player.types.get(type) || 0) + 1);
+      team.types.set(type, (team.types.get(type) || 0) + 1);
+      team.count++;
     }
-    dialog.showModal();
+    return [...teams.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
   }
+  function throwGroupSummary(name, count, total, scope, types) {
+    const summary = node('summary'), distribution = [...types].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    summary.append(node('strong', name), node('span', `${number(count)} 次 · 占${scope} ${(count * 100 / total).toFixed(1)}%`),
+      node('small', distribution.map(([type, n]) => `${utilityNames[type] || type} ${number(n)}`).join(' · ')));
+    return summary;
+  }
+  function throwPlayerDetails(player, name, teamCount, expanded) {
+    const details = node('details', null, 'throw-player'), list = node('ul'), more = node('button', '显示更多投掷', 'button quiet throw-more');
+    const summary = throwGroupSummary(name, player.items.length, teamCount, '队内', player.types);
+    if (player.id) summary.title = player.id;
+    details.open = expanded;
+    details.append(summary, list, more);
+    more.type = 'button';
+    let shown = 0;
+    function appendPage() {
+      const end = Math.min(shown + 50, player.items.length);
+      for (; shown < end; shown++) {
+        const item = player.items[shown], link = throwReplayLink(item);
+        const paths = library.sourcePaths(catalog.get(item.demoId));
+        link.replaceChildren(node('strong', item.demoName || item.demoId),
+          node('span', `第 ${item.round} 回合 · ${item.owner || name} · ${utilityNames[item.type] || item.type} · ${utilityTimeDescription(item)}`),
+          node('small', paths[0] || `比赛 ID ${item.demoId}`));
+        const li = node('li'); li.append(link); list.append(li);
+      }
+      more.hidden = shown === player.items.length;
+      if (!more.hidden) more.textContent = `显示更多投掷（剩余 ${number(player.items.length - shown)} 次）`;
+    }
+    more.addEventListener('click', appendPage);
+    details.addEventListener('toggle', () => { if (details.open && !shown) appendPage(); });
+    if (expanded) appendPage();
+    return details;
+  }
+  function openMapThrows(items, { forceList = false } = {}) {
+    if (!items.length) return;
+    if (items.length === 1 && !forceList) { throwReplayLink(items[0]).click(); return; }
+    const dialog = $('throw-replays'), list = $('throw-replay-list');
+    const teams = groupThrowReplays(items);
+    $('throw-replays-title').textContent = `投掷回放 · ${number(items.length)} 次 · ${number(new Set(items.map(item => item.demoId)).size)} 场比赛`;
+    list.replaceChildren();
+    for (const team of teams) {
+      const section = node('details', null, 'throw-team'); section.open = true;
+      section.append(throwGroupSummary(team.name, team.count, items.length, '所选', team.types));
+      const players = [...team.players.values()].sort((a, b) => b.items.length - a.items.length);
+      const names = players.map(player => [...player.names].join(' / '));
+      const distinctNames = new Set(), duplicateNames = new Set();
+      for (const name of names) {
+        if (distinctNames.has(name)) duplicateNames.add(name);
+        distinctNames.add(name);
+      }
+      players.forEach((player, i) => {
+        const name = duplicateNames.has(names[i]) && player.id ? `${names[i]}（${player.id}）` : names[i];
+        section.append(throwPlayerDetails(player, name, team.count, teams.length === 1 && players.length === 1));
+      });
+      list.append(section);
+    }
+    if (!dialog.open) dialog.showModal();
+    list.scrollTop = 0;
+  }
+  $('throw-replays').addEventListener('close', () => {
+    if (!$('throw-replays').open) $('throw-replay-list').replaceChildren();
+  });
   function renderUtilityPhase() {
     const counts = state.result?.utilityPlantPhaseCounts || {};
     for (const phase of Object.keys(plantPhaseNames)) {
@@ -1094,8 +1192,53 @@
     coverage.textContent = unknown ? `当前时段有 ${number(unknown)} 次投掷无法确定下包阶段，仅计入「全部」。` : '';
     coverage.hidden = !unknown;
   }
+  function utilityRangeLimit() {
+    // An exclusive upper bound must also include the last throw when it is on a whole second.
+    return Math.max(movementDuration, Math.floor((state.result?.utilityTimeMax || 0) + 1e-7) + 1, state.utilityRange?.end || 0);
+  }
+  function selectedUtilityTimeLabel() {
+    return $('analysis-utility-time').value === 'custom'
+      ? `开打后 ${state.utilityRange.start}–${state.utilityRange.end} 秒（不含结束）`
+      : core.utilityTimeLabel($('analysis-utility-time').value);
+  }
+  function renderUtilityRangeTrack(range) {
+    const limit = utilityRangeLimit();
+    for (const edge of ['start', 'end']) {
+      const slider = $('utility-range-' + edge + '-slider');
+      slider.max = String(limit); slider.value = String(range[edge]);
+      slider.setAttribute('aria-valuetext', `开打后 ${range[edge]} 秒`);
+    }
+    $('utility-range-fill').style.left = `${range.start / limit * 100}%`;
+    $('utility-range-fill').style.width = `${(range.end - range.start) / limit * 100}%`;
+  }
+  function renderUtilityRange() {
+    const custom = $('analysis-utility-time').value === 'custom';
+    $('utility-time-custom').hidden = !custom;
+    $('utility-time-note').hidden = custom;
+    $('utility-range-error').hidden = true;
+    if (!custom) return;
+    state.utilityRange ??= { start: 0, end: utilityRangeLimit() };
+    for (const edge of ['start', 'end']) $('utility-range-' + edge).value = String(state.utilityRange[edge]);
+    renderUtilityRangeTrack(state.utilityRange);
+  }
+  function changeUtilityTime() {
+    renderUtilityRange();
+    requestAnalysis();
+  }
+  function moveUtilityRange(edge, commit) {
+    const start = Number($('utility-range-start-slider').value), end = Number($('utility-range-end-slider').value);
+    // Keep at least one hundredth of a second between the handles.
+    const range = edge === 'start'
+      ? { start: Math.min(start, Number((end - 0.01).toFixed(2))), end }
+      : { start, end: Math.max(end, Number((start + 0.01).toFixed(2))) };
+    renderUtilityRangeTrack(range);
+    for (const side of ['start', 'end']) $('utility-range-' + side).value = String(range[side]);
+    $('utility-range-error').hidden = true;
+    if (commit) { state.utilityRange = range; requestAnalysis(); }
+  }
   function renderUtilityTimeCounts() {
     const counts = state.result?.utilityTimeCounts || {}, selected = $('analysis-utility-time').value;
+    if (selected === 'custom' && $('utility-range-end-slider').max !== String(utilityRangeLimit())) renderUtilityRangeTrack(state.utilityRange);
     const all = core.utilityTimeBuckets.reduce((sum, bucket) => sum + (counts[bucket.key] || 0), 0);
     const list = $('utility-time-counts'); list.replaceChildren();
     for (const { key, label } of [{ key: 'all', label: core.utilityTimeLabel('all') }, ...core.utilityTimeBuckets]) {
@@ -1104,7 +1247,7 @@
       button.type = 'button'; button.dataset.timeBucket = key; button.dataset.count = String(count); button.setAttribute('aria-pressed', String(selected === key));
       button.setAttribute('aria-label', `${label}，${number(count)} 次投掷`);
       button.append(node('span', label), node('strong', number(count)));
-      button.addEventListener('click', () => { $('analysis-utility-time').value = key; requestAnalysis(); }); list.append(button);
+      button.addEventListener('click', () => { $('analysis-utility-time').value = key; changeUtilityTime(); }); list.append(button);
     }
   }
   function utilityTimeDescription(item) {
@@ -1123,7 +1266,7 @@
     for (const group of groups.slice(0, max)) {
       const button = node('button', null, `utility-card${state.selectedGroup?.id === group.id ? ' selected' : ''}`); button.setAttribute('aria-pressed', String(state.selectedGroup?.id === group.id));
       const image = document.createElement('img'); image.src = `/icons/${utilityIcons[group.type] || 'unknown'}.svg`; image.alt = '';
-      const timeLabel = $('analysis-utility-time').value === 'all' ? '' : ` · ${core.utilityTimeLabel($('analysis-utility-time').value)}`;
+      const timeLabel = $('analysis-utility-time').value === 'all' ? '' : ` · ${selectedUtilityTimeLabel()}`;
       const text = node('span'); text.append(node('strong', `${utilityNames[group.type] || group.type} · 落点 ${group.id.split('-')[1]}`), node('small', `${group.demoCount} 场 · ${group.playerCount} 人 · ${group.throws.filter(g => !g.unknown).length} 种已知投法${group.unknownStarts ? ` · ${group.unknownStarts} 次出手点未知` : ''}${timeLabel}`));
       const count = node('span', null, 'utility-card-count'); count.append(node('b', group.count), node('em', `${group.percent.toFixed(1)}%`));
       button.append(image, text, count); button.addEventListener('click', () => { state.selectedGroup = group; state.selectedThrow = null; renderUtilityGroups(); renderUtilityDetail(); draw(); }); list.append(button);
@@ -1131,11 +1274,11 @@
     if (groups.length > max) { const more = node('button', `显示更多（还有 ${groups.length - max} 类）`, 'cluster-more'); more.addEventListener('click', () => { list.dataset.limit = String(max + 80); renderUtilityGroups(); }); list.append(more); }
     if (!groups.length) list.append(node('div', '当前筛选没有已观测到落点的道具。切换投掷时段、下包阶段或扩大筛选范围。', 'utility-empty'));
     $('clear-utility').hidden = !state.selectedGroup;
-    if (!state.selectedGroup) { $('utility-detail').hidden = true; $('map-status').textContent = '滚轮缩放 · 拖拽平移 · 点击右侧落点定位'; }
+    if (!state.selectedGroup) $('utility-detail').hidden = true;
   }
   function renderUtilityDetail() {
     const group = state.selectedGroup, detail = $('utility-detail'); detail.replaceChildren(); detail.hidden = !group; if (!group) return;
-    detail.append(node('h3', `${utilityNames[group.type] || group.type} · ${group.count} 次观测`), node('p', `${core.utilityTimeLabel($('analysis-utility-time').value)} · ${core.utilityPlantPhaseLabel(state.utilityPlantPhase)} · 占当前道具筛选 ${group.percent.toFixed(1)}%。下列投法同时比较出手点和落点；位置接近不代表视角、速度与按键完全相同。`));
+    detail.append(node('h3', `${utilityNames[group.type] || group.type} · ${group.count} 次观测`), node('p', `${selectedUtilityTimeLabel()} · ${core.utilityPlantPhaseLabel(state.utilityPlantPhase)} · 占当前道具筛选 ${group.percent.toFixed(1)}%。下列投法同时比较出手点和落点；位置接近不代表视角、速度与按键完全相同。`));
     for (const [index, subgroup] of group.throws.entries()) {
       const block = node('div', null, 'throw-group'), button = node('button', `${subgroup.unknown ? '出手点未知（不归并投法）' : `投法 ${index + 1}`} · ${subgroup.count} 次`, state.selectedThrow?.id === subgroup.id ? 'selected' : '');
       button.addEventListener('click', () => { state.selectedThrow = subgroup; renderUtilityDetail(); draw(); }); block.append(button);
@@ -1198,7 +1341,20 @@
   $('analysis-side').addEventListener('change', requestAnalysis);
   $('analysis-floor').addEventListener('change', async () => { await loadMapImage(); requestAnalysis(); });
   $('analysis-utility-type').addEventListener('change', requestAnalysis);
-  $('analysis-utility-time').addEventListener('change', requestAnalysis);
+  $('analysis-utility-time').addEventListener('change', changeUtilityTime);
+  $('utility-time-custom').addEventListener('submit', event => {
+    event.preventDefault();
+    const start = $('utility-range-start').value, end = $('utility-range-end').value;
+    const range = start !== '' && end !== '' && core.normalizeUtilityRange({ start: Number(start), end: Number(end) });
+    if (!range) { $('utility-range-error').hidden = false; return; }
+    state.utilityRange = range;
+    changeUtilityTime();
+  });
+  for (const edge of ['start', 'end']) {
+    const slider = $('utility-range-' + edge + '-slider');
+    slider.addEventListener('input', () => moveUtilityRange(edge, false));
+    slider.addEventListener('change', () => moveUtilityRange(edge, true));
+  }
   for (const phase of Object.keys(plantPhaseNames)) $('utility-phase-' + phase).addEventListener('click', () => {
     if (state.utilityPlantPhase === phase) return;
     state.utilityPlantPhase = phase;
@@ -1263,7 +1419,7 @@
   $('players-invert').addEventListener('click', () => { state.selectedPlayers = new Set(availablePlayers().map(p => p.id).filter(id => state.selectedPlayers && !state.selectedPlayers.has(id))); renderPlayers(); requestAnalysis(); });
   $('player-search').addEventListener('input', () => { renderPlayers(); save(); });
   $('apply-aliases').addEventListener('click', () => { $('team-aliases').querySelectorAll('input').forEach(input => { const value = input.value.trim(); if (value) state.aliases[input.dataset.teamId] = value; else delete state.aliases[input.dataset.teamId]; }); state.selectedTeams = null; renderFilters(); requestAnalysis(); });
-  $('clear-selection').addEventListener('click', () => { state.selectedDemos = state.selectedTeams = state.selectedPlayers = null; state.movementTime = null; state.plantPhase = 'all'; state.plantTimes = { pre: null, post: null }; state.utilityPlantPhase = 'all'; renderPlantWindow(); renderMovementTime(); $('analysis-side').value = 'all'; $('analysis-floor').value = 'all'; $('analysis-utility-type').value = 'all'; $('analysis-utility-time').value = 'all'; $('player-search').value = ''; renderJobs(); renderFilters(); void loadMapImage(); requestAnalysis(); });
+  $('clear-selection').addEventListener('click', () => { state.selectedDemos = state.selectedTeams = state.selectedPlayers = null; state.movementTime = null; state.plantPhase = 'all'; state.plantTimes = { pre: null, post: null }; state.utilityPlantPhase = 'all'; state.utilityRange = null; renderPlantWindow(); renderMovementTime(); $('analysis-side').value = 'all'; $('analysis-floor').value = 'all'; $('analysis-utility-type').value = 'all'; $('analysis-utility-time').value = 'all'; renderUtilityRange(); $('player-search').value = ''; renderJobs(); renderFilters(); void loadMapImage(); requestAnalysis(); });
   $('clear-utility').addEventListener('click', () => { state.selectedGroup = state.selectedThrow = null; renderUtilityGroups(); draw(); });
   for (const name of metrics) $(`layer-${name}`).addEventListener('change', () => { rebuildHeat(); save(); });
   let radiusTimer;
@@ -1273,18 +1429,50 @@
   function fit() { state.zoom = 1; state.panX = state.panY = 0; draw(); }
   $('fit-map').addEventListener('click', fit);
   canvas.addEventListener('wheel', event => { event.preventDefault(); const before = dimensions(), rect = canvas.getBoundingClientRect(), px = event.clientX - rect.left, py = event.clientY - rect.top, old = state.zoom; state.zoom = Math.max(1, Math.min(5, state.zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12))); const ratio = state.zoom / old; state.panX = (state.panX + before.width / 2 - px) * ratio - before.width / 2 + px; state.panY = (state.panY + before.height / 2 - py) * ratio - before.height / 2 + py; draw(); }, { passive: false });
-  let dragging;
+  function resetBoxGesture() {
+    $('utility-box-rect').hidden = true;
+    if (dragging?.box) dragging = null;
+  }
+  function toggleBoxMode() {
+    resetBoxGesture();
+    boxMode = !boxMode;
+    $('utility-box-toggle').setAttribute('aria-pressed', String(boxMode));
+    $('utility-box-options').hidden = !boxMode;
+    canvas.classList.toggle('box-selecting', boxMode);
+    $('utility-box-status').textContent = boxMode ? '在地图上拖动，松开查看回放列表。' : '';
+    draw();
+  }
+  $('utility-box-toggle').addEventListener('click', toggleBoxMode);
+  for (const id of ['utility-box-scope', 'utility-box-points']) $(id).addEventListener('change', () => {
+    resetBoxGesture();
+    $('utility-box-status').textContent = '在地图上拖动，松开查看回放列表。';
+    draw();
+  });
+  function boxBounds(event) {
+    const rect = canvas.getBoundingClientRect();
+    const x = clientX => Math.max(0, Math.min(rect.width, clientX - rect.left));
+    const y = clientY => Math.max(0, Math.min(rect.height, clientY - rect.top));
+    const x1 = x(dragging.originX), x2 = x(event.clientX), y1 = y(dragging.originY), y2 = y(event.clientY);
+    return { left: Math.min(x1, x2), right: Math.max(x1, x2), top: Math.min(y1, y2), bottom: Math.max(y1, y2) };
+  }
   canvas.addEventListener('pointerdown', event => {
     if (event.isPrimary === false || (event.button != null && event.button !== 0)) return;
+    if (boxMode && !utilityDataReady) return;
     $('heat-tooltip').hidden = true;
-    dragging = { id: event.pointerId, x: event.clientX, y: event.clientY, originX: event.clientX, originY: event.clientY, moved: false };
+    dragging = { id: event.pointerId, x: event.clientX, y: event.clientY, originX: event.clientX, originY: event.clientY, moved: false, box: boxMode };
     canvas.setPointerCapture(event.pointerId);
   });
   canvas.addEventListener('pointermove', event => {
-    if (!dragging) { showHeatValue(event); return; }
+    if (!dragging) { if (!boxMode) showHeatValue(event); return; }
     if (dragging.id !== event.pointerId) return;
     if (!dragging.moved && Math.hypot(event.clientX - dragging.originX, event.clientY - dragging.originY) < 5) return;
     dragging.moved = true;
+    if (dragging.box) {
+      const bounds = boxBounds(event), overlay = $('utility-box-rect');
+      Object.assign(overlay.style, { left: bounds.left + 'px', top: bounds.top + 'px', width: (bounds.right - bounds.left) + 'px', height: (bounds.bottom - bounds.top) + 'px' });
+      overlay.hidden = false;
+      return;
+    }
     state.panX += event.clientX - dragging.x; state.panY += event.clientY - dragging.y; dragging.x = event.clientX; dragging.y = event.clientY; draw();
   });
   canvas.addEventListener('pointerleave', () => { $('heat-tooltip').hidden = true; canvas.style.cursor = ''; });
@@ -1318,11 +1506,28 @@
   canvas.addEventListener('pointerup', event => {
     if (!dragging || dragging.id !== event.pointerId) return;
     const clicked = !dragging.moved && Math.hypot(event.clientX - dragging.originX, event.clientY - dragging.originY) < 5;
+    if (dragging.box) {
+      const bounds = boxBounds(event);
+      resetBoxGesture();
+      if (clicked) return;
+      const hits = new Set();
+      for (const marker of utilityMarkers) {
+        if (marker.x >= bounds.left && marker.x <= bounds.right && marker.y >= bounds.top && marker.y <= bounds.bottom) hits.add(marker.item);
+      }
+      $('utility-box-status').textContent = hits.size ? `框内共 ${number(hits.size)} 次投掷` : '框内没有对应的投掷，请重新框选。';
+      if (hits.size) openMapThrows([...hits], { forceList: true });
+      return;
+    }
     dragging = null;
     if (clicked) openMapThrows(throwsAt(event));
   });
   for (const event of ['pointercancel', 'lostpointercapture']) canvas.addEventListener(event, e => {
-    if (dragging?.id === e.pointerId) dragging = null;
+    if (dragging?.id !== e.pointerId) return;
+    resetBoxGesture();
+    dragging = null;
+  });
+  canvas.addEventListener('keydown', event => {
+    if (boxMode && event.key === 'Escape') { event.preventDefault(); toggleBoxMode(); }
   });
   canvas.addEventListener('keydown', event => { if (['+', '=', '-', '0'].includes(event.key)) { event.preventDefault(); if (event.key === '0') fit(); else { state.zoom = Math.max(1, Math.min(5, state.zoom * (event.key === '-' ? 1 / 1.2 : 1.2))); draw(); } } });
   new ResizeObserver(draw).observe($('heatmap-stage'));
@@ -1331,7 +1536,7 @@
     const coverageLines = heatmapCoverageLines();
     const counts = state.result.roundCounts;
     coverageLines.unshift($('round-summary').textContent, '有记录的回合 · ' + metrics.map(key => `${metricNames[key]} ${roundCountLabel(counts[key])}`).join(' / '));
-    coverageLines.push(`道具投掷 · ${core.utilityPlantPhaseLabel(state.utilityPlantPhase)} · ${core.utilityTimeLabel($('analysis-utility-time').value)} · ${number(state.result.totals.utilities)} 次 · ${$('rounds-utilities').textContent}`);
+    coverageLines.push(`道具投掷 · ${core.utilityPlantPhaseLabel(state.utilityPlantPhase)} · ${selectedUtilityTimeLabel()} · ${number(state.result.totals.utilities)} 次 · ${$('rounds-utilities').textContent}`);
     const extraHeight = 202 + coverageLines.length * 17;
     output.width = canvas.width; output.height = Math.round((height + extraHeight) * ratio);
     const c = output.getContext('2d'); c.scale(ratio, ratio); c.fillStyle = '#141b23'; c.fillRect(0, 0, width, height + extraHeight); c.drawImage(canvas, 0, 80, width, height);

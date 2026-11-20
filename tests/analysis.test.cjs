@@ -127,6 +127,25 @@ test('utility time and plant phase count each other’s scope and share deduplic
   assert.deepEqual(invalid.utilities, all.utilities);
 });
 
+test('custom throw time uses half-open release intervals beyond 115s and composes with plant phase', () => {
+  const timings = [
+    ['before', 119.244, 'pre'], ['start', 119.25 - 1e-11, 'pre'],
+    ['post', 120.5, 'post'], ['end', 121.5 - 1e-11, 'pre'], ['untimed', null, 'pre'],
+  ];
+  const utilities = timings.map(([id, elapsed, phase], i) => timedUtility(id, elapsed, { plantPhase: phase, round: i + 1 }));
+  const d = demo('late', { utilityPlantPhaseVersion: 1, utilities });
+  const filter = { utilityTime: 'custom', utilityRange: { start: 119.25, end: 121.5 }, utilityPlantPhase: 'pre' };
+  const result = A.aggregate([d, d], filter);
+  assert.deepEqual(result.utilities.map(u => u.id), ['start']);
+  assert.equal(result.roundCounts.utilities, 1);
+  assert.deepEqual(result.utilityPlantPhaseCounts, { all: 2, pre: 1, post: 1, unknown: 0 });
+  assert.deepEqual(result.utilityTimeCounts, { ...emptyTimeCounts(), '50+': 3, unknown: 1 });
+  assert.equal(result.utilityTimeMax, utilities[3].roundElapsed);
+  assert.deepEqual(A.aggregate([d], { ...filter, utilityRange: { start: 121.5, end: 130 } }).utilities.map(u => u.id), ['end']);
+  for (const range of [null, { start: -1, end: 130 }, { start: 2, end: 2 }])
+    assert.equal(A.aggregate([d], { ...filter, utilityRange: range }).utilities.length, 0);
+});
+
 test('utility release buckets have inclusive upper boundaries and tolerate tiny floating-point drift', () => {
   for (const [elapsed, bucket] of [[0,'0-5'],[5,'0-5'],[20,'5-20'],[50,'20-50'],[50.01,'50+']]) assert.equal(A.utilityTimeBucket(timedUtility('u',elapsed)),bucket);
   const epsilon = 1e-7;
