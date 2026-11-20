@@ -174,6 +174,7 @@ type statisticsGun struct {
 	class string
 	value int
 	rank  int
+	kind  common.EquipmentType
 }
 
 var statisticsGuns = func() map[string]statisticsGun {
@@ -190,7 +191,7 @@ var statisticsGuns = func() map[string]statisticsGun {
 		{"sniper", 7, 4, []common.EquipmentType{common.EqSSG08, common.EqAWP, common.EqScar20, common.EqG3SG1}},
 	} {
 		for _, gun := range group.guns {
-			m[statisticsWeaponKey(gun.String())] = statisticsGun{group.class, group.value, group.rank}
+			m[statisticsWeaponKey(gun.String())] = statisticsGun{group.class, group.value, group.rank, gun}
 		}
 	}
 	for alias, target := range map[string]string{"glock": "Glock-18", "hkp2000": "P2000", "deagle": "Desert Eagle", "elite": "Dual Berettas", "cz75a": "CZ75-Auto", "usp_silencer": "USP-S", "usps": "USP-S", "m4a1_silencer": "M4A1", "m4a1s": "M4A1", "galilar": "Galil AR", "sg556": "SG 553", "ssg08": "SSG 08", "scout": "SSG 08", "bizon": "PP-Bizon", "ump45": "UMP-45", "mp5sd": "MP5-SD"} {
@@ -492,10 +493,14 @@ func statisticsHalfLabel(half int) string {
 	return "半场未知"
 }
 
-func statisticsDeathWeapon(d *DemoData, e Event, frames []*Frame) (string, string, float64, bool) {
+func observedVictimWeapon(e Event) bool {
 	age := e.T - e.VictimWeaponTime
 	observed := e.VictimWeaponSource == "death_event" && age <= .001001 || e.VictimWeaponSource == "previous_tick" && age <= .250001
-	if e.VictimWeapon != "" && observed && analysisFinite(e.VictimWeaponTime) && age >= 0 {
+	return e.VictimWeapon != "" && observed && analysisFinite(e.VictimWeaponTime) && age >= 0
+}
+
+func statisticsDeathWeapon(d *DemoData, e Event, frames []*Frame) (string, string, float64, bool) {
+	if observedVictimWeapon(e) {
 		return e.VictimWeapon, e.VictimWeaponSource, e.VictimWeaponTime, e.VictimWeaponSource == "previous_tick"
 	}
 	if d.StatisticsVersion > 0 || e.VictimWeapon != "" || e.VictimWeaponSource != "" {

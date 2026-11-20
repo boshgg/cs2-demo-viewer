@@ -96,9 +96,13 @@ const analysisTimingUnavailableWarning = "道具投掷时机暂无法从完整�
 // recordings. The app-wide upgrade gate still permits only one decode at a time.
 const analysisSummaryReadLimit int64 = 256 << 20
 
+type utilityUpgradeFields struct {
+	timing, plant, weapon bool
+}
+
 // Update only the requested utility fields, preserving existing measurements
 // and unknown fields from older or newer producers.
-func patchAnalysisUtilities(summary map[string]json.RawMessage, replay *analysisTimingReplay, timing, plant bool) error {
+func patchAnalysisUtilities(summary map[string]json.RawMessage, replay *analysisTimingReplay, fields utilityUpgradeFields, weapons *analysisRoundWeapons) error {
 	var utilities []map[string]json.RawMessage
 	if raw := summary["utilities"]; len(raw) > 0 {
 		if err := json.Unmarshal(raw, &utilities); err != nil {
@@ -111,7 +115,7 @@ func patchAnalysisUtilities(summary map[string]json.RawMessage, replay *analysis
 	var phases *analysisPlantPhases
 	if replay != nil {
 		rounds = analysisTimingRounds(replay.Rounds)
-		if plant {
+		if fields.plant {
 			phases = newAnalysisPlantPhases(replay.Rounds, replay.Events, analysisWindows(replay.Rounds))
 			// The heatmap upgrade already checked contradictions against frames.
 			// Reuse those exclusions even when upgrading a v4.3.1 summary alone.
@@ -139,6 +143,7 @@ func patchAnalysisUtilities(summary map[string]json.RawMessage, replay *analysis
 		var previous struct {
 			ID            string   `json:"id"`
 			Type          string   `json:"type"`
+			PlayerID      string   `json:"playerId"`
 			Round         int      `json:"round"`
 			Time          *float64 `json:"time"`
 			ThrowObserved bool     `json:"throwObserved"`
@@ -149,43 +154,68 @@ func patchAnalysisUtilities(summary map[string]json.RawMessage, replay *analysis
 		}
 		var elapsed *float64
 		source, phase := "unknown", "unknown"
+		bestWeapon := ""
 		if err := json.Unmarshal(body, &previous); err == nil {
-			if original, found := observed[previous.ID]; found && previous.ID != "" && !ambiguous[previous.ID] && previous.ThrowObserved && original.ThrowObserved && previous.Round == original.Round && previous.Type == original.Type && previous.Time != nil && *previous.Time == original.Start {
-				if timing {
+			original, found := observed[previous.ID]
+			when := original.Detonate
+			if original.ThrowObserved {
+				when = original.Start
+			}
+			if found && previous.ID != "" && !ambiguous[previous.ID] && previous.ThrowObserved == original.ThrowObserved && previous.Round == original.Round && previous.Type == original.Type && previous.Time != nil && *previous.Time == when {
+				if fields.timing && original.ThrowObserved {
 					elapsed, source = analysisUtilityTiming(original, rounds)
 				}
-				if phases != nil {
+				if phases != nil && original.ThrowObserved {
 					phase = phases.throwPhase(original)
+				}
+				if weapons != nil && original.OwnerID != "" {
+					if id, _ := analysisPlayerID(replay.ID, original.OwnerID); id == previous.PlayerID {
+						bestWeapon = weapons.name(original.Round, original.OwnerID)
+					}
 				}
 			}
 		}
-		if timing {
+		if fields.timing {
 			raw["roundElapsed"], _ = json.Marshal(elapsed)
 			raw["timeSource"], _ = json.Marshal(source)
 		}
-		if plant {
+		if fields.plant {
 			raw["plantPhase"], _ = json.Marshal(phase)
+		}
+		if fields.weapon {
+			if bestWeapon != "" {
+				raw["roundBestWeapon"], _ = json.Marshal(bestWeapon)
+			} else {
+				delete(raw, "roundBestWeapon")
+			}
 		}
 	}
 	if _, exists := summary["utilities"]; exists {
 		summary["utilities"], _ = json.Marshal(utilities)
 	}
 	if replay != nil {
-		if timing {
+		if fields.timing {
 			summary["utilityTimingVersion"], _ = json.Marshal(analysisUtilityTimingVersion)
 		}
-		if plant {
+		if fields.plant {
 			summary["utilityPlantPhaseVersion"], _ = json.Marshal(analysisUtilityPlantPhaseVersion)
+		}
+		if fields.weapon {
+			summary["utilityWeaponVersion"], _ = json.Marshal(analysisUtilityWeaponVersion)
 		}
 	} else {
 		var warnings []string
 		_ = json.Unmarshal(summary["warnings"], &warnings)
-		if timing && !slices.Contains(warnings, analysisTimingUnavailableWarning) {
+		if fields.timing && !slices.Contains(warnings, analysisTimingUnavailableWarning) {
 			warnings = append(warnings, analysisTimingUnavailableWarning)
 		}
 		const plantWarning = "无法从回放缓存核实道具出手时的下包阶段，已将这些投掷归入阶段未知。"
-		if plant && !slices.Contains(warnings, plantWarning) {
+		if fields.plant && !slices.Contains(warnings, plantWarning) {
 			warnings = append(warnings, plantWarning)
+		}
+		const weaponWarning = "无法从回放缓存核实投掷者当回合持有的枪械。"
+		if fields.weapon && !slices.Contains(warnings, weaponWarning) {
+			warnings = append(warnings, weaponWarning)
 		}
 		summary["warnings"], _ = json.Marshal(warnings)
 	}
@@ -254,7 +284,11 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 	_ = json.Unmarshal(summary["eventTimingVersion"], &eventVersion)
 	needUtility, needMovement := version < analysisUtilityTimingVersion, movementVersion < analysisMovementTimingVersion
 	needEvents := eventVersion < analysisEventTimingVersion
-	if !needUtility && !needMovement && !needEvents && !needPlant && !needUtilityPlant && !needPlantTime && !needRounds {
+	var weaponVersion int
+	_ = json.Unmarshal(summary["utilityWeaponVersion"], &weaponVersion)
+	fields := utilityUpgradeFields{timing: needUtility, plant: needUtilityPlant, weapon: weaponVersion < analysisUtilityWeaponVersion}
+	patchUtilities := fields != (utilityUpgradeFields{})
+	if !patchUtilities && !needMovement && !needEvents && !needPlant && !needPlantTime && !needRounds {
 		return nil, nil
 	}
 	var id string
@@ -263,13 +297,18 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 	previous, failed := a.analysisUpgradeFailures[snapshot.id]
 	skipRetry := failed && previous.Revision == snapshot.revision && previous.Replay == replayFingerprint && previous.Summary == before && time.Since(previous.At) < time.Minute
 	var replay analysisTimingReplay
+	var weapons *analysisRoundWeapons
 	var upgradeErr error
 	if id != snapshot.id {
 		upgradeErr = fmt.Errorf("analysis identity mismatch")
 	} else if skipRetry {
 		upgradeErr = fmt.Errorf("unchanged cache upgrade previously failed")
 	} else {
-		upgradeErr = streamAnalysisReplay(ctx, snapshot.replay, &replay, nil)
+		if fields.weapon {
+			weapons, upgradeErr = readAnalysisWeaponReplay(ctx, snapshot.replay, &replay)
+		} else {
+			upgradeErr = streamAnalysisReplay(ctx, snapshot.replay, &replay, nil)
+		}
 		if upgradeErr == nil && (replay.ID != snapshot.id || snapshot.mapName != "" && !strings.EqualFold(replay.Map, snapshot.mapName)) {
 			upgradeErr = fmt.Errorf("replay identity mismatch")
 		}
@@ -298,8 +337,8 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 		if upgradeErr == nil && (needPlant || needPlantTime || needRounds) {
 			upgradeErr = upgradeAnalysisPlantPhases(ctx, snapshot.replay, &replay, summary, needPlant, needPlantTime, needRounds)
 		}
-		if upgradeErr == nil && (needUtility || needUtilityPlant) {
-			upgradeErr = patchAnalysisUtilities(summary, &replay, needUtility, needUtilityPlant)
+		if upgradeErr == nil && patchUtilities {
+			upgradeErr = patchAnalysisUtilities(summary, &replay, fields, weapons)
 		}
 
 		if err := ctx.Err(); err != nil {
@@ -325,6 +364,9 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 		if needUtilityPlant {
 			delete(summary, "utilityPlantPhaseVersion")
 		}
+		if fields.weapon {
+			delete(summary, "utilityWeaponVersion")
+		}
 		if needMovement {
 			delete(summary, "movementTimingVersion")
 		}
@@ -341,8 +383,8 @@ func (a *app) ensureAnalysisUtilityTiming(request context.Context, j *job) ([]by
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if needUtility || needUtilityPlant {
-		if err := patchAnalysisUtilities(summary, nil, needUtility, needUtilityPlant); err != nil {
+	if patchUtilities {
+		if err := patchAnalysisUtilities(summary, nil, fields, nil); err != nil {
 			return nil, err
 		}
 	}

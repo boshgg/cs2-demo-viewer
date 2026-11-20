@@ -1137,7 +1137,7 @@
         const item = player.items[shown], link = throwReplayLink(item);
         const paths = library.sourcePaths(catalog.get(item.demoId));
         link.replaceChildren(node('strong', item.demoName || item.demoId),
-          node('span', `第 ${item.round} 回合 · ${item.owner || name} · ${utilityNames[item.type] || item.type} · ${utilityTimeDescription(item)}`),
+          node('span', `第 ${item.round} 回合 · ${item.owner || name} · ${utilityNames[item.type] || item.type} · ${utilityThrowDescription(item)}`),
           node('small', paths[0] || `比赛 ID ${item.demoId}`));
         const li = node('li'); li.append(link); list.append(li);
       }
@@ -1250,10 +1250,11 @@
       button.addEventListener('click', () => { $('analysis-utility-time').value = key; changeUtilityTime(); }); list.append(button);
     }
   }
-  function utilityTimeDescription(item) {
+  function utilityThrowDescription(item) {
     const bucket = item.timeBucket || core.utilityTimeBucket(item);
     const time = bucket === 'unknown' ? '投掷时段未知（缺少出手或冻结结束记录）' : `开打后 ${item.roundElapsed.toFixed(2)} 秒 · ${core.utilityTimeLabel(bucket)}`;
-    return `${time} · ${core.utilityPlantPhaseLabel(item.plantPhase)}`;
+    const gun = item.roundBestWeapon === 'Desert Eagle' ? '沙鹰（Desert Eagle）' : item.roundBestWeapon || '未记录';
+    return `${time} · ${core.utilityPlantPhaseLabel(item.plantPhase)} · 本回合最佳枪械 ${gun}`;
   }
   function renderUtilityGroups() {
     renderUtilityPhase();
@@ -1286,7 +1287,7 @@
       const details = document.createElement('details'); details.append(node('summary', `查看 ${subgroup.count} 次投掷与回放`)); const list = document.createElement('ul');
       for (const item of subgroup.items) {
         const li = document.createElement('li'); li.append(node('span', `${item.owner || item.playerId || '未知投掷者'} · ${item.demoName} · R${item.round} `));
-        li.append(node('small', utilityTimeDescription(item), 'throw-time'));
+        li.append(node('small', utilityThrowDescription(item), 'throw-time'));
         li.append(throwReplayLink(item));
         list.append(li);
       }

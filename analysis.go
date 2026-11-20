@@ -19,6 +19,7 @@ const analysisEventTimingVersion = 1
 const analysisPlantPhaseVersion = 1
 const analysisPlantTimeVersion = 1
 const analysisUtilityPlantPhaseVersion = 1
+const analysisUtilityWeaponVersion = 1
 
 // AnalysisCell holds a world-space grid centre followed by independent metrics:
 // x, y, z, observed living-player seconds, gunfight involvements, deaths, shots.
@@ -62,22 +63,23 @@ type AnalysisHeatmap struct {
 }
 
 type AnalysisUtility struct {
-	PlantPhase    string         `json:"plantPhase"`
-	ID            string         `json:"id"`
-	Type          string         `json:"type"`
-	PlayerID      string         `json:"playerId"`
-	Owner         string         `json:"owner"`
-	TeamID        string         `json:"teamId"`
-	Side          int            `json:"side"`
-	Round         int            `json:"round"`
-	Time          float64        `json:"time"`
-	RoundElapsed  *float64       `json:"roundElapsed"`
-	TimeSource    string         `json:"timeSource"`
-	Start         *Position      `json:"start"`
-	End           Position       `json:"end"`
-	Path          []UtilityPoint `json:"path"`
-	ThrowObserved bool           `json:"throwObserved"`
-	Detonated     bool           `json:"detonated"`
+	RoundBestWeapon string         `json:"roundBestWeapon,omitempty"`
+	PlantPhase      string         `json:"plantPhase"`
+	ID              string         `json:"id"`
+	Type            string         `json:"type"`
+	PlayerID        string         `json:"playerId"`
+	Owner           string         `json:"owner"`
+	TeamID          string         `json:"teamId"`
+	Side            int            `json:"side"`
+	Round           int            `json:"round"`
+	Time            float64        `json:"time"`
+	RoundElapsed    *float64       `json:"roundElapsed"`
+	TimeSource      string         `json:"timeSource"`
+	Start           *Position      `json:"start"`
+	End             Position       `json:"end"`
+	Path            []UtilityPoint `json:"path"`
+	ThrowObserved   bool           `json:"throwObserved"`
+	Detonated       bool           `json:"detonated"`
 }
 
 type AnalysisBounds struct {
@@ -88,6 +90,7 @@ type AnalysisBounds struct {
 }
 
 type AnalysisDemo struct {
+	UtilityWeaponVersion     int               `json:"utilityWeaponVersion"`
 	RoundEvidenceVersion     int               `json:"roundEvidenceVersion"`
 	RoundSets                [][]int           `json:"roundSets,omitempty"`
 	PlantTimeVersion         int               `json:"plantTimeVersion"`
@@ -198,6 +201,7 @@ func (s *analysisSeriesValue) heatmap() AnalysisHeatmap {
 // silently substituted with missed shots or speculative lines of sight.
 func BuildAnalysis(d *DemoData) *AnalysisDemo {
 	a := &AnalysisDemo{RoundEvidenceVersion: analysisRoundEvidenceVersion, RoundSets: [][]int{{}}, PlantTimeVersion: analysisPlantTimeVersion, UtilityPlantPhaseVersion: analysisUtilityPlantPhaseVersion, PlantPhaseVersion: analysisPlantPhaseVersion, UtilityTimingVersion: analysisUtilityTimingVersion, MovementTimingVersion: analysisMovementTimingVersion, EventTimingVersion: analysisEventTimingVersion, CellSize: analysisCellSize, Players: []AnalysisPlayer{}, Teams: []AnalysisTeam{}, Series: []AnalysisSeries{}, Utilities: []AnalysisUtility{}, Warnings: []string{}}
+	a.UtilityWeaponVersion = analysisUtilityWeaponVersion
 	if d == nil {
 		return a
 	}
@@ -244,7 +248,9 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 	// hint only when they are real clan names; CT/T labels never merge opponents.
 	rosters := map[int]map[int]*analysisRoster{}
 	plants := newAnalysisPlantPhases(d.Rounds, d.Events, windows)
+	weapons := newAnalysisRoundWeapons(d.Rounds)
 	for _, f := range d.Frames {
+		weapons.observeFrame(f)
 		plants.observeFrame(f, windows)
 		analysisAddRoster(rosters, windows, f, normalisePlayer)
 	}
@@ -312,12 +318,15 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 		},
 	}
 	for _, event := range d.Damage {
+		weapons.observeDamage(event)
 		observer.damage(event)
 	}
 	for _, event := range d.Events {
+		weapons.observeEvent(event)
 		observer.death(event)
 	}
 	for _, event := range d.Shots {
+		weapons.observeShot(event)
 		observer.shot(event)
 	}
 	timingRounds := analysisTimingRounds(d.Rounds)
@@ -334,6 +343,7 @@ func BuildAnalysis(d *DemoData) *AnalysisDemo {
 		out := AnalysisUtility{ID: u.ID, Type: u.Type, PlayerID: player, Owner: u.Owner, TeamID: teamAt(u.Round, u.Team, player).team.ID, Side: u.Team, Round: u.Round, Time: when, End: end, Path: []UtilityPoint{}, ThrowObserved: u.ThrowObserved, Detonated: true}
 		out.RoundElapsed, out.TimeSource = analysisUtilityTiming(u, timingRounds)
 		out.PlantPhase = plants.throwPhase(u)
+		out.RoundBestWeapon = weapons.name(u.Round, u.OwnerID)
 		if u.ThrowObserved && len(u.Path) > 0 {
 			first := u.Path[0]
 			pos := Position{first.X, first.Y, first.Z}

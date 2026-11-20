@@ -1401,6 +1401,29 @@ function utilityDemo(id = 'timed', map = 'de_mirage') {
 }
 function utilityCountButton(ui, key) { return ui.get('utility-time-counts').children.find(button => button.dataset.timeBucket === key); }
 
+test('each throw in the map replay list and landing details shows the thrower’s best recorded gun for that round', async () => {
+  const demo = utilityDemo();
+  const weapons = ['AK-47', 'M4A4', 'M4A1-S', 'AWP', 'Desert Eagle', null];
+  demo.utilities = weapons.map((weapon, i) => ({
+    ...demo.utilities[i], round: i + 1, ...(weapon && { roundBestWeapon: weapon }),
+  }));
+  const ui = await page([demo]);
+  await ui.get('utility-groups').children[0].click();
+  const landing = { clientX: 111 + 300*578/1024, clientY: 11 + (1024-650)*578/1024, pointerId: 1, button: 0 };
+  await ui.main.dispatch('pointerdown', landing); await ui.main.dispatch('pointerup', landing);
+  assert.equal(ui.get('throw-replays').open, true);
+  for (const section of ['utility-detail', 'throw-replay-list']) {
+    const rows = ui.get(section).querySelectorAll('li');
+    assert.equal(rows.length, weapons.length);
+    for (const row of rows) {
+      const replay = new URL(row.querySelectorAll('a')[0].href, 'http://localhost');
+      const round = Number(replay.searchParams.get('round'));
+      assert.ok(round >= 1 && round <= weapons.length);
+      const name = ['AK-47', 'M4A4', 'M4A1-S', 'AWP', '沙鹰（Desert Eagle）', '未记录'][round - 1];
+      assert.ok(textWithin(row).includes('本回合最佳枪械 ' + name));
+    }
+  }
+});
 test('map utility points open one throw or list nearby throws across demos after zoom, without activating on pan', async () => {
   const first = utilityDemo('first'), second = utilityDemo('second');
   first.utilities = first.utilities.slice(0, 1);
