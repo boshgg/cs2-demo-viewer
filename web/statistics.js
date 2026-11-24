@@ -101,6 +101,7 @@
   function create(options = {}) {
     const doc = options.document || document, fetcher = options.fetch || fetch, win = options.window || window;
     const impactCore = options.impact || win.ReplayImpact, impactUI = options.impactUI || win.ReplayImpactUI;
+    const economy = options.economy || win.ReplayTeamEconomy, economyUI = options.economyUI || win.TeamEconomyUI;
     const $ = id => doc.getElementById(id), make = (tag, text, className) => { const element = doc.createElement(tag); if (text != null) element.textContent = String(text); if (className) element.className = className; return element; };
     const impactPanel = impactUI?.create({ document: doc, root: $('stats-impact'), prefix: 'stats', replayLink: (_id, time) => replayLink(time) });
     const schedule = options.setTimeout || setTimeout, unschedule = options.clearTimeout || clearTimeout;
@@ -311,6 +312,11 @@
         cell(row, halfLabel(round.half)); cell(row, round.ct?.label || '未知'); cell(row, round.t?.label || '未知'); cell(row, signed(summary.score), valueClass(summary.score)); mismatchCell(row, summary.pistolMismatchKills); cell(row, `${summary.scoredKills} / ${summary.excludedKills}`); linkCell(row, round.start); rounds.append(row);
       }
       if (!rounds.childElementCount) emptyRow(rounds, 8);
+      if (economy && economyUI) {
+        const { side, half, round, team } = selected;
+        const rows = economy.summarize([data], { side, half, round, teamKeys: team ? [team] : null });
+        economyUI.render(doc, $('stats-team-economy-result'), rows, { side });
+      }
       renderEconomy(); renderKills();
       if (impactPanel && impactCore) impactPanel.render(impactCore.aggregate([state.data], selected));
     }

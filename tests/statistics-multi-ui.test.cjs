@@ -5,6 +5,8 @@ const path = require('node:path');
 const uiModule = require('../web/statistics-multi.js');
 const statistics = require('../web/statistics.js');
 const core = require('../web/statistics-multi-core.js');
+const teamEconomy = require('../web/team-economy.js');
+const teamEconomyUI = require('../web/team-economy-ui.js');
 const library = require('../web/replay-library.js');
 const impact = require('../web/impact-core.js');
 const impactUI = require('../web/impact-ui.js');
@@ -56,7 +58,7 @@ async function page(options = {}) {
     if (demo) return ok(demo[2] === 'status' ? { id: demo[1], status: 'ready', revision: data.get(demo[1])?.revision } : data.get(demo[1]));
     throw new Error(`Unexpected ${url}`);
   };
-  const app = uiModule.create({ impact, impactUI, document: { getElementById: get, createElement: tag => new Element(tag) }, window: { location, history: { state: null, replaceState(_state, _title, url) { location.href = String(url); } } }, core, statistics, library, fetch: fetcher, storage: { getItem: key => stored.get(key), setItem: (key, value) => stored.set(key, value) }, sleep: async () => {}, setTimeout: callback => { const id = ++timerId; timers.set(id, callback); return id; }, clearTimeout: id => timers.delete(id) });
+  const app = uiModule.create({ impact, impactUI, teamEconomy, teamEconomyUI, document: { getElementById: get, createElement: tag => new Element(tag) }, window: { location, history: { state: null, replaceState(_state, _title, url) { location.href = String(url); } } }, core, statistics, library, fetch: fetcher, storage: { getItem: key => stored.get(key), setItem: (key, value) => stored.set(key, value) }, sleep: async () => {}, setTimeout: callback => { const id = ++timerId; timers.set(id, callback); return id; }, clearTimeout: id => timers.delete(id) });
   await app.ready; await settle();
   return { get, requests, parsed, timers, href: () => location.href, saved: () => JSON.parse(stored.get(uiModule.storageKey) || '{}'),
     async click(id) { await get(id).click(); await settle(); }, async change(id, value) { get(id).value = value; await get(id).dispatch('change'); await settle(); },
@@ -406,4 +408,49 @@ test('multi malformed expansion preferences remain usable without changing saved
     assert.equal(multiFolder(ui, 'root').body.hidden, false); await multiFolder(ui, 'root').button.click(); assert.deepEqual(ui.saved().folderExpansion, { defaultExpanded: true, overrides: { root: false } });
     assert.deepEqual(ui.saved().demoIds, ['a']); assert.equal(reportRequests(ui).length, 0); assert.equal(ui.parsed.length, 0);
   }
+});
+
+
+test('team buys follow selected reports, named teams, map and side even with no common players', async () => {
+  const armament = (name, side, type) => ({
+    teamKey: 'name:' + name.toLowerCase(), name, side, type, complete: true, source: 'freeze_end',
+    players: Array.from({ length: 5 }, (_, n) => ({ id: name + n, weapon: 'AK-47', weaponClass: 'rifle' })),
+  });
+  const datasets = [fixture('a'), fixture('b', 'de_ancient')];
+  for (const [i, data] of datasets.entries()) {
+    data.players = [data.players[2]]; data.kills = [];
+    const opponent = i ? 'NAVI' : 'Falcons';
+    data.rounds = [
+      { number: 1, half: 1, pistol: true, ct: armament('FURIA', 3, 'pistol'), t: armament(opponent, 2, 'pistol') },
+      { number: 2, half: 1, pistol: false, ct: armament('FURIA', 3, i ? 'full_sniper' : 'eco'), t: armament(opponent, 2, 'force') },
+      { number: 14, half: 2, pistol: false, ct: armament(opponent, 3, 'full'), t: armament('FURIA', 2, 'force') },
+    ];
+  }
+  const ui = await page({ datasets });
+  const teamBodies = view => view.get('multi-team-economy-result').querySelectorAll('tbody');
+  const teamBody = (view, name) => teamBodies(view).find(body => body.children[0].children[0].textContent === name);
+  const tally = (view, name, side, metric) => teamBody(view, name).children.find(row => row.dataset.side === side).children.find(cell => cell.dataset.metric === metric).textContent;
+  const choose = async (view, team, selected) => {
+    const label = view.get('multi-team-economy-teams').querySelectorAll('label').find(el => content(el).includes(team));
+    const check = label.querySelectorAll('input')[0]; check.checked = selected; await check.dispatch('change');
+  };
+  assert.ok(ui.get('multi-team-economy').hidden);
+  await ui.checkDemo('a'); await ui.click('multi-analyze');
+  assert.equal(ui.get('multi-team-economy').hidden, false);
+  assert.equal(tally(ui,'FURIA','ct','eco'), '1'); assert.equal(tally(ui,'FURIA','total','rounds'), '2');
+  await ui.checkDemo('b'); await ui.click('multi-analyze');
+  assert.match(ui.get('multi-empty').textContent, /没有出现在至少 2 场/);
+  assert.equal(teamBodies(ui).length, 3); assert.equal(tally(ui,'FURIA','total','pistols'), '2');
+  assert.equal(tally(ui,'FURIA','ct','full'), '1'); assert.equal(tally(ui,'FURIA','t','force'), '2');
+  await ui.click('multi-economy-teams-none'); assert.equal(teamBodies(ui).length, 0);
+  await choose(ui,'Falcons',true); await choose(ui,'FURIA',true); assert.equal(teamBodies(ui).length, 2);
+  await ui.change('multi-map','de_ancient'); assert.equal(teamBodies(ui).length, 1);
+  await ui.change('multi-side','2'); await ui.click('multi-players-none');
+  assert.equal(teamBody(ui,'FURIA').children.length, 1); assert.equal(tally(ui,'FURIA','t','force'), '1');
+  await ui.change('multi-map','all'); assert.ok(teamBody(ui,'Falcons')); assert.equal(tally(ui,'FURIA','t','force'), '2');
+  const restored = await page({ datasets, saved: ui.saved() });
+  assert.equal(teamBodies(restored).length, 2); assert.ok(teamBody(restored,'Falcons')); assert.equal(teamBody(restored,'NAVI'), undefined);
+  await ui.click('multi-economy-teams-all'); assert.equal(teamBodies(ui).length, 3);
+  await ui.checkDemo('b',false); assert.equal(teamBodies(ui).length, 2); assert.equal(teamBody(ui,'NAVI'), undefined);
+  assert.equal(reportRequests(ui).length, 2);
 });

@@ -14,6 +14,7 @@
     const doc = options.document || document, win = options.window || window, fetcher = options.fetch || fetch;
     const core = options.core || win.ReplayMultiStatistics, statistics = options.statistics || win.ReplayStatistics, library = options.library || win.ReplayLibrary;
     const impactCore = options.impact || win.ReplayImpact, impactUI = options.impactUI || win.ReplayImpactUI;
+    const teamEconomy = options.teamEconomy || win.ReplayTeamEconomy, teamEconomyUI = options.teamEconomyUI || win.TeamEconomyUI;
     const storage = options.storage || win.localStorage, schedule = options.setTimeout || setTimeout, unschedule = options.clearTimeout || clearTimeout;
     const $ = id => doc.getElementById(id), node = (tag, text, className) => { const el = doc.createElement(tag); if (text != null) el.textContent = String(text); if (className) el.className = className; return el; };
     const impactPanel = impactUI?.create({ document: doc, root: $('multi-impact'), prefix: 'multi', replayLink: replay, multi: true });
@@ -21,6 +22,10 @@
     const folderExpansion = library.createFolderExpansion(saved.folderExpansion), folderBodies = new Map();
     const strings = values => Array.isArray(values) ? values.filter(value => typeof value === 'string') : [];
     const state = { catalog: [], reports: new Map(), revisions: new Map(), demos: new Set(strings(saved.demoIds)), players: Array.isArray(saved.playerIds) ? new Set(strings(saved.playerIds)) : null, previous: new Set(strings(saved.analyzedIds)), map: typeof saved.map === 'string' ? saved.map : 'all', side: ['all', '2', '3'].includes(saved.side) ? saved.side : 'all', active: false, initialized: false, loading: false, scanning: false, refreshing: false, run: 0, controller: null, timer: null, catalogRequest: 0, catalogGeneration: 0, reportEpoch: 0, page: 0, failures: [], result: null };
+    // Keep hidden teams' choices across map changes. New teams follow the last all/none action.
+    let teamsDefaultOn = saved.teamsDefaultOn !== false;
+    const teamOverrides = new Set(strings(saved.teamOverrides));
+    const teamIsSelected = key => teamOverrides.has(key) ? !teamsDefaultOn : teamsDefaultOn;
     state.libraryView = saved.libraryView === 'folders' ? 'folders' : 'all'; state.libraryFolder = typeof saved.libraryFolder === 'string' ? saved.libraryFolder : 'all';
     $('multi-library-search').value = typeof saved.libraryQuery === 'string' ? saved.libraryQuery : '';
     $('multi-player-search').value = typeof saved.playerQuery === 'string' ? saved.playerQuery : ''; $('multi-side').value = state.side;
@@ -39,7 +44,7 @@
       }
       state.page = 0; save(); renderLibrary(); recompute();
     }
-    function save() { try { storage?.setItem(storageKey, JSON.stringify({ demoIds: [...state.demos], playerIds: state.players && [...state.players], map: state.map, side: state.side, libraryView: state.libraryView, libraryFolder: state.libraryFolder, folderExpansion: folderExpansion.snapshot(), libraryQuery: $('multi-library-search').value, playerQuery: $('multi-player-search').value, analyzedIds: [...new Set([...state.previous, ...state.reports.keys()])] })); } catch { /* Storage can be disabled. */ } }
+    function save() { try { storage?.setItem(storageKey, JSON.stringify({ demoIds: [...state.demos], teamsDefaultOn, teamOverrides: [...teamOverrides], playerIds: state.players && [...state.players], map: state.map, side: state.side, libraryView: state.libraryView, libraryFolder: state.libraryFolder, folderExpansion: folderExpansion.snapshot(), libraryQuery: $('multi-library-search').value, playerQuery: $('multi-player-search').value, analyzedIds: [...new Set([...state.previous, ...state.reports.keys()])] })); } catch { /* Storage can be disabled. */ } }
     function updateFolderExpansion() {
       for (const [key, { button, body, arrow }] of folderBodies) { const expanded = folderExpansion.isExpanded(key); body.hidden = !expanded; button.setAttribute('aria-expanded', String(expanded)); arrow.textContent = expanded ? '▾' : '▸'; }
     }
@@ -173,12 +178,35 @@
       for (const item of result.matchups || []) { const row = node('tr'); td(row, weaponLabels[item.killerValue] || '未知'); td(row, weaponLabels[item.victimValue] || '未知'); td(row, format(item.kills)); td(row, signed(item.score)); matchups.append(row); } if (!matchups.childElementCount) emptyRow(matchups, 4);
       renderKills(result);
     }
+    function renderTeamEconomy(reports) {
+      const panel = $('multi-team-economy');
+      panel.hidden = reports.length === 0;
+      const teams = teamEconomy.summarize(reports);
+      const sideRows = state.side === 'all' ? teams : teamEconomy.summarize(reports, { side: state.side });
+      const renderTable = () => teamEconomyUI.render(doc, $('multi-team-economy-result'), sideRows.filter(team => teamIsSelected(team.key)), { side: state.side });
+      const list = $('multi-team-economy-teams');
+      list.replaceChildren();
+      for (const team of teams) {
+        const label = node('label', null, 'multi-player-item'), check = node('input');
+        check.type = 'checkbox'; check.dataset.teamKey = team.key; check.checked = teamIsSelected(team.key);
+        check.addEventListener('change', () => {
+          if (check.checked === teamsDefaultOn) teamOverrides.delete(team.key);
+          else teamOverrides.add(team.key);
+          save(); renderTable();
+        });
+        label.append(check, node('span', team.name));
+        list.append(label);
+      }
+      $('multi-economy-teams-all').disabled = $('multi-economy-teams-none').disabled = !teams.length;
+      renderTable();
+    }
     function recompute() {
       const filter = { demoIds: [...state.demos], map: state.map, playerIds: state.players && [...state.players], side: state.side };
       const catalogIds = new Set(state.catalog.map(demo => demo.id));
       const result = core.aggregate([...state.reports.values()].filter(demo => catalogIds.has(demo.id)), filter); state.result = result; renderPlayers(result);
       if (impactPanel && impactCore) impactPanel.render(impactCore.aggregate([...state.reports.values()].filter(demo => catalogIds.has(demo.id)), { ...filter, playerIds: result.selectedPlayerIds || [] }));
       const scoped = scopedCatalog(), loaded = scoped.filter(demo => state.reports.has(demo.id) && (state.map === 'all' || mapOf(demo) === state.map)), pending = scoped.filter(demo => !state.reports.has(demo.id));
+      renderTeamEconomy(loaded.map(demo => state.reports.get(demo.id)));
       $('multi-scope').textContent = `已勾选 ${state.demos.size} 场 · 当前地图范围 ${scoped.length} 场 · 已载入 ${loaded.length} 场 · ${state.map === 'all' ? '全部地图' : state.map}`;
       $('multi-incomplete').hidden = !pending.length; $('multi-incomplete').textContent = `还有 ${pending.length} 场所选录像尚未载入；请点击“分析所选比赛”。下方仅使用已载入部分，重复玩家资格与统计可能随剩余比赛变化。`;
       const messages = { 'no-demos': '先从左侧勾选比赛，再点击“分析所选比赛”。', 'need-more-demos': '当前范围只载入 1 场比赛，需要至少 2 场才能寻找共同玩家。', 'no-repeat-players': '这些比赛中没有出现在至少 2 场的稳定玩家 ID。可以扩大地图或比赛范围；同名玩家不会自动合并。', 'no-players-selected': '请选择至少一名共同玩家。' };
@@ -264,6 +292,9 @@
     for (const [id, action] of [['multi-demos-all', 'all'], ['multi-demos-none', 'none'], ['multi-demos-invert', 'invert']]) $(id).addEventListener('click', () => { if (state.loading) return; for (const demo of visibleCatalog().filter(demo => available(demo) || state.demos.has(demo.id))) { if (action === 'all' || action === 'invert' && !state.demos.has(demo.id)) state.demos.add(demo.id); else state.demos.delete(demo.id); } state.page = 0; save(); renderLibrary(); recompute(); });
     $('multi-player-search').addEventListener('input', () => { save(); if (state.result) renderPlayers(state.result); });
     for (const [id, action] of [['multi-players-all', 'all'], ['multi-players-none', 'none'], ['multi-players-invert', 'invert']]) $(id).addEventListener('click', () => { const ids = (state.result?.candidates || []).map(player => player.id); if (!state.players) state.players = new Set(ids); for (const id of ids) { if (action === 'all' || action === 'invert' && !state.players.has(id)) state.players.add(id); else state.players.delete(id); } state.page = 0; save(); recompute(); });
+    for (const [id, selected] of [['multi-economy-teams-all', true], ['multi-economy-teams-none', false]]) $(id).addEventListener('click', () => {
+      teamsDefaultOn = selected; teamOverrides.clear(); save(); recompute();
+    });
     $('multi-side').addEventListener('change', () => { state.side = $('multi-side').value; state.page = 0; save(); recompute(); });
     $('multi-kills-prev').addEventListener('click', () => { state.page = Math.max(0, state.page - 1); if (state.result) renderKills(state.result); }); $('multi-kills-next').addEventListener('click', () => { state.page++; if (state.result) renderKills(state.result); });
     const ready = mode(new URL(win.location.href).searchParams.get('mode') === 'multi', false);

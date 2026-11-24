@@ -6,6 +6,8 @@ const statistics = require('../web/statistics.js');
 const library = require('../web/replay-library.js');
 const impact = require('../web/impact-core.js');
 const impactUI = require('../web/impact-ui.js');
+const economyCore = require('../web/team-economy.js');
+const economyUI = require('../web/team-economy-ui.js');
 const html = fs.readFileSync(path.join(__dirname, '../web/statistics.html'), 'utf8');
 const impactNode = (root, suffix) => { const walk = node => [node, ...node.children.flatMap(walk)]; const node = walk(root).find(item => item.id === `stats-impact-${suffix}`); assert.ok(node, suffix); return node; };
 const settle = async () => { for (let i = 0; i < 10; i++) await new Promise(setImmediate); };
@@ -78,7 +80,7 @@ async function page(options = {}) {
     }
     throw new Error(`Unexpected API ${url}`);
   };
-  const app = statistics.create({ impact, impactUI, document: { getElementById: get, createElement: tag => new Element(tag) }, window: { ReplayLibrary: library, location, history: { state: null, replaceState: (_state, _title, url) => { location.href = String(url); } } }, storage: { getItem: key => preferences.get(key), setItem: (key, value) => preferences.set(key, value) }, fetch: fetcher, sleep: async () => {}, setTimeout: callback => { const id = ++nextTimer; timers.set(id, callback); return id; }, clearTimeout: id => timers.delete(id) });
+  const app = statistics.create({ impact, impactUI, economy: economyCore, economyUI, document: { getElementById: get, createElement: tag => new Element(tag) }, window: { ReplayLibrary: library, location, history: { state: null, replaceState: (_state, _title, url) => { location.href = String(url); } } }, storage: { getItem: key => preferences.get(key), setItem: (key, value) => preferences.set(key, value) }, fetch: fetcher, sleep: async () => {}, setTimeout: callback => { const id = ++nextTimer; timers.set(id, callback); return id; }, clearTimeout: id => timers.delete(id) });
   await app.ready; await settle();
   return { get, requests, payloads, reparses, timers, href: () => location.href, folderSaved: () => JSON.parse(preferences.get('cs2-statistics-library-view-v1') || '{}'),
     async choose(id) { const button = get('stats-library-list').querySelectorAll('button').find(button => button.dataset.demoId === id); assert.ok(button); await button.click(); await settle(); },
@@ -188,6 +190,46 @@ test('team, player, side, half and round filters form an intersection while deat
   await ui.change('stats-round', '1'); assert.equal(ui.get('stats-total-score').textContent, '0'); assert.match(content(ui.get('stats-kill-rows')), /没有记录/);
   await ui.get('stats-reset').click(); await settle(); assert.equal(ui.get('stats-total-score').textContent, '+4');
   assert.equal(ui.get('stats-player-rows').children.length, 4);
+});
+
+test('single team buy summary follows the team, side and round and keeps five players when a player is selected', async () => {
+  const demo = fixture();
+  const [first, second] = demo.rounds;
+  for (const round of demo.rounds) {
+    for (const side of ['ct', 't']) {
+      const buy = round[side];
+      buy.identitySource = 'clan';
+      buy.players = Array.from({ length: 5 }, (_, i) => ({ ...buy.players[i % 2], id: i < 2 ? buy.players[i].id : buy.teamKey + i }));
+    }
+  }
+  demo.rounds = [{ ...first, number: 1, pistol: true }, { ...first, number: 2, pistol: false },
+    { ...second, number: 14, pistol: false, t: { ...second.t, type: 'force', matchedTypes: ['force'] } }];
+  const ui = await page({ datasets: [demo] });
+  await ui.choose('match');
+  const panel = ui.get('stats-team-economy-result');
+  assert.equal(panel.querySelectorAll('tbody').length, 2);
+  await ui.change('stats-team', 'alpha');
+  const values = side => {
+    const group = panel.querySelectorAll('tbody');
+    assert.equal(group.length, 1);
+    const row = group[0].querySelectorAll('tr').find(tr => tr.dataset.side === side);
+    assert.ok(row, side);
+    return Object.fromEntries(row.children.filter(cell => cell.dataset.metric).map(cell => [cell.dataset.metric, Number(cell.textContent)]));
+  };
+  const summary = values('total');
+  assert.equal(summary.rounds, 2);
+  assert.equal(summary.pistols, 1);
+  assert.equal(summary.full, 1);
+  assert.equal(summary.force, 1);
+  assert.equal(summary.longGun, 2);
+  await ui.change('stats-player', 'p1');
+  assert.deepEqual(values('total'), summary);
+  await ui.change('stats-side', '3');
+  assert.equal(values('ct').rounds, 1);
+  assert.equal(values('ct').full, 1);
+  await ui.change('stats-round', '1');
+  assert.equal(values('ct').rounds, 0);
+  assert.equal(values('ct').pistols, 1);
 });
 
 test('round details display half inference and link back to the selected recording at its start', async () => {
